@@ -4,7 +4,8 @@
 //   b4bcoop-addoninfo.txt entry (title, author, version, category, description; `key=value` or L4D's
 //   `addontitle "..."`). Any pak in our format loads; without addoninfo its file name is its title.
 //   addonlist.txt in the folder: `<file>.pak=1|0`, load order top to bottom; later add-ons win conflicts. New add-ons
-//   are appended switched on (sorted by name) and the file is rewritten. /addons on|off edits it (applies on restart).
+//   are appended switched on (sorted by name) and the file is rewritten. /addons on|off edits it: off applies at the
+//   next start, on loads the add-on at once when that is safe (addons_load_now), else at the next start.
 //   Everything is read in DllMain (addons_scan, before the engine starts) so that paks.c installs no pak hook when
 //   there is nothing to mount; the paks are mounted from the FPakPlatformFile::Initialize hook (addons_mount).
 //   Our pak format only (modkit/b4bpak.py; pakfmt.c): v9 or v8, magic 0x18772, plain index; the index SHA1 is verified (a damaged
@@ -118,12 +119,15 @@ static void parse_outfit(Addon *a, char *v) {
 // Outfits of the mounted add-ons; a name in two add-ons: the later one (load order) wins, like files.
 int addons_outfits(AddonOutfit *out, int max) {
     int k = 0;
+    uint32_t won[MAX_OUTFITS];   // read order of the add-on whose entry out[j] is (live mounts append out of order)
     for (int i = 0; i < nOF; i++) {
         const Outfit *o = &OF[i];
         if (o->addon->mounted <= 0) continue;
         int j = 0;
         while (j < k && strcmp(out[j].name, o->name)) j++;
-        if (j == k) { if (k >= max) continue; k++; }
+        if (j == k) { if (k >= max || k >= MAX_OUTFITS) continue; k++; }
+        else if (won[j] > o->addon->order) continue;
+        won[j] = o->addon->order;
         out[j].name = o->name; out[j].hero = o->hero; out[j].mesh3p = o->mesh3p; out[j].meshfp = o->meshfp;
         out[j].title = o->title; out[j].addon = o->addon->title;
     }
@@ -159,12 +163,15 @@ static void parse_weapon(Addon *a, char *v) {
 // Weapon looks of the mounted add-ons; a name in two add-ons: the later one wins.
 int addons_weapons(AddonWeapon *out, int max) {
     int k = 0;
+    uint32_t won[MAX_WEAPONS];
     for (int i = 0; i < nWP; i++) {
         const Weapon *w = &WP[i];
         if (w->addon->mounted <= 0) continue;
         int j = 0;
         while (j < k && strcmp(out[j].name, w->name)) j++;
-        if (j == k) { if (k >= max) continue; k++; }
+        if (j == k) { if (k >= max || k >= MAX_WEAPONS) continue; k++; }
+        else if (won[j] > w->addon->order) continue;
+        won[j] = w->addon->order;
         out[j].name = w->name; out[j].code = w->code; out[j].fp = w->fp; out[j].sm3p = w->sm3p; out[j].skm3p = w->skm3p;
         out[j].title = w->title; out[j].addon = w->addon->title;
     }
@@ -406,6 +413,35 @@ static void find_conflicts(void) {
     free(files); free(stems);
 }
 
+// ---- which add-on serves each file now: the paths of the mounted add-ons by hash (a live mount checks its files
+// against it: overriding another add-on is fine for a new add-on, which is last in the load order, but not for an
+// update, which is mounted above add-ons that come after it in addonlist.txt) ----
+typedef struct { uint64_t h; int owner; } Own;
+static Own *own_t;
+static size_t own_cap, own_n;
+static uint64_t key_hash(const char *k) { uint64_t h = fnv(k, strlen(k)); return h ? h : 1; }
+static Own *own_slot(Own *t, size_t cap, uint64_t h) {
+    for (size_t i = h & (cap - 1);; i = (i + 1) & (cap - 1)) if (!t[i].h || t[i].h == h) return &t[i];
+}
+static void own_put(uint64_t h, int owner) {
+    if ((own_n + 1) * 2 > own_cap) {
+        size_t nc = own_cap ? own_cap * 2 : 4096;
+        Own *nt = calloc(nc, sizeof *nt);
+        if (!nt) return;
+        for (size_t i = 0; i < own_cap; i++) if (own_t[i].h) *own_slot(nt, nc, own_t[i].h) = own_t[i];
+        free(own_t); own_t = nt; own_cap = nc;
+    }
+    Own *s = own_slot(own_t, own_cap, h);
+    if (!s->h) { s->h = h; s->owner = owner; own_n++; return; }
+    if (A[s->owner].order <= A[owner].order) s->owner = owner;   // the higher read order serves the file
+}
+static void own_add(int ai) { for (int j = 0; j < A[ai].nfiles; j++) own_put(key_hash(A[ai].keys[j]), ai); }
+static int own_get(const char *k) {   // index of the add-on serving this path now, -1 = none (the game's, or nothing)
+    if (!own_cap) return -1;
+    Own *s = own_slot(own_t, own_cap, key_hash(k));
+    return s->h ? s->owner : -1;
+}
+
 // ---- addonlist.txt ----
 static void list_path(wchar_t *out, size_t n) { swprintf(out, n, L"%ls\\" LIST_NAME, dirw); }
 static int list_stat(FILETIME *mt) {
@@ -629,6 +665,7 @@ int addons_scan(void) {
             LOG("addons: conflict: %s and %s each replace part of the same asset (%d file(s), e.g. %s): the game may crash; switch one off",
                 A[c->loser].name, A[c->winner].name, c->mixed, c->mixed_example);
     }
+    for (int i = 0; i < nA; i++) if (A[i].valid && A[i].on_at_start) own_add(i);
     for (int i = 0; i < nA; i++) free_keys(&A[i]);
     LOG("addons: %s: %d add-on(s), %d to mount, %d conflict(s)", dir8, pos, n_mount, nC);
     return n_mount;
@@ -714,11 +751,163 @@ int addons_set_on(const char *name8, int on) {
     LOG("addons: %s %s (Browse tab) -> %s", on ? "on" : "off", a->name, ok ? "saved" : "write FAILED");
     return ok;
 }
+// ---- loading an add-on now (Browse tab Add/Update, Add-ons tab "on"; game thread) ----
+// What can be mounted while the game runs, without a restart (docs/investigations/shop.md §1):
+//  - files at new paths: nothing loaded can refer to a path that didn't exist (added outfits, weapon looks);
+//  - files that replace existing ones (the game's, another add-on's, or the add-on's own older version) only when
+//    every replaced file belongs to a package (.uasset/.uexp/.ubulk/.uptnl), the add-on brings every file of that
+//    package that exists now (no package half from the old file, half from the new), none of those packages is in
+//    memory (a loaded package keeps reading its bulk data by path: textures stream mips long after the .uasset was
+//    read), and the engine's loader is idle (no package can start loading between the check and the mount: new
+//    loads are only queued from the game thread, which is here). Other files (shader libraries, .locres, sounds
+//    banks, .ini) are read at start: restart.
+//  - only cosmetic add-ons, and as a client only what the host's add-on policy allows (addons_mp.c).
+// An update is mounted from .shop\<id>.pak.new above every add-on, so it must not touch files of any other add-on.
+#define MAX_REPL 512
+static uint32_t next_order(void) {   // above every add-on mounted or placed so far
+    uint32_t m = ADDON_ORDER - 1;
+    for (int i = 0; i < nA; i++) if (A[i].order > m) m = A[i].order;
+    return m + 1;
+}
+static int has_key(const Addon *a, const char *k) {
+    for (int i = 0; i < a->nfiles; i++) if (!strcmp(a->keys[i], k)) return 1;
+    return 0;
+}
+// "gobi/content/x/y" -> "/game/x/y"; "engine/content/x" -> "/engine/x"; "<root>/plugins/.../<p>/content/x" -> "/<p>/x"
+static int package_of(const char *stem, char *out, size_t n) {
+    const char *c = strstr(stem, "/content/");
+    if (!c) return 0;
+    size_t rl = (size_t)(c - stem);
+    const char *rest = c + 9;
+    if (rl == 4 && !strncmp(stem, "gobi", 4)) snprintf(out, n, "/game/%s", rest);
+    else if (rl == 6 && !strncmp(stem, "engine", 6)) snprintf(out, n, "/engine/%s", rest);
+    else if (strstr(stem, "/plugins/") && strstr(stem, "/plugins/") < c) {
+        const char *p = c;
+        while (p > stem && p[-1] != '/') p--;
+        snprintf(out, n, "/%.*s/%s", (int)(c - p), p, rest);
+    } else return 0;
+    return 1;
+}
+// NULL = it can be mounted now; else why not (ex: an example file or package). *retry: only the engine's loader is
+// busy right now (ask again in a moment). upd = the add-on whose older version `n` updates (-1: none).
+static const char *live_check(Addon *n, int upd, char *ex, size_t en, int *retry) {
+    static char pol[160], why[200];
+    *retry = 0; ex[0] = 0;
+    if (n->cls.gameplay) return "it changes gameplay";
+    if (unavailable[0]) return unavailable;
+    if (!paks_runtime_ready()) return "the game's pak layer was not found";
+    if (!addons_session_allows(n->cls.gameplay, pol, sizeof pol)) return pol;
+    if (!n->keys) return "its file list is not available";
+    static char pk[MAX_REPL][260];
+    const char *pv[MAX_REPL];
+    int np = 0, nrep = 0;
+    for (int i = 0; i < n->nfiles; i++) {
+        const char *k = n->keys[i];
+        if (!paks_file_exists(k)) continue;   // a new path
+        nrep++;
+        // another add-on's file: an update (mounted above all add-ons) must not touch any; a new add-on may override
+        // those below it in the load order (as after a restart), not one above it (that one keeps parts of the asset)
+        int ow = own_get(k);
+        if (ow >= 0 && ow != upd && (upd >= 0 || A[ow].order > n->order)) {
+            snprintf(ex, en, "%s", k);
+            snprintf(why, sizeof why, "the add-on \"%.80s\" changes the same files", A[ow].title);
+            return why;
+        }
+        size_t sl = stem_len(k);
+        if (sl == strlen(k)) { snprintf(ex, en, "%s", k); return "it replaces a file the game reads only when it starts"; }
+        char stem[260], pkg[260];
+        snprintf(stem, sizeof stem, "%.*s", (int)sl, k);
+        if (!package_of(stem, pkg, sizeof pkg)) { snprintf(ex, en, "%s", k); return "it replaces a file the game reads only when it starts"; }
+        int seen = 0;
+        for (int j = 0; j < np && !seen; j++) seen = !strcmp(pk[j], pkg);
+        if (seen) continue;
+        static const char *EXT[] = {".uasset", ".uexp", ".ubulk", ".uptnl", ".umap"};
+        for (int e = 0; e < 5; e++) {   // the whole package must come from this add-on
+            char f[280];
+            snprintf(f, sizeof f, "%s%s", stem, EXT[e]);
+            if (!has_key(n, f) && paks_file_exists(f)) { snprintf(ex, en, "%s", f); return "it replaces only part of an asset (the rest would stay the old one)"; }
+        }
+        if (np == MAX_REPL) return "it replaces too many existing assets to check them now";
+        snprintf(pk[np], sizeof pk[0], "%s", pkg);
+        pv[np] = pk[np];
+        np++;
+    }
+    if (!nrep) return NULL;
+    int busy = paks_async_loading();
+    if (busy < 0) return "it replaces existing assets and the game's loader can't be checked";
+    if (busy) { *retry = 1; return "the game is loading something right now"; }
+    int k = paks_package_loaded(pv, np);
+    if (k >= 0) { snprintf(ex, en, "%s", pv[k]); return "it replaces an asset the game is using now"; }
+    LOG("addons: %s replaces %d existing file(s) (%d asset(s)), none of them loaded now", n->name, nrep, np);
+    return NULL;
+}
+// outfit=/weapon= entries of an add-on: dropped (before its file is read again) or handed to another Addon (update)
+static void names_drop(const Addon *a) {
+    int k = 0;
+    for (int i = 0; i < nOF; i++) if (OF[i].addon != a) OF[k++] = OF[i];
+    nOF = k; k = 0;
+    for (int i = 0; i < nWP; i++) if (WP[i].addon != a) WP[k++] = WP[i];
+    nWP = k;
+}
+static void names_move(const Addon *from, Addon *to) {
+    for (int i = 0; i < nOF; i++) if (OF[i].addon == from) OF[i].addon = to;
+    for (int i = 0; i < nWP; i++) if (WP[i].addon == from) WP[i].addon = to;
+}
+static void reread(Addon *a) {   // its file list again (freed after the start's checks)
+    wchar_t full[MAX_PATH * 2];
+    swprintf(full, MAX_PATH * 2, L"%ls\\%ls", dirw, a->file);
+    free_keys(a);
+    names_drop(a);
+    a->nfiles = 0;
+    a->why[0] = 0;
+    if (!is_ascii(a->name) || !is_ascii(dir8)) { snprintf(a->why, sizeof a->why, "rename it (and its folder path) to plain letters, digits, - and _"); a->valid = 0; }
+    else a->valid = load_pak(a, full);
+}
+static void after_live_mount(int ai) {
+    own_add(ai);
+    free_keys(&A[ai]);
+    models_outfits_refresh();
+    wlooks_refresh();
+}
+static void later_msg(char *msg, size_t mn, const char *later, const char *ex) {
+    snprintf(msg, mn, "applies after a restart (%s%s%s)", later, ex[0] ? ": " : "", ex);
+}
+
+// An add-on in the folder, switched on, not loaded: load it now if that is safe. last: no "ask again" (3) answer.
+// 2 = loaded now, 1 = at the next start (msg says why), 3 = the game's loader is busy: ask again in a moment.
+int addons_load_now(const char *name8, int last, char *msg, size_t mn) {
+    Addon *a = by_name(name8);
+    if (!a || !a->present) { snprintf(msg, mn, "not in the add-ons folder"); return 1; }
+    if (a->mounted > 0) { snprintf(msg, mn, "already loaded"); return 2; }
+    if (!a->on) { snprintf(msg, mn, "it is switched off"); return 1; }
+    if (!a->keys) reread(a);
+    if (!a->valid) { free_keys(a); snprintf(msg, mn, "it can't load: %s", a->why); return 1; }
+    if (!a->order) a->order = next_order();
+    char ex[280];
+    int retry;
+    const char *later = live_check(a, -1, ex, sizeof ex, &retry);
+    if (later && retry && !last) return 3;
+    if (later) {
+        free_keys(a);
+        LOG("addons: %s: next start (%s%s%s)", a->name, later, ex[0] ? ", e.g. " : "", ex);
+        later_msg(msg, mn, later, ex);
+        return 1;
+    }
+    wchar_t full[MAX_PATH * 2];
+    swprintf(full, MAX_PATH * 2, L"%ls\\%ls", dirw, a->file);
+    char err[120];
+    a->mounted = paks_mount_runtime(full, a->order, err, sizeof err) ? 1 : -1;
+    LOG("addons: %s -> %s (read order %u, at runtime)%s%s", a->name, a->mounted > 0 ? "mounted" : "MOUNT FAILED", a->order,
+        a->mounted > 0 ? "" : ": ", a->mounted > 0 ? "" : err);
+    if (a->mounted < 0) { free_keys(a); a->mounted = 0; snprintf(msg, mn, "could not be loaded now (%s): applies after a restart", err); return 1; }
+    a->on_at_start = 1;   // loaded now: nothing pending
+    after_live_mount((int)(a - A));
+    snprintf(msg, mn, "ready now");
+    return 2;
+}
+
 // A pak just put into the folder (the Browse tab's Add): read it like at start, append it to addonlist.txt (switched
-// on, last = wins), and mount it right away when that is safe: cosmetic and every file new to the game (nothing
-// loaded can use a path that didn't exist, so no half-replaced asset is possible). Anything that replaces a file of
-// the game or of another mounted add-on, or is gameplay-affecting, waits for the next start.
-// 2 = mounted now, 1 = added (next start), 0 = not added; msg says why/what.
+// on, last = wins) and load it now when that is safe (addons_load_now). Return values as addons_load_now, 0 = not added.
 int addons_add_runtime(const char *name8, char *msg, size_t mn) {
     if (!enabled_cfg) { snprintf(msg, mn, "add-ons are off (addons=0)"); return 0; }
     Addon *a = by_name(name8);
@@ -729,16 +918,13 @@ int addons_add_runtime(const char *name8, char *msg, size_t mn) {
         int pos = 0;
         for (int i = 0; i < nA; i++) pos += A[i].present;
         a->pos0 = pos;
-        a->order = ADDON_ORDER + (uint32_t)pos - 1;
+        a->order = next_order();
     } else if (a->mounted > 0) { snprintf(msg, mn, "already loaded"); return 2; }
     a->on = 1;
     a->on_at_start = 0;
-    wchar_t full[MAX_PATH * 2];
-    swprintf(full, MAX_PATH * 2, L"%ls\\%ls", dirw, a->file);
     if (!a->valid && !a->nfiles) {   // not read at start (new file): read it now
         memset(&a->cls, 0, sizeof a->cls);
-        if (!is_ascii(a->name) || !is_ascii(dir8)) snprintf(a->why, sizeof a->why, "rename it (and its folder path) to plain letters, digits, - and _");
-        else a->valid = load_pak(a, full);
+        reread(a);
         if (!a->title[0]) snprintf(a->title, sizeof a->title, "%.*s", (int)(strlen(a->name) - 4), a->name);
     }
     EnterCriticalSection(&cs);
@@ -746,31 +932,63 @@ int addons_add_runtime(const char *name8, char *msg, size_t mn) {
     LeaveCriticalSection(&cs);
     LOG("addons: added %s \"%s\" (Browse tab), %d file(s), id %s%s%s%s", a->name, a->title, a->nfiles, a->hash[0] ? a->hash : "-",
         a->valid ? "" : ", NOT LOADABLE: ", a->why, wrote ? "" : "; addonlist.txt write FAILED");
-    if (!a->valid) { free_keys(a); snprintf(msg, mn, "it can't load: %s", a->why); return 1; }
-    const char *later = NULL;
-    char ex[200] = "";
-    if (a->cls.gameplay) later = "it changes gameplay";
-    else if (unavailable[0]) later = unavailable;
-    else if (!paks_runtime_ready()) later = "the game's pak layer was not found";
-    else if (admin_is_client()) later = "you are in someone else's session (their add-on rules were checked when you joined)";
-    else if (!a->keys) later = "it was read at game start";
-    else
-        for (int i = 0; i < a->nfiles && !later; i++)
-            if (paks_file_exists(a->keys[i])) { later = "it replaces files of the game or of another add-on"; snprintf(ex, sizeof ex, "%s", a->keys[i]); }
-    free_keys(a);
-    if (later) {
-        LOG("addons: %s: next start (%s%s%s)", a->name, later, ex[0] ? ", e.g. " : "", ex);
-        snprintf(msg, mn, "applies after a restart (%s)", later);
+    return addons_load_now(name8, 0, msg, mn);
+}
+
+// The Browse tab's Update: the newer file `newpath` (.shop\<id>.pak.new, swapped in by the next start) of a loaded
+// add-on. Mounted now, above the old one, when it is cosmetic, touches no other add-on's files and none of the
+// assets it replaces (its older version's included) is in memory; the add-on's outfits / weapon looks then come
+// from the new file. Return values as addons_load_now.
+static Addon UPD;   // the new version while it is checked
+int addons_update_runtime(const char *name8, const wchar_t *newpath, int last, char *msg, size_t mn) {
+    Addon *a = by_name(name8);
+    if (!enabled_cfg || !a || !a->present || a->mounted <= 0 || !a->on) {
+        snprintf(msg, mn, "%s", !a || a->mounted <= 0 ? "its current version isn't loaded either" : "it is switched off");
         return 1;
     }
+    memset(&UPD, 0, sizeof UPD);
+    snprintf(UPD.name, sizeof UPD.name, "%s", a->name);
+    wcsncpy(UPD.file, a->file, MAX_PATH - 1);
+    UPD.present = 1;
+    UPD.valid = load_pak(&UPD, newpath);
+    char ex[280] = "";
+    int retry = 0;
+    const char *later = UPD.valid ? live_check(&UPD, (int)(a - A), ex, sizeof ex, &retry) : UPD.why;
+    if (later) {
+        names_drop(&UPD);
+        free_keys(&UPD);
+        if (retry && !last) return 3;
+        LOG("addons: update of %s: next start (%s%s%s)", a->name, later, ex[0] ? ", e.g. " : "", ex);
+        snprintf(msg, mn, "%s%s%s", later, ex[0] ? ": " : "", ex);
+        return 1;
+    }
+    uint32_t order = next_order();
     char err[120];
-    a->mounted = paks_mount_runtime(full, a->order, err, sizeof err) ? 1 : -1;
-    LOG("addons: %s -> %s (read order %u, at runtime)%s%s", a->name, a->mounted > 0 ? "mounted" : "MOUNT FAILED", a->order,
-        a->mounted > 0 ? "" : ": ", a->mounted > 0 ? "" : err);
-    if (a->mounted < 0) { snprintf(msg, mn, "could not be loaded now (%s): applies after a restart", err); a->mounted = 0; return 1; }
-    a->on_at_start = 1;   // loaded now: nothing pending
-    models_outfits_refresh();
-    wlooks_refresh();
+    int ok = paks_mount_runtime(newpath, order, err, sizeof err);
+    LOG("addons: update of %s (%ls) -> %s (read order %u, at runtime; the file is swapped in at the next start)%s%s", a->name,
+        newpath, ok ? "mounted" : "MOUNT FAILED", order, ok ? "" : ": ", ok ? "" : err);
+    if (!ok) {
+        names_drop(&UPD);
+        free_keys(&UPD);
+        snprintf(msg, mn, "the game refused to load it now (%s)", err);
+        return 1;
+    }
+    names_drop(a);   // the old version's outfit=/weapon= lines give way to the new ones
+    names_move(&UPD, a);
+    snprintf(a->title, sizeof a->title, "%s", UPD.title[0] ? UPD.title : a->title);
+    snprintf(a->author, sizeof a->author, "%s", UPD.author);
+    snprintf(a->version, sizeof a->version, "%s", UPD.version);
+    snprintf(a->category, sizeof a->category, "%s", UPD.category);
+    snprintf(a->desc, sizeof a->desc, "%s", UPD.desc);
+    snprintf(a->claim, sizeof a->claim, "%s", UPD.claim);
+    snprintf(a->hash, sizeof a->hash, "%s", UPD.hash);
+    a->cls = UPD.cls;
+    a->pakver = UPD.pakver;
+    a->order = order;
+    free_keys(a);
+    a->keys = UPD.keys; a->nfiles = UPD.nfiles;
+    UPD.keys = NULL;
+    after_live_mount((int)(a - A));
     snprintf(msg, mn, "ready now");
     return 2;
 }
@@ -918,6 +1136,14 @@ void addons_slash(const char *verb, char *rest, Out *o) {
         if (!ok) a->on = was;
         LeaveCriticalSection(&cs);
         LOG("addons: /addons %s %s -> %s", sub, a->name, ok ? "saved" : "write FAILED");
+        if (ok && on && a->present && a->valid && a->mounted <= 0) {   // not loaded yet: now, when that is safe
+            char m[320];
+            int r = addons_load_now(a->name, 0, m, sizeof m);
+            if (r == 2) out_printf(o, "%s: on, ready now\n", a->title);
+            else if (r == 3) out_printf(o, "%s: on; the game is loading something right now: /addons on %d again in a moment loads it now, else the next start does\n", a->title, num);
+            else out_printf(o, "%s: on, %s\n", a->title, m);
+            return;
+        }
         if (!ok) out_printf(o, "could not write %s\\" LIST_NAME "\n", dir8);
         else if (on == a->on_at_start) out_printf(o, "%s: %s (as now)\n", a->title, on ? "on" : "off");
         else out_printf(o, "%s: %s, applies after restart\n", a->title, on ? "on" : "off");
@@ -1006,7 +1232,7 @@ static void addons_panel(void) {
                 int on = a->on;
                 snprintf(lab, sizeof lab, "##on:%s", a->name);
                 if (ov_checkbox(lab, &on)) ov_run("addons %s %s", on ? "on" : "off", a->name);
-                ov_tooltip("Writes addonlist.txt; applies after a restart (/addons on|off).");
+                ov_tooltip("Writes addonlist.txt (/addons on|off). On: loaded right away when that is safe, else at the next start. Off: at the next start.");
                 ov_table_next(); ov_text("%d", k);
                 ov_table_next();
                 snprintf(lab, sizeof lab, "%s%s%s##sel:%s", a->title, a->version[0] ? " " : "", a->version, a->name);

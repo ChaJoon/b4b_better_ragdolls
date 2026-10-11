@@ -181,6 +181,11 @@ join side in `cmds.c` `cmd_join`, `presence.c` `handle_connect`, `chat.c` `chat_
   requires the same gameplay add-ons as theirs. Turn off: X. Turn on or install: Y (id; not installed here). Then
   restart the game.`; auto-join and the session join target stop (only a restart changes add-ons). Pass -> the login
   carries `?b4bcoopaddonsok=<policy>` ("checked against your policy": nothing the host wouldn't learn from the join).
+- **Add-ons loaded during a session** (Browse tab, `/addons on`; 2026-10-11, shop.md §1a): as a client the joiner
+  applies the same check to the add-on it is about to load (`addons_session_allows`, the policy this join learned):
+  cosmetic ones load at once under `any`/`cosmetic`/`match` (so its claim for the mission-start reconnect stays true),
+  under `none` they wait for the next start ("this host allows no add-ons"). Nothing is sent; gameplay add-ons never
+  load during a session.
 - **Policy unknown** (IP join, `host_ip=1` or loopback tests; a `steam:` target whose presence Steam doesn't have): no
   option. A new host with a policy other than `any` refuses that login with `Host allows cosmetic add-ons only. Your
   b4bcoop checks your add-ons and joins again. [addons:cosmetic]` (log `addons: login X: asked to check its add-ons
@@ -275,6 +280,8 @@ Code: `addons_panel()` in `addons.c` (registered from `addons_init`, order 70), 
   pointers); `ord[]` is the order of `addonlist.txt`. Up/Down (`addons_move`) swap with the next present add-on in
   `ord[]` and rewrite the file (reverted if the write fails). `/addons` lists and numbers in `ord[]` order, so `<#>`
   matches what the list shows. A `<#>` that is a file name starting with digits is no longer read as a number.
+- Switching on (checkbox, `/addons on`) an add-on that isn't loaded loads it at once when the live rules allow it
+  (shop.md §1a: `addons_load_now`, `<title>: on, ready now`), else `on, applies after a restart (<why>)`.
 - Pending changes: `on != on_at_start` or a present add-on's place != `pos0` -> banner "addonlist.txt differs from what
   is loaded now (N switched, load order changed): restart the game to apply"; rows say `off after restart`,
   `moves after restart`. Hand edits of `addonlist.txt` while the game runs are re-read (mtime, checked once a second

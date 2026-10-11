@@ -311,11 +311,13 @@ static UObject *npc_mesh(Npc *n) { return mesh_on(n->path, "3P_Biped_SK", &n->me
 #define OUTFIT_PREFIX "b4bcoop.outfit."
 typedef struct {
     char name[33], hero[24], title[64], addon[96], p3[200], pf[200];
-    UObject *m3, *mf; int32_t i3, i_f; int bad, fpbad, rowfail, inpak;
+    UObject *m3, *mf; int32_t i3, i_f; int bad, fpbad, rowfail, inpak, stale;   // stale: rows still name old meshes
 } Outf;
 #define MAX_OUTFS 512
 static Outf outfs[MAX_OUTFS];
 static int n_outfs = -1;
+static int outfs_gen = 1;          // bumped whenever outfs[] changes (screen_rows redoes the tables)
+static float rows_acc;
 static void build_outfits(void) {
     AddonOutfit a[MAX_OUTFS];
     n_outfs = addons_outfits(a, MAX_OUTFS);
@@ -329,23 +331,41 @@ static void build_outfits(void) {
         LOG("models: add-on outfit %s (\"%s\", %s): %s%s%s", o->name, o->title, o->addon, o->p3, o->pf[0] ? " + " : "", o->pf);
     }
 }
-// An add-on mounted at runtime (Browse tab): append its outfits; entries already built stay as they are.
+// An add-on loaded at runtime (Browse tab, Add-ons tab): append its outfits; one whose add-on was updated (another
+// file now, addons_update_runtime) gets the new meshes and title (its old meshes were not loaded: addons.c checked).
+// The customization screen's rows follow at the next frame.
 void models_outfits_refresh(void) {
     if (n_outfs < 0) return;   // not built yet: the first use builds the whole list
     AddonOutfit a[MAX_OUTFS];
     int n = addons_outfits(a, MAX_OUTFS);
-    for (int i = 0; i < n && n_outfs < MAX_OUTFS; i++) {
+    for (int i = 0; i < n; i++) {
         int k = 0;
         while (k < n_outfs && _stricmp(outfs[k].name, a[i].name)) k++;
-        if (k < n_outfs) continue;
+        if (k < n_outfs) {
+            Outf *o = &outfs[k];
+            int paths = strcmp(o->p3, a[i].mesh3p) || strcmp(o->pf, a[i].meshfp);
+            if (!paths && !strcmp(o->title, a[i].title) && !strcmp(o->addon, a[i].addon)) continue;
+            snprintf(o->hero, sizeof o->hero, "%s", a[i].hero);
+            snprintf(o->title, sizeof o->title, "%s", a[i].title); snprintf(o->addon, sizeof o->addon, "%s", a[i].addon);
+            if (paths) {
+                snprintf(o->p3, sizeof o->p3, "%s", a[i].mesh3p); snprintf(o->pf, sizeof o->pf, "%s", a[i].meshfp);
+                o->m3 = o->mf = NULL; o->bad = o->rowfail = o->inpak = 0; o->fpbad = !o->pf[0]; o->stale = 1;
+            }
+            outfs_gen++;
+            LOG("models: add-on outfit %s (\"%s\", %s) updated%s%s", o->name, o->title, o->addon, paths ? ": " : "", paths ? o->p3 : "");
+            continue;
+        }
+        if (n_outfs == MAX_OUTFS) break;
         Outf *o = &outfs[n_outfs++];
         memset(o, 0, sizeof *o);
         snprintf(o->name, sizeof o->name, "%s", a[i].name); snprintf(o->hero, sizeof o->hero, "%s", a[i].hero);
         snprintf(o->title, sizeof o->title, "%s", a[i].title); snprintf(o->addon, sizeof o->addon, "%s", a[i].addon);
         snprintf(o->p3, sizeof o->p3, "%s", a[i].mesh3p); snprintf(o->pf, sizeof o->pf, "%s", a[i].meshfp);
         o->fpbad = !o->pf[0];
+        outfs_gen++;
         LOG("models: add-on outfit %s (\"%s\", %s, added now): %s%s%s", o->name, o->title, o->addon, o->p3, o->pf[0] ? " + " : "", o->pf);
     }
+    rows_acc = 0;   // its customization-screen rows now, not within 5 s
 }
 static Outf *outfit_by_name(const char *name) {
     if (n_outfs < 0) build_outfits();
@@ -919,8 +939,7 @@ static uint8_t *outfit_row_new(const uint8_t *tmpl, const Outf *o) {
 }
 static int screen_off;            // ini outfits_screen=0: no rows (then /model only)
 static struct { int32_t ti; int n; } done[32];   // per survivor: table checked with that many outfits
-static int n_rows_added, n_rows_failed;
-static float rows_acc;
+static int n_rows_added, n_rows_failed, n_rows_updated;
 static int mesh_in_paks(const char *objpath) {   // "/Game/A/B.B" -> Gobi/Content/A/B.uasset is in a mounted pak
     char key[260];
     const char *dot = strrchr(objpath, '.');
@@ -945,8 +964,8 @@ static void screen_rows(float dt) {
         UObject *t = heroes[h].custtable;
         uint8_t *tmpl = heroes[h].defskin.table ? dt_row(heroes[h].defskin.table, heroes[h].defskin.row) : NULL;
         if (!t || !is_live(t) || !tmpl || !is_rowstruct(t, "CharacterCustomizationRow")) continue;
-        if (done[h].ti == U_INDEX(t) && done[h].n == n_outfs) continue;
-        done[h].ti = U_INDEX(t); done[h].n = n_outfs;
+        if (done[h].ti == U_INDEX(t) && done[h].n == outfs_gen) continue;
+        done[h].ti = U_INDEX(t); done[h].n = outfs_gen;
         for (int i = 0; i < n_outfs; i++) {
             Outf *o = &outfs[i];
             if (o->bad || o->rowfail) continue;
@@ -958,7 +977,17 @@ static void screen_rows(float dt) {
             char rn[64];
             snprintf(rn, sizeof rn, OUTFIT_PREFIX "%s", o->name);
             FName key = make_name(rn);
-            if (dt_row(t, key)) continue;
+            uint8_t *er = dt_row(t, key);
+            if (er) {
+                if (o->stale) {   // its add-on was updated with other mesh paths (none of the old ones loaded)
+                    char *fp = CC_FP(er), *tp = CC_3P(er);
+                    *(int32_t *)(fp + 0xa0) = *(int32_t *)(tp + 0xa0) = -1;
+                    HMD_MESHPATH(tp) = make_name(o->p3);
+                    HMD_MESHPATH(fp) = o->pf[0] ? make_name(o->pf) : HMD_MESHPATH(CC_FP(tmpl));
+                    n_rows_updated++;
+                }
+                continue;
+            }
             uint8_t *r = outfit_row_new(tmpl, o);
             int idx = r ? rowmap_add(DT_ROWMAP(t), key, r) : -6;
             char tn[64];
@@ -971,6 +1000,9 @@ static void screen_rows(float dt) {
         }
     }
     if (n_rows_added > added) LOG("models: %d customization-screen row(s) added (add-on outfits for every survivor, %d in all)", n_rows_added - added, n_rows_added);
+    if (n_rows_updated) LOG("models: %d customization-screen row(s) now name an updated add-on's meshes", n_rows_updated);
+    n_rows_updated = 0;
+    for (int i = 0; i < n_outfs; i++) outfs[i].stale = 0;
 }
 
 // b4bcoop-outfits.txt: the add-on outfit each survivor wears, picked on the customization screen

@@ -12,11 +12,12 @@ changes), `native/src/updcore.c` (catalog JSON + signature, streaming SHA-256; u
   they add/replace, search and a filter. **Add** downloads the pak, checks size + SHA-256 against the signed list,
   puts it into `b4bcoop-addons\<id>.pak`, appends it to `addonlist.txt` and mounts it **right away** when that is
   safe. **Remove** switches it off and deletes it at the next start. **Update** (newer file in the list) is swapped in
-  at the next start. `shop=0` hides the tab.
-- **Live mounting works** (§1) for add-ons whose files are all new to the game and that are cosmetic: added outfits
-  and weapon looks are usable with `/model` right after Add, in Fort Hope and in a running mission. Anything that
-  replaces an existing file (a retail asset or another add-on's) waits for a restart; the agent decides from the
-  files, not from the catalog. Mounted paks are never unmounted.
+  at the next start, and loaded at once when nothing of the old version is in memory. `shop=0` hides the tab.
+- **Live mounting works** (§1, §1a) for cosmetic add-ons: added outfits and weapon looks are usable right after Add
+  (Models tab, `/model`, the customization screen), in Fort Hope, in a running mission and as a client in someone's
+  session (within the host's `addons_policy`); replacements too when the game has nothing of what they replace in
+  memory; updates when nothing of the old version is loaded. The agent decides from the files, not from the catalog.
+  Mounted paks are never unmounted.
 - Thumbnails are reasonable (§3): stb_image (PNG + JPEG only), bytes decoded only after their SHA-256 matched the
   signed list, scaled to 96 px, uploaded through ImGui 1.92's own texture list (no D3D12 code of ours).
 - Privacy: nothing about installed add-ons is sent to anyone. GitHub sees the catalog fetch and each download (like
@@ -30,7 +31,7 @@ three signature exemptions. Results on the dev build (`tools/shop-test.py`, §5)
 |---|---|
 | New-path add-on (outfit, `Gobi/Content/b4bcoop/outfits/casual_joe/...`) in Fort Hope | `addons: casual_joe.pak -> mounted (read order 1000, at runtime)`; `/model casual_joe` right after: `models: hero slot N wears outfit casual_joe`, the outfit on the hero in 3P (meshes load through the new pak) |
 | New-path weapon look (`ak47`) during a mission (match running) | mounted at runtime, `/model ak47` → `your AR02 now looks like AK-47`; game alive and playing 20 s later |
-| Replacement (`holly_green`: `UI/Textures/.../Image_Holly_PartyPortrait`) | not mounted live (by rule): `applies after a restart (it replaces files of the game or of another add-on)`; mounted at the next start |
+| Replacement (`holly_green`: `UI/Textures/.../Image_Holly_PartyPortrait`) | (2026-09-27 rule, superseded by §1a) not mounted live: `applies after a restart (it replaces files of the game or of another add-on)`; mounted at the next start |
 | Removal | never live: switched off + deleted by the next start, before anything is mounted |
 
 Why replacements wait for a restart (not "after a map change"): a package already loaded keeps its objects; a later
@@ -56,6 +57,30 @@ thread). Dev builds do the same (`mountpak` installs them on first use), so the 
 
 Outfits and weapon looks of a runtime add-on: `models_outfits_refresh()` / `wlooks_refresh()` append the new
 entries (existing ones, with their loaded meshes, stay as they are).
+
+## 1a. Without a restart in more cases (2026-10-11, "use their models right after they download")
+Before, `addons_add_runtime` mounted live only a cosmetic pak with only new paths, and never as a client; Updates
+always waited. Dan's own host logs showed every one of ~110 shop outfits "Added and ready now" (all 127 shop add-ons
+are cosmetic and add-only, no two share a path: `addon.py check` over his folder), so the restart cases a player
+actually met were: being a **client** in someone's Fort Hope or mission, **Updates** (republished paks, e.g. the fixed
+L4D survivors), and the rare **replacement**. Now (`addons.c` "loading an add-on now"):
+
+| Case | Now | Why it is safe / why not |
+|---|---|---|
+| Client in someone's session | live, within the host's policy as this join learned it (`addons_session_allows`: its rich presence or login refusal; nothing known = the host didn't ask, i.e. `any`, or an older host over IP that doesn't check). Cosmetic passes `any`, `cosmetic`, `match`; `none` keeps it for the next start ("this host allows no add-ons") | the same rule the host would apply at our next join (the mission-start reconnect reuses the login URL with its `?b4bcoopaddonsok=` claim, which stays true). Nothing to send: outfits replicate as the made-up/real row `b4bcoop.outfit.<name>`, which the host relays whether it has the add-on or not (new-assets.md §8): players with the add-on see it, the others the survivor |
+| Replacement of the game's or another add-on's files | live when every replaced file belongs to a package (`.uasset/.uexp/.ubulk/.uptnl/.umap`), the add-on carries every file of that package that exists now (`paks_file_exists` per extension), none of those packages is in memory (`paks_package_loaded`: GUObjectArray scan for `UPackage` objects with no outer, also unreachable ones not yet purged) and the engine's loader is idle; else next start, with the reason and an example (`it replaces an asset the game is using now: /game/ui/.../image_holly_partyportrait`, `it replaces only part of an asset`, `it replaces a file the game reads only when it starts`) | a package not in memory has no objects, no linker and no bulk-data reader holding offsets into the old file, so its next load reads the whole package from the new pak (highest read order), exactly as after a restart. The loader check closes the race of a load starting between the check and the mount: `IsAsyncLoading` is the engine's global function pointer (`bool (*IsAsyncLoading)()`), found through the first instruction of `FAsyncLoadingThread::FlushLoading` (0x142529160: `call [rip+disp]` → 0x146402338; the static value is a `return false` stub 0x140BA60E0, treated as unknown); live it read 0 in an idle Fort Hope and 1 during a mission load (2 of 40 samples). New loads are queued from the game thread, where the check and the mount run back to back. Busy → `addons_*` return 3 and the shop asks again every frame for 15 s |
+| Another add-on's files | a new add-on (last in the load order) may override add-ons below it, under the rules above; never one above it (an add-on switched on in the middle of the list whose files a later add-on also has: that one would keep parts of the asset) | owner table `own_*` (hash of each mounted path → add-on, highest read order) |
+| Update | `.shop\<id>.pak.new` is mounted **above every add-on** (it must not touch any other add-on's files) when it passes the replacement rules against its own older version (so: nothing of the old version in memory, e.g. the outfit not worn by anyone, no customization screen showing it); the file swap stays for the next start (`pending.txt`); the add-on's outfit=/weapon= lines, title, version, id come from the new file; `models_outfits_refresh`/`wlooks_refresh` take changed paths/titles (rows on the customization screen repointed). A second update in the same session waits for a restart. In use → "Updated file downloaded: it replaces the old one when you restart the game (not now: ...)" | same as a replacement; the `.new` path is one of our mod paks for the signature exemptions |
+| `/addons on` / Add-ons tab checkbox (an add-on that was off at start) | live under the same rules (its file list is read again: freed after the start's checks) | at its own read order (its place in `addonlist.txt`), as after a restart |
+| Gameplay add-ons | next start | a host's `match` announces the host's gameplay ids; a joiner was checked at join |
+| Files read only at start (shader libraries, `.locres`, `.bnk/.wem`, `.ini`, anything not a package) | next start | read once at start / at mount time of their own pak |
+| Remove, switching off, load order | next start | mounted paks are never unmounted |
+
+Visibility right after a live mount: the Models tab and `/model list outfits` read the refreshed list; the
+customization-screen rows are added at the next frame (`rows_acc = 0`, before: within 5 s); the screen asks the table
+each time it opens (`GetCustomizations`), so a screen opened before the Add lists the new outfit when opened again
+(live: "9 b4bcoop.outfit.casual_joe "CASUAL JOE" locked=0", Holly's count 6/10). Outfit names in two add-ons now
+resolve by read order (not by the order they were read), so a live-mounted add-on wins like after a restart.
 
 ## 2. Catalog format and trust chain
 One JSON file, `catalog.json`, with a detached signature `catalog.json.sig` (64 raw bytes, ed25519 over the exact
@@ -197,7 +222,35 @@ is inside netguard's updater scope; no API call, so no 60/hour limit).
     coach.pak next to it → `addons: duplicate: old_coach.pak and coach.pak both add outfit coach: coach.pak's is used`
     + the notice; batman.pak + a copy → "installed twice". `tools/shop-test.py` 37/37 (+5: step 8).
 
+- Without a restart in more cases (§1a, 2026-10-11, lane 2, Flatpak Proton, `B4B_GPU=4090`, dev build): `tools/shop-test.py`
+  **56/56** (`/tmp/b4b-shop-20261011-190458`, screenshots in `~/.local/share/b4b-coop/shop-test/evidence/2026-10-11-addons-now/`):
+  - customization screen opened and closed, then Add casual_joe: `12 customization-screen row(s) added` at once,
+    `/model list outfits` has it, the screen opened again lists `b4bcoop.outfit.casual_joe "CASUAL JOE" locked=0`
+    (Holly 6/10, `3-customization-screen.png`);
+  - Add holly_green in Fort Hope (`paks loaded <portrait>`: in memory): `Added: applies after a restart (it replaces an
+    asset the game is using now: /game/ui/textures/common/characters/heroes/image_holly_partyportrait).`;
+  - Updates after a restart: casual_joe v1.1 (a repack with another addoninfo, same 58 files) `casual_joe.pak replaces
+    58 existing file(s) (23 asset(s)), none of them loaded now`, `update of casual_joe.pak (...\.shop\casual_joe.pak.new)
+    -> mounted (read order 1002, at runtime ...)`, `/addons info` = `Casual Joe v1.1 1.1`, `/model casual_joe` worn; a
+    second Update refused until a restart; holly_green's Update `not now: it replaces an asset the game is using now`;
+    restart → both files swapped;
+  - `/addons on ak_off` (off at start): `AK-47 (loafbrr, CC0): on, ready now`, the look in `/model list weapons`;
+  - `multi.sh 3`, host `addons_policy=cosmetic` with casual_joe, client 2 (asked to check at join, passed) Adds it in
+    the host's Fort Hope: `Added and ready now.`, `/model casual_joe` worn on client 2, the host's log `hero slot N
+    wears outfit casual_joe` and its `face` mesh `/Game/b4bcoop/outfits/casual_joe/3P_Mom_Elite_04_SKM` on client 2's
+    hero (`9-host-sees-client-outfit.png`), client 3 without the add-on: row `b4bcoop.outfit.casual_joe` in `mdl dump`,
+    only retail meshes on its heroes;
+  - `multi.sh 2`, host `addons_policy=none`: client 2's Add → `Added: applies after a restart (this host allows no
+    add-ons).`, not mounted, `casual_joe.pak=1` in its addonlist.txt.
+  - Loader check: `paks` read `async loading now: 0` in an idle Fort Hope and 1 in 2 of 40 one-second samples during a
+    mission load.
+
 ## 6. Open
+- Still a restart (§1a): gameplay add-ons; replacements/updates of assets in memory (e.g. an outfit someone wears, a
+  UI texture on screen); files read only at start; any add-on as a client of a host with `addons_policy=none`;
+  Remove, off, load order; a second Update of one add-on in a session; add-ons dropped into the folder by hand (the
+  folder is read at start). Not tried live: a replacement mounted live in a running mission (the same check), the
+  loader-busy retry path (needs a load at the moment of the Add).
 - Native Windows: WinHTTP to raw.githubusercontent.com, renames in the add-ons folder while a pak is mounted (the
   engine keeps pak handles open: Remove/Update never touch a mounted file before the next start).
 - The shop repo is empty: Dan decides what gets published.

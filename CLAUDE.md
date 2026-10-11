@@ -73,20 +73,26 @@ Detailed engine findings (addresses, obfuscated layouts, class names): `docs/NOT
   - `addons.c` add-ons (#20): `<game>\b4bcoop-addons\*.pak` (ini `addons_dir=`, `addons=0`), read in DllMain:
     `addonlist.txt` on/off + load order (later wins, read order 1000+), embedded `b4bcoop-addoninfo.txt`, index SHA1
     checked, conflicts (same file; "mixed" = one package from two add-ons) logged + one chat notice; chat
-    `/addons [on|off|info <#>]` (applies on restart); `~` Add-ons tab (on/off, Up/Down load order = `ord[]` + file,
+    `/addons [on|off|info <#>]` (off/order: next start; on: loaded at once when safe); `~` Add-ons tab (on/off, Up/Down load order = `ord[]` + file,
     details, host `addons_policy`; addons.md §8). Packer `modkit/addon.py pack|info|check`. `addons_mp.c` (#22, private
     #35): nothing about a player's add-ons is sent; the host announces `addons_policy` (presence ` addons:<policy>`,
     else a login refusal ending `[addons:<policy>]`), the joiner checks itself, declines locally or logs in with
     `?b4bcoopaddonsok=<policy>`; older clients' `?b4bcoopaddons=` summary still judged, never logged (`log_redact_addons`).
-    Client-side only, no protocol bump. docs/investigations/addons.md. `addons_add_runtime` (shop): a new pak read and
-    appended to addonlist.txt, mounted at once only if cosmetic and every file path is new to the pak layer (added
-    outfits/weapon looks; `models_outfits_refresh`/`wlooks_refresh`), else next start; never as a client.
+    Client-side only, no protocol bump. docs/investigations/addons.md. Loading without a restart (shop.md §1):
+    `addons_add_runtime` (Browse Add: appended to addonlist.txt) / `addons_load_now` (also `/addons on`) /
+    `addons_update_runtime` (Browse Update, mounts `.shop\<id>.pak.new` above all add-ons): cosmetic only; as a client
+    only within the host's announced policy (`addons_session_allows`); new paths always; replaced files only whole
+    packages (.uasset/.uexp/.ubulk/.uptnl) that are not in memory (`paks_package_loaded`, GUObjectArray) while the
+    engine's `IsAsyncLoading` (`paks_async_loading`) is idle (busy: the shop asks again for 15 s), never another add-on's
+    files above it in the load order (owner table `own_*`); else next start. Then `models_outfits_refresh` (rows on the
+    customization screen next frame) / `wlooks_refresh` (updated entries too).
   - `shop.c` the `~` **Browse** tab (#36, add-on shop; ini `shop=0` hides it): on click `catalog.json` + `.sig`
     (ed25519, its own shop key, never the release key: `signkeys.h`; `upd_catalog_*` in updcore.c) from the public
     shop repo `actuallydan/back4blood-shop` (its workflow builds + signs the list; raw.githubusercontent.com, inside
     netguard's updater scope), thumbnails (SHA-256 from the signed list, then stb_image in `imgdecode.c`, `ov_texture`),
     Add = pak streamed to `b4bcoop-addons\.shop\<id>.pak.part`, size + SHA-256 checked, renamed to `<id>.pak`,
-    `addons_add_runtime`; Remove/Update via `.shop\pending.txt`, applied by `shop_early` (DllMain, from addons_scan).
+    `addons_add_runtime`; Remove/Update via `.shop\pending.txt`, applied by `shop_early` (DllMain, from addons_scan);
+    an Update is also loaded at once when nothing of the old version is in memory (`addons_update_runtime`).
     Nothing about installed add-ons is sent. Dev: ini `shop_catalog=`, `shop_pubkey=`; `shop status|list|fetch|add|
     remove|undo <id>`. Catalog tool `tools/shop-catalog.py build|sign|verify`. docs/investigations/shop.md.
   - `teamsize.c` opt-in 5+ player team (`teamsize=N` ini/command, raises `Config.TeamSize` before InitSlots; `slots`
@@ -371,9 +377,12 @@ used to get its profile reset ("HydraPublicId mismatch"); joins now wait for the
 release on a local fake GitHub API, refused bad downloads, install → restart → new version, go back, automatic revert;
 39 checks; `B4B_LANE=2 B4B_STEAM=flatpak B4B_GPU=4090 tools/update-test.py [--no-lock]`). `lane-restore.sh` also
 covers `<game>/b4bcoop-update/`.
-**Add-on shop: `tools/shop-test.py`** (live, one instance: local catalog signed with a throwaway key on 127.0.0.1,
-own `addons_dir=`; bad signature, damaged/truncated downloads refused, Add outfit in Fort Hope + weapon look in a
-mission mounted at once and worn, replacement after restart, Remove and Update at the next start; 32 checks;
+**Add-on shop: `tools/shop-test.py`** (live, one instance, then `multi.sh 3` and `multi.sh 2`: local catalog signed with
+a throwaway key on 127.0.0.1, own `addons_dir=`; bad signature, damaged/truncated downloads refused, Add outfit in
+Fort Hope (customization screen opened before: its row there) + weapon look in a mission mounted at once and worn, a
+replacement of a loaded asset after restart, Remove at the next start, an Update loaded at once / one in use at the
+next start, `/addons on` at once, Add as a client (host with the add-on sees it, a client without sees the survivor),
+a host with `addons_policy=none` keeps the client's Add for the next start; 56 checks, ~12 min;
 `B4B_LANE=2 B4B_STEAM=flatpak B4B_GPU=4090 tools/shop-test.py [--no-lock]`; test paks in
 `~/.local/share/b4b-coop/shop-test/src/`, never committed).
 **Launch choice co-op / Online (#47): `tools/online-test.py`** (live, test instance 1 on its own prefix and ini, never
