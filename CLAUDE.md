@@ -124,7 +124,7 @@ Detailed engine findings (addresses, obfuscated layouts, class names): `docs/NOT
     option; mismatch → "Host runs b4bcoop X (protocol N); you have Y (protocol M). Everyone needs the same version."
     on both sides), then bans in `b4bcoop-bans.txt`, lock). B4B's PreLogin gets the options as a parsed TArray of
     {FString key, value} (`options_str`), not one FString. Every chat command has a permission (`cmds.h`: `CMD_ANYONE`
-    own game only / `CMD_HOST` / `CMD_CHEAT` host + cheats on; admin.c `CMDS`, cheats.c `VERBS` via `cheats_perm()`),
+    own game only / `CMD_HOST` / `CMD_CHEAT` host + cheats on / `CMD_OWNSAVE` own save, session cheats on; admin.c `CMDS`, cheats.c `VERBS` via `cheats_perm()`),
     checked once in `admin_slash` before any handler. docs/investigations/chat-commands.md.
   - `models.c` `/model` runtime model swaps (#19, `models` branch): another survivor's outfits/pieces through the
     game's own replicated `PlayerSlot.CurrentCustomizationSet` (`ServerSelectCustomizationSet`, no validation), NPC
@@ -145,8 +145,12 @@ Detailed engine findings (addresses, obfuscated layouts, class names): `docs/NOT
     stay retail; `~` Models tab; dev `wlook dump|swap|select|drop|drophero|row|pickups|use|guess` (new-assets.md §9).
     docs/investigations/model-swap.md, player page docs/commands-models.md.
   - `cheats.c` Cheats: opt-in, host-only sandbox through chat (`/cheats on|off`, then `/god /heal /revive /ammo /copper
-    /card /fly /noclip /walk /tp /freecam /size /horde /director /spawn /killall /freeze /slomo /win /lose`, host's
-    own save `/supply /unlockall`); the toggle carries between camp and missions (both ways) and the next chapter, every
+    /card /fly /noclip /walk /tp /freecam /size /horde /director /spawn /killall /freeze /slomo /win /lose`); own-save
+    cheats `/supply /skulls /burncards /unlockall` (#49, `CMD_OWNSAVE`): every player while the session has cheats on,
+    the issuing machine's own profile only (ExecuteCommand on its local component, `rewards_execute_local`, nothing
+    sent; save backup first); the host tells each client its state with a silent `cheats on|off` data line
+    (`admin_data_to`: on toggle, 2 s/15 s after a player is first seen in a map), kept per server connection; an older
+    host never says it, so its clients refuse (no protocol bump); joining someone turns one's own cheats off. The toggle carries between camp and missions (both ways) and the next chapter, every
     map change resets the effects (notice `cheats still on; effects reset`), off in the menus; every cheat touching
     others is a host notice; rewards, stats and achievements always flow (no cheated-map withholding since #30
     follow-up). Dev `cheat <cmd>`, `cheatprobe` (`state`, `killas <#n>`: kills credited to a player).

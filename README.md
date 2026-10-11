@@ -167,7 +167,8 @@ Making your own add-ons: see the modkit ([modkit/README.md](modkit/README.md), `
 - **Change your look** with `/model`: other survivors' outfits and pieces, and add-on outfits. Others see it too if
   they have the add-on; otherwise they see your survivor.
 - **Cheats** (host, opt-in, `/cheats on`): god mode, fly, noclip, spawn, horde control, slow motion and more, as a
-  sandbox. Rewards still work.
+  sandbox. Rewards still work. While they're on, every player can add supply points, skull totems and burn cards to
+  their own save (never anyone else's).
 
 **Add-ons**
 - Drop `.pak` add-ons into `b4bcoop-addons`: textures, custom outfits and weapon looks (up to 512 add-ons and 512

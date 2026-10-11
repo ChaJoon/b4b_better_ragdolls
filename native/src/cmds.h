@@ -269,15 +269,19 @@ enum {
     CMD_ANYONE,   // every player, host or client: acts on their own game only (own camera, own light, lists, join/leave)
     CMD_HOST,     // this machine must be the server (listen host or standalone); a client gets "host only"
     CMD_CHEAT,    // host, and cheats on (/cheats on)
+    CMD_OWNSAVE,  // own save, cheats on in this session: the host with its cheats on, or a client whose host has cheats on
+                  // (the host's data line, cheats.c); writes only this machine's own profile, never sent anywhere
 };
 
-// cheats.c: opt-in host-only sandbox (#14, docs/COMMANDS.md "Cheats")
+// cheats.c: opt-in host-only sandbox (#14) + own-save cheats for everyone in a cheats-on session (#49; docs/COMMANDS.md "Cheats")
 int cheats_init(void);                                  // the overlay's Cheats tab
-int cheats_perm(const char *verb);                      // CMD_HOST / CMD_CHEAT for a cheats.c verb, -1 if not one
+int cheats_perm(const char *verb);                      // CMD_* for a cheats.c verb, -1 if not one
 int cheats_enabled(void);                               // /cheats on
+int cheats_own_save_ok(const char **why);               // CMD_OWNSAVE allowed now (else 0 and why)
+void cheats_host_data(const char *text);                // chat.c: a data line from the host ("cheats on|off", client)
 void cheats_slash(const char *verb, char *rest, Out *o); // run a cheats.c verb (permission already checked)
 void cheats_tick(float dt);
-int rewards_execute_local(UObject *ppc, void *cmd);     // rewards.c: a profile command on the host's own profile
+int rewards_execute_local(UObject *ppc, void *cmd);     // rewards.c: a profile command on this machine's own profile
 int cheats_cmd(const char *verb, char *rest, Out *o);   // dev builds: `cheat <cmd> ...`, `cheatprobe ...`
 
 // updater.c: in-game updates from the ~ window's Updates tab (#34, docs/investigations/updater.md)

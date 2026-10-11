@@ -9,11 +9,17 @@
 //    machine (chat.c) and gets "host only". admin.c enforces it from VERBS' permissions (CMD_HOST / CMD_CHEAT).
 //  - Transparent: enabling/disabling, and every cheat that touches another player or the whole session, is announced to
 //    every player with admin.c's host notice (ClientTeamMessage, our own type; the same path as /say).
-//  - No cheat writes a client's save directly: cheats act on the live session, or on the HOST's own offline profile
-//    (`/supply`, `/unlockall`: ExecuteCommand on the host's local profile component only, never forwarded). Rewards,
-//    stats and achievements of a map flow to everyone as usual, cheats or not (Dan's call: simpler, and a stray cheat
-//    can't ruin someone's run; through v0.6.0 a map with cheats on sent the other players none, #30).
-//  - Host-side only: clients need no matching code (notices use admin.c's existing notice type), so no protocol bump.
+//  - No cheat writes another player's save: cheats act on the live session, or on the issuing machine's OWN offline
+//    profile (`/supply`, `/skulls`, `/burncards`, `/unlockall`: ExecuteCommand on its local profile component only,
+//    never forwarded, nothing sent). Rewards, stats and achievements of a map flow to everyone as usual, cheats or not
+//    (Dan's call: simpler, and a stray cheat can't ruin someone's run; through v0.6.0 a map with cheats on sent the
+//    other players none, #30).
+//  - Own-save cheats (#49) are for every player while the session has cheats on (CMD_OWNSAVE): the host with its
+//    cheats on, or a client whose host said so. The host tells each remote player its state with a silent data line
+//    (admin_data_to, "cheats on|off": on every toggle and 2 s / 15 s after it first sees that player in a map); the
+//    client keeps it for that server connection only. A host on an older b4bcoop never says it, so its clients refuse:
+//    no protocol bump (older clients ignore the data line; nothing else of host or client behavior changes).
+//    A player in their own Fort Hope is the host: their own /cheats on. Joining someone turns one's own cheats off.
 //
 // How (the shipping build compiled out Gobi's own cheat execs: GobiPlayerController.God/Heal/GiveUnlock/... are empty,
 // APlayerController::AddCheats is `ret` so no controller ever gets a CheatManager, and ACharacter::ClientCheatFly/
@@ -879,15 +885,19 @@ static void cmd_endmission(int ok, Out *o) {
     out_printf(o, "mission ended (%s)\n", ok ? "success" : "failure");
 }
 
-// ---- host's own progression ----
+// ---- this machine's own progression (host or client: always the local player's own save) ----
 static UObject *own_profile(Out *o) {
     UObject *pc = host_pc(), *player = pc ? ue_get_ptr(pc, "Player") : NULL;
-    if (!player || !is_a(player, "LocalPlayer") || admin_is_client()) { out_printf(o, "no local profile\n"); return NULL; }
+    if (!player || !is_a(player, "LocalPlayer")) { out_printf(o, "no local profile\n"); return NULL; }
     // Signed in with the profile loaded = in Fort Hope or a mission. On the title/legal screens a command is accepted
-    // but goes nowhere (seen: /supply before sign-in changed nothing), so refuse instead of claiming it worked.
+    // but goes nowhere (seen: /supply before sign-in changed nothing), so refuse instead of claiming it worked. A client
+    // is in someone's session, so it signed in before joining (its map is the host's).
     char pkg[256] = "";
     if (ue_world()) ue_world_package(ue_world(), pkg, sizeof pkg);
-    if (!strstr(pkg, "FortHope") && !in_mission()) { out_printf(o, "sign in and go to Fort Hope first (your save isn't loaded yet)\n"); return NULL; }
+    if (!admin_is_client() && !strstr(pkg, "FortHope") && !in_mission()) {
+        out_printf(o, "sign in and go to Fort Hope first (your save isn't loaded yet)\n");
+        return NULL;
+    }
     UObject *ppc = ue_get_ptr(pc, "GobiPlayerProfileComponent");
     if (!ppc) out_printf(o, "no profile component (sign in first)\n");
     return ppc;
@@ -899,12 +909,14 @@ static UObject *own_profile(Out *o) {
 // are built with their own C++ vtables (from the RPC thunks' default construction), checked through GetType first.
 #define VT_ADJUST_SP   VA(0x1454E8880ull)   // FAdjustSupplyPointsCommand, GetType() == 5
 #define VT_UNLOCK      VA(0x1454E88F8ull)   // FUnlockProductCommand, GetType() == 6
+#define VT_ADJUST_STP  VA(0x1454E8920ull)   // FAdjustSkullTotemPointsCommand, GetType() == 20 (exec 0x142131220)
+#define VT_ADJUST_CONS VA(0x1454E8BA0ull)   // FAdjustConsumableQuantityCommand, GetType() == 19 (exec 0x1421310E0)
 static int command_ok(uintptr_t vt, uint8_t type) {
     const uint8_t *get_type = *(const uint8_t *const *)(vt + 8);   // slot 1: mov al, <type>; ret
     return get_type && get_type[0] == 0xb0 && get_type[1] == type && get_type[2] == 0xc3;
 }
 
-// Before the first /supply or /unlockall write of this game session: copy PlayerProfileSettings.sav (the save itself)
+// Before the first /supply, /skulls, /burncards or /unlockall write of this game session: copy PlayerProfileSettings.sav (the save itself)
 // and .json (the game's export) to PlayerProfileSettings-b4bcoop-backup-<yyyymmdd-hhmmss>.sav/.json next to them.
 // The save folder: %LOCALAPPDATA%\Back4Blood\Steam\Saved\SaveGames (the game runs with -SaveToUserDir), else the
 // game's own Gobi\Saved\SaveGames. 0 = backed up (now or earlier this session; *where = the backup), 1 = nothing to
@@ -968,9 +980,171 @@ static void cmd_supply(char *rest, Out *o) {
     int b = profile_backup(bak, sizeof bak);
     if (b < 0) { out_printf(o, "/supply: couldn't back up your save first, so nothing was changed\n"); return; }
     struct { uintptr_t vt; int32_t delta, pad; } cmd = {VT_ADJUST_SP, (int32_t)v, 0};   // FAdjustSupplyPointsCommand
-    LOG("cheats: host's own profile: AdjustSupplyPoints %+ld", v);
+    LOG("cheats: own profile (%s): AdjustSupplyPoints %+ld", admin_is_client() ? "client" : "host", v);
     if (rewards_execute_local(ppc, &cmd)) { out_printf(o, "/supply: not available\n"); return; }
     out_printf(o, "+%ld supply points in YOUR save. This is permanent (saved in a few seconds).\n", v);
+    if (b == 0) out_printf(o, "Backup of your save from before: %s (and .json)\n", bak);
+    else out_printf(o, "(new profile: no earlier save to back up)\n");
+}
+
+// the profile component's own reading (GetSupplyPoints / GetSkullTotemPoints), -1 if unavailable
+static int profile_int(UObject *ppc, const char *fn) {
+    Call c;
+    if (!call_prep(&c, ppc, fn)) return -1;
+    call_go(&c);
+    int32_t *r = carg(&c, "ReturnValue");
+    return r ? *r : -1;
+}
+
+static void cmd_skulls(char *rest, Out *o) {
+    char *end = NULL;
+    long v = rest ? strtol(rest, &end, 10) : 0;
+    if (!rest || *end || v < 1 || v > 100000) { out_printf(o, "usage: /skulls <+N> (1-100000; your own skull totem points)\n"); return; }
+    UObject *ppc = own_profile(o);
+    if (!ppc) return;
+    if (!command_ok(VT_ADJUST_STP, 20)) { out_printf(o, "/skulls: not available in this game build\n"); return; }
+    char bak[MAX_PATH * 3];
+    int b = profile_backup(bak, sizeof bak);
+    if (b < 0) { out_printf(o, "/skulls: couldn't back up your save first, so nothing was changed\n"); return; }
+    struct { uintptr_t vt; int32_t delta, pad; } cmd = {VT_ADJUST_STP, (int32_t)v, 0};   // FAdjustSkullTotemPointsCommand
+    int before = profile_int(ppc, "GetSkullTotemPoints");
+    LOG("cheats: own profile (%s): AdjustSkullTotemPoints %+ld (had %d)", admin_is_client() ? "client" : "host", v, before);
+    if (rewards_execute_local(ppc, &cmd)) { out_printf(o, "/skulls: not available\n"); return; }
+    int now = profile_int(ppc, "GetSkullTotemPoints");
+    LOG("cheats: own profile: skull totem points now %d", now);
+    out_printf(o, "+%ld skull totem points in YOUR save", v);
+    if (now >= 0) out_printf(o, " (now %d)", now);
+    out_printf(o, ". This is permanent (saved in a few seconds).\n");
+    if (b == 0) out_printf(o, "Backup of your save from before: %s (and .json)\n", bak);
+    else out_printf(o, "(new profile: no earlier save to back up)\n");
+}
+
+// ---- burn cards in your own save ----
+// A burn card in the offline save is a consumable product of the products table (ProductRow.ProductType Consumable);
+// having N of it = PlayerProfileData.Consumables[product] acquired - spent. The start saferoom's burn card screen
+// (GameplayCardManager::GetPlayerBurnCards) offers every one with a quantity above 0, and playing it charges 1 as usual.
+// ProductRow.Unlock is the card's row (GameplayCardRow: the name the game shows). DLC products are left out (as
+// /unlockall does).
+#define DT_ROWSTRUCT(t) (*(UObject **)((char *)(t) + 0x30))   // UDataTable::RowStruct
+#define PRODUCT_CONSUMABLE 1                                   // EProductType::Consumable (ProductRow +0x91)
+typedef struct { FName row; char name[80], prod[64], card[64]; } Burn;
+#define MAX_BURNS 256
+static Burn burns[MAX_BURNS];
+static const char *burn_names[MAX_BURNS];
+static int n_burns;
+static UObject *burns_table;
+static UObject *products_table(UObject *ppc) {
+    UObject *t = ppc ? ue_get_ptr(ppc, "ProductsTable") : NULL;
+    if (!t) { UObject *m = ue_find_first_of("GobiPlayerProfileManager"); t = m ? ue_get_ptr(m, "ProductsTable") : NULL; }
+    return t;
+}
+static int burn_cmp(const void *a, const void *b) { return _stricmp(((const Burn *)a)->name, ((const Burn *)b)->name); }
+static int burns_load(UObject *ppc) {
+    UObject *t = products_table(ppc);
+    char b[128];
+    if (!t) return 0;
+    if (t == burns_table && n_burns) return n_burns;
+    n_burns = 0;
+    burns_table = t;
+    int dlc = 0;
+    UObject *rs = DT_ROWSTRUCT(t);
+    if (!rs || strcmp(ue_obj_name(rs, b, sizeof b), "ProductRow")) { LOG("cheats: products table: unexpected row struct"); return 0; }
+    TArray *m = DT_ROWMAP(t);
+    const uint32_t *bits = *(uint32_t *const *)((char *)m + 0x20);
+    if (!bits) bits = (const uint32_t *)((char *)m + 0x10);
+    int nbits = *(int32_t *)((char *)m + 0x28);
+    for (int i = 0; m->data && i < m->num && i < nbits && n_burns < MAX_BURNS; i++) {
+        if (!((bits[i >> 5] >> (i & 31)) & 1)) continue;
+        char *e = (char *)m->data + (size_t)i * 0x18;
+        uint8_t *row = *(uint8_t **)(e + 8);
+        if (!row || row[0x91] != PRODUCT_CONSUMABLE) continue;
+        if (row[0xa9] != 0) { if (dlc++ < 24) LOG("cheats: burn card product %s left out (DLC %d)", ue_name(*(FName *)e, b, sizeof b), row[0xa9]); continue; }
+        Burn *x = &burns[n_burns];
+        memset(x, 0, sizeof *x);
+        x->row = *(FName *)e;
+        ue_name(x->row, x->prod, sizeof x->prod);
+        RowHandle *card = (RowHandle *)(row + 8);   // ProductRow.Unlock
+        UObject *crs = card->table ? DT_ROWSTRUCT(card->table) : NULL;
+        if (crs && !strcmp(ue_obj_name(crs, b, sizeof b), "GameplayCardRow")) {
+            ue_name(card->row, x->card, sizeof x->card);
+            card_display(card, x->name, sizeof x->name);
+        }
+        if (!x->name[0]) snprintf(x->name, sizeof x->name, "%s", x->card[0] ? x->card : x->prod);
+        n_burns++;
+    }
+    qsort(burns, n_burns, sizeof burns[0], burn_cmp);
+    for (int i = 0; i < n_burns; i++) burn_names[i] = burns[i].name;
+    LOG("cheats: %d burn card products (%d DLC ones left out)", n_burns, dlc);
+    return n_burns;
+}
+// by shown name, card row or product row: exact (letters/digits, any case), else the one substring match.
+// 1 = *hit, 0 = none, -n = n matches (listed, up to max_list)
+static int burn_match(const char *want, Burn **hit, Out *list, int max_list) {
+    char w[96], a[96], b[96], c[96];
+    norm(want ? want : "", w, sizeof w);
+    int sub = 0, shown = 0;
+    Burn *first = NULL;
+    for (int i = 0; i < n_burns; i++) {
+        Burn *x = &burns[i];
+        norm(x->name, a, sizeof a); norm(x->card, b, sizeof b); norm(x->prod, c, sizeof c);
+        if (w[0] && (!strcmp(a, w) || (b[0] && !strcmp(b, w)) || !strcmp(c, w))) { *hit = x; return 1; }
+        if (!w[0] || strstr(a, w) || (b[0] && strstr(b, w))) {
+            if (!first) first = x;
+            sub++;
+            if (list && shown++ < max_list) out_printf(list, "  %s  (%s)\n", x->name, x->card[0] ? x->card : x->prod);
+        }
+    }
+    if (sub == 1) { *hit = first; return 1; }
+    return -sub;
+}
+
+static void cmd_burncards(char *rest, Out *o) {
+    if (!rest) { out_printf(o, "usage: /burncards <card name> [count]  |  /burncards list [filter]\n"); return; }
+    UObject *ppc = own_profile(o);
+    if (!ppc) return;
+    if (!burns_load(ppc)) { out_printf(o, "/burncards: the burn card list isn't loaded here\n"); return; }
+    Burn *h = NULL;
+    if (!_strnicmp(rest, "list", 4) && (!rest[4] || rest[4] == ' ')) {
+        char *f = rest[4] ? rest + 5 : NULL;
+        int r = burn_match(f, &h, o, 60);
+        if (r == 1 && h && f) out_printf(o, "  %s  (%s)\n", h->name, h->card[0] ? h->card : h->prod);
+        else if (r < -60) out_printf(o, "... %d burn cards, narrow it down: /burncards list <filter>\n", -r);
+        else if (!r) out_printf(o, "no burn card matches '%s'\n", f ? f : "");
+        return;
+    }
+    // the card name may have spaces; a trailing number is the count
+    char name[128];
+    long n = 1;
+    snprintf(name, sizeof name, "%s", rest);
+    char *sp = strrchr(name, ' '), *end = NULL;
+    if (sp) {
+        long v = strtol(sp + 1, &end, 10);
+        if (end != sp + 1 && !*end) { n = v; *sp = 0; }
+    }
+    if (n < 1 || n > 99) { out_printf(o, "/burncards: count 1-99\n"); return; }
+    int r = burn_match(name, &h, NULL, 0);
+    if (r != 1) {
+        if (!r) out_printf(o, "no burn card matches '%s' (/burncards list [filter])\n", name);
+        else { out_printf(o, "'%s' matches %d burn cards:\n", name, -r); burn_match(name, &h, o, 10); }
+        return;
+    }
+    if (!command_ok(VT_ADJUST_CONS, 19)) { out_printf(o, "/burncards: not available in this game build\n"); return; }
+    char bak[MAX_PATH * 3];
+    int b = profile_backup(bak, sizeof bak);
+    if (b < 0) { out_printf(o, "/burncards: couldn't back up your save first, so nothing was changed\n"); return; }
+    struct { uintptr_t vt; RowHandle product; int32_t delta, pad; FString reason; } cmd;   // FAdjustConsumableQuantityCommand (0x40)
+    memset(&cmd, 0, sizeof cmd);
+    cmd.vt = VT_ADJUST_CONS;
+    cmd.product.table = burns_table;
+    cmd.product.row = h->row;
+    static wchar_t disp[64];   // handle display name: the card row (the save itself takes the products table's name)
+    if (h->card[0]) fstring_set(&cmd.product.display, h->card, disp, 64);
+    cmd.delta = (int32_t)n;
+    LOG("cheats: own profile (%s): AdjustConsumableQuantity %s (%s, card %s) %+ld", admin_is_client() ? "client" : "host",
+        h->prod, h->name, h->card, n);
+    if (rewards_execute_local(ppc, &cmd)) { out_printf(o, "/burncards: not available\n"); return; }
+    out_printf(o, "+%ld %s burn card%s in YOUR save. This is permanent (saved in a few seconds); play %s in a "
+                  "mission's start saferoom.\n", n, h->name, n == 1 ? "" : "s", n == 1 ? "it" : "them");
     if (b == 0) out_printf(o, "Backup of your save from before: %s (and .json)\n", bak);
     else out_printf(o, "(new profile: no earlier save to back up)\n");
 }
@@ -1029,7 +1203,7 @@ static void cmd_unlockall(char *rest, Out *o) {
         if (rewards_execute_local(ppc, &cmd)) { out_printf(o, "/unlockall: not available\n"); break; }
         done++;
     }
-    LOG("cheats: host's own profile: unlockall %d new, %d already owned, %d skipped (consumable/DLC) of %d", done, owned, skipped, n);
+    LOG("cheats: own profile (%s): unlockall %d new, %d already owned, %d skipped (consumable/DLC) of %d", admin_is_client() ? "client" : "host", done, owned, skipped, n);
     if (dry) { out_printf(o, "/unlockall would unlock %d item(s) (%d already yours, %d consumables/DLC skipped)\n", done, owned, skipped); return; }
     out_printf(o, "unlocked %d supply-line item(s) in YOUR save (%d were already yours; burn cards and DLC items skipped). "
                   "This is permanent.\n", done, owned);
@@ -1057,7 +1231,84 @@ static void all_effects_off(int world_alive) {
     slomo = size_now = 1.f;
 }
 
+// ---- the session's cheat state for own-save cheats (CMD_OWNSAVE, #49) ----
+// Client: what the host's data lines said ("cheats on|off"), for the server connection they came on (-1 = nothing
+// from this host yet: an older b4bcoop, or not told yet).
+static int host_on = -1;
+static UObject *host_conn;
+static int32_t host_conn_i = -1;
+static UObject *server_conn(void) {
+    UObject *w = ue_world(), *nd = w ? ue_get_ptr(w, "NetDriver") : NULL;
+    return nd ? ue_get_ptr(nd, "ServerConnection") : NULL;
+}
+static int host_state(void) {
+    UObject *c = server_conn();
+    return c && c == host_conn && alive(c, host_conn_i) ? host_on : -1;
+}
+void cheats_host_data(const char *text) {
+    int v = !strcmp(text, "cheats on") ? 1 : !strcmp(text, "cheats off") ? 0 : -1;
+    UObject *c = server_conn();
+    if (v < 0 || !c) return;
+    if (v != host_state()) LOG("cheats: the host's cheats are %s (own-save cheats %s here)", v ? "on" : "off", v ? "allowed" : "off");
+    host_on = v; host_conn = c; host_conn_i = U_INDEX(c);
+}
+int cheats_own_save_ok(const char **why) {
+    static const char *w;
+    if (!why) why = &w;
+    *why = NULL;
+    if (admin_is_client()) {
+        int s = host_state();
+        if (s == 1) return 1;
+        *why = s == 0 ? "the host has cheats off (when the host turns them on, you can change your own save)"
+                      : "the host hasn't turned cheats on (a host on an older b4bcoop can't allow this)";
+        return 0;
+    }
+    if (on) return 1;
+    *why = "cheats are off: type /cheats on first (in someone else's game: when the host turns them on)";
+    return 0;
+}
+
+// Host: tell every remote player the state (data line, not shown): on every change, and 2 s / 15 s after a player is
+// first seen in this map (a late joiner, every player after a map change).
+#define MAX_PEERS 16
+static struct { UObject *pc; int32_t i; float age; int told, sends; } peers[MAX_PEERS];
+static void peers_tick(float dt) {
+    UObject *w = ue_world(), *me = host_pc();
+    if (!w || !ue_is_listen_server(w)) return;
+    for (int k = 0; k < MAX_PEERS; k++) if (peers[k].pc && !alive(peers[k].pc, peers[k].i)) memset(&peers[k], 0, sizeof peers[k]);
+    UObject **pa;
+    int n = admin_player_array(&pa);
+    for (int j = 0; j < n; j++) {
+        UObject *pc = ps_pc(pa[j]), *player = pc ? ue_get_ptr(pc, "Player") : NULL;
+        if (!pc || pc == me || !is_a(player, "NetConnection")) continue;
+        int k = 0;
+        for (; k < MAX_PEERS && peers[k].pc != pc; k++) {}
+        if (k == MAX_PEERS) {
+            for (k = 0; k < MAX_PEERS && peers[k].pc; k++) {}
+            if (k == MAX_PEERS) continue;
+            peers[k].pc = pc; peers[k].i = U_INDEX(pc); peers[k].age = 0; peers[k].told = -1; peers[k].sends = 0;
+        }
+        peers[k].age += dt;
+        int due = peers[k].told != on ? peers[k].age >= 2.f : (peers[k].sends == 1 && peers[k].age >= 15.f);
+        if (!due) continue;
+        if (admin_data_to(pc, on ? "cheats on" : "cheats off")) continue;
+        if (peers[k].told != on) {
+            char nm[64];
+            who_name(pa[j], nm, sizeof nm);
+            LOG("cheats: told %s: cheats %s", nm, on ? "on" : "off");
+        }
+        peers[k].told = on;
+        peers[k].sends++;
+    }
+}
+
 static void set_on(int en, Out *o) {
+    if (admin_is_client()) {
+        int s = host_state();
+        out_printf(o, "/cheats on|off: host only (you are a client). The host's cheats are %s%s.\n",
+                   s == 1 ? "on" : s == 0 ? "off" : "unknown", s == 1 ? ": /supply /skulls /burncards /unlockall change YOUR save" : "");
+        return;
+    }
     if (en == on) { out_printf(o, "cheats are already %s\n", on ? "on" : "off"); return; }
     if (!en) all_effects_off(1);
     on = en;
@@ -1068,14 +1319,15 @@ static void set_on(int en, Out *o) {
     notice(en ? "host enabled cheats" : "host disabled cheats");
 }
 
-// Chat verbs and who may run them (admin.c checks the permission before cheats_slash runs): /cheats is the host's,
-// every other one also needs cheats on.
-static const struct { const char *name; int perm; } VERBS[] = {{"cheats", CMD_HOST}, {"god", CMD_CHEAT},
+// Chat verbs and who may run them (admin.c checks the permission before cheats_slash runs): /cheats lists them for
+// everyone (on/off: the host's, set_on), the session cheats need the host with cheats on, the own-save ones a session
+// with cheats on (CMD_OWNSAVE: the host, or a client whose host has them on).
+static const struct { const char *name; int perm; } VERBS[] = {{"cheats", CMD_ANYONE}, {"god", CMD_CHEAT},
     {"heal", CMD_CHEAT}, {"revive", CMD_CHEAT}, {"ammo", CMD_CHEAT}, {"copper", CMD_CHEAT}, {"card", CMD_CHEAT},
     {"fly", CMD_CHEAT}, {"noclip", CMD_CHEAT}, {"walk", CMD_CHEAT}, {"tp", CMD_CHEAT}, {"freecam", CMD_CHEAT},
     {"size", CMD_CHEAT}, {"horde", CMD_CHEAT}, {"director", CMD_CHEAT}, {"spawn", CMD_CHEAT}, {"killall", CMD_CHEAT},
-    {"freeze", CMD_CHEAT}, {"slomo", CMD_CHEAT}, {"win", CMD_CHEAT}, {"lose", CMD_CHEAT}, {"unlockall", CMD_CHEAT},
-    {"supply", CMD_CHEAT}};
+    {"freeze", CMD_CHEAT}, {"slomo", CMD_CHEAT}, {"win", CMD_CHEAT}, {"lose", CMD_CHEAT}, {"unlockall", CMD_OWNSAVE},
+    {"supply", CMD_OWNSAVE}, {"skulls", CMD_OWNSAVE}, {"burncards", CMD_OWNSAVE}};
 
 int cheats_perm(const char *verb) {
     for (int i = 0; i < (int)(sizeof VERBS / sizeof VERBS[0]); i++) if (!strcmp(VERBS[i].name, verb)) return VERBS[i].perm;
@@ -1084,12 +1336,19 @@ int cheats_perm(const char *verb) {
 int cheats_enabled(void) { return on; }
 
 static void help(Out *o) {
+    static const char own[] = "YOUR save only, permanent (everyone, while cheats are on): /supply +N  /skulls +N\n"
+                              "/burncards <card> [count]  /burncards list [filter]  /unlockall\n";
+    if (admin_is_client()) {
+        int s = host_state();
+        out_printf(o, "%sthe host's cheats: %s\n", own, s == 1 ? "ON" : s == 0 ? "off" : "unknown (off or an older b4bcoop)");
+        return;
+    }
     out_printf(o, "cheats (host only, after /cheats on; [p] = player name, #n, me or all):\n"
                   "/god [p] [on|off]  /heal [p]  /revive [p]  /ammo infinite|off  /copper +N [p]  /card <name>|list [p]\n"
                   "/fly [p]  /noclip  /walk [p]  /tp [p] <p|saferoom|start>  /freecam  /size <x>\n"
                   "/horde  /director calm|build|peak  /spawn <type> [n]  /killall  /freeze  /slomo <x>  /win  /lose\n"
-                  "YOUR save, permanent: /supply +N  /unlockall\n"
-                  "state: cheats %s", on ? "ON" : "off");
+                  "%s"
+                  "state: cheats %s", own, on ? "ON" : "off");
     if (on) out_printf(o, ", god %d, ammo %s, speed %.2f%s%s", n_gods, ammo_inf ? "infinite" : "normal", slomo, frozen ? ", frozen" : "", freecam ? ", freecam" : "");
     out_printf(o, "\n");
 }
@@ -1126,6 +1385,8 @@ void cheats_slash(const char *verb, char *rest, Out *o) {
     else if (!strcmp(verb, "slomo")) cmd_slomo(rest, o);
     else if (!strcmp(verb, "win") || !strcmp(verb, "lose")) cmd_endmission(!strcmp(verb, "win"), o);
     else if (!strcmp(verb, "supply")) cmd_supply(rest, o);
+    else if (!strcmp(verb, "skulls")) cmd_skulls(rest, o);
+    else if (!strcmp(verb, "burncards")) cmd_burncards(rest, o);
     else if (!strcmp(verb, "unlockall")) cmd_unlockall(rest, o);
 }
 
@@ -1191,7 +1452,16 @@ void cheats_tick(float dt) {
     if (w != cur_world) {
         cur_world = w;
         on_world_change();
+        memset(peers, 0, sizeof peers);   // every player is told again in the new map
     }
+    if (on && w && admin_is_client()) {   // joined someone else's game: our own cheats end (theirs count now)
+        all_effects_off(0);
+        on = 0;
+        world_check = 0;
+        pending_notice[0] = 0;
+        LOG("cheats: off (joined someone else's session)");
+    }
+    peers_tick(dt);
     if (on && !world_check && w) { int n = ue_num_clients(w); if (n > clients_seen) clients_seen = n; }
     if (world_check && on && w && game_mode()) {
         world_check = 0;
@@ -1273,16 +1543,50 @@ static void targets_refresh(int with_all) {   // "me", ["all"], "#n Name" for ev
     }
     for (int i = 0; i < n_tgt; i++) tgt_ptrs[i] = tgt_items[i];
 }
+
+// "Your own save" (#49): every player while the session has cheats on (the host's, for a client); a client sees it
+// first (everything else on this tab is the host's)
+static void own_save_panel(void) {
+    static int supply = 1000, skulls = 100, burn_pick, burn_n = 1;
+    ov_heading("Your own save (permanent)");
+    ov_begin_perm(CMD_OWNSAVE);
+    ov_width(8);
+    ov_input_int("##supply", &supply, 1, 100000);
+    ov_same_line();
+    if (ov_button_confirm("Add supply points", "Sure? Permanent")) ov_run("supply %d", supply);
+    ov_width(8);
+    ov_input_int("##skulls", &skulls, 1, 100000);
+    ov_same_line();
+    if (ov_button_confirm("Add skull totem points", "Sure? Permanent")) ov_run("skulls %d", skulls);
+    UObject *pc = host_pc(), *ppc = pc ? ue_get_ptr(pc, "GobiPlayerProfileComponent") : NULL;
+    if (ppc && burns_load(ppc)) {
+        ov_width(14);
+        ov_combo("##burncard", &burn_pick, burn_names, n_burns);
+        ov_same_line();
+        ov_width(5);
+        ov_input_int("##burnn", &burn_n, 1, 99);
+        ov_same_line();
+        Burn *bc = &burns[burn_pick >= 0 && burn_pick < n_burns ? burn_pick : 0];
+        if (ov_button_confirm("Add burn cards", "Sure? Permanent"))
+            ov_run("burncards %s %d", bc->card[0] ? bc->card : bc->prod, burn_n);
+    } else ov_text_dim("Burn cards: sign in and go to Fort Hope first.");
+    if (ov_button_confirm("Unlock all", "Sure? Permanent")) ov_run("unlockall");
+    ov_tooltip("Every supply-line item (Fort Hope only; burn cards and DLC items are not included).");
+    ov_text_dim("Only your own save (a backup is made first). Never sent to the host or the other players. In someone "
+                "else's game this works while the host has cheats on.");
+    ov_end_perm();
+}
 static void cheats_panel(void) {
-    static int tgt, tp_dest, spawn_type, spawn_n = 1, copper = 500, supply = 1000;
+    static int tgt, tp_dest, spawn_type, spawn_n = 1, copper = 500;
     static float size = 1.f, speed = 1.f;
     static char card[80];
     ov_begin_perm(CMD_HOST);
-    int en = on;
+    int en = admin_is_client() ? host_state() == 1 : on;   // a client sees the host's state
     if (ov_checkbox("Cheats on##cheats", &en)) ov_run(en ? "cheats on" : "cheats off");
     ov_tooltip("Host only. Everyone is told. Stays on between Fort Hope and missions, but every map change "
                "resets the effects (god, fly, ammo, speed, ...). Stays on in Fort Hope too; off in the menus.");
     ov_end_perm();
+    if (admin_is_client()) own_save_panel();
     if (on) ov_text_dim("god on %d hero(es), ammo %s, speed %.2fx%s%s", n_gods, ammo_inf ? "infinite" : "normal", slomo,
                         frozen ? ", AI frozen" : "", freecam ? ", free camera" : "");
     ov_begin_perm(CMD_CHEAT);
@@ -1368,15 +1672,9 @@ static void cheats_panel(void) {
     ov_same_line();
     if (ov_button_confirm("Lose the mission", "Sure? Lose")) ov_run("lose");
 
-    ov_heading("Your own save (permanent)");
-    ov_width(8);
-    ov_input_int("##supply", &supply, 1, 100000);
-    ov_same_line();
-    if (ov_button_confirm("Add supply points", "Sure? Permanent")) ov_run("supply %d", supply);
-    ov_same_line();
-    if (ov_button_confirm("Unlock all", "Sure? Permanent")) ov_run("unlockall");
-    ov_text_dim("Only your own save (a backup is made first). Never sent to the other players.");
     ov_end_perm();
+
+    if (!admin_is_client()) own_save_panel();
 }
 
 int cheats_init(void) {

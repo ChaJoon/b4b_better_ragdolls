@@ -29,7 +29,7 @@ of the window, and also in your chat.
 | **Players** | Everyone in the game with ping and Steam ID; host: **Kick**, **Ban** per player, a message to everyone (**Say**), **Locked**, bots (game default/on/off), team size, **Ready everyone**, **Ready post-round vote**, **Restart mission**, the ban list with **Unban** / **Unban all** | `/players`, `/ping`, `/kick`, `/ban`, `/say`, `/lock`, `/unlock`, `/bots`, `/teamsize`, `/ready`, `/ready vote`, `/restart`, `/bans`, `/unban` |
 | **Camera** | Third person on/off, start the game in third person, its key, sliders for distance, side, height and FOV (Ctrl+click a slider to type a number), Swap shoulder, Reset camera, aim correction, free look on/off | `/thirdperson ...`; ini `thirdperson*` |
 | **Flashlight** | Your light (Toggle, On, Off; host: Automatic), its key, sticky mode; **Beam (your view)**: sliders for width, range and brightness, Reset beam | `/flashlight ...`; ini `flashlight_key`, `flashlight_sticky`, `flashlight_width`, `flashlight_range`, `flashlight_brightness` |
-| **Cheats** | Host: **Cheats on**, a player picker (`me`, everyone, a player) for the buttons marked `*`, then every cheat: god, heal, revive, infinite ammo, copper, cards, fly, noclip, walk, teleport, free camera, size, horde, kill all ridden, freeze, director phases, spawn, game speed, win, lose, and your own save's supply points / unlock all | every `/cheats` command |
+| **Cheats** | Host: **Cheats on**, a player picker (`me`, everyone, a player) for the buttons marked `*`, then every cheat: god, heal, revive, infinite ammo, copper, cards, fly, noclip, walk, teleport, free camera, size, horde, kill all ridden, freeze, director phases, spawn, game speed, win, lose, and your own save's supply points / skull totems / burn cards / unlock all (everyone, while the host has cheats on) | every `/cheats` command |
 | **Models** | Your look now and your pick, the host's refusal when it said no, **Reset my look**; lists to wear with a search box (click a name): **Survivors** (per survivor: whole survivor, outfits, heads, torsos, legs), **NPC bodies** (Fort Hope NPCs, other survivors, cultists), **Add-on outfits** (by add-on); **Weapon looks** per weapon type (**Use**, which add-on it comes from, **Reset** for that weapon type); **Everyone's look** (every player and bot); host: **Change the look of** a player or bot (then click a look), their **Reset**, **Model swaps allowed** (greyed on a client, with the host's last announced state) | `/model`, `/model list ...`, `/model <name>`, `/model reset`, `/model <player> <name>\|reset`, `/models on\|off` |
 | **Add-ons** | Your add-ons in load order: on/off, **Up**/**Down** (load order), cosmetic or gameplay (and what kind), "not loaded" with the reason, conflicts (who wins); click one for its details (author, description, id with Copy, outfits it adds); a banner when `addonlist.txt` differs from what is loaded (restart to apply); the folder path (Copy); "Load add-ons" (`addons`); host: who may join with add-ons (`addons_policy`; nobody sees other players' add-ons) | `/addons`, `/addons on\|off`, `/addons info`, `/addons policy`; ini `addons`, `addons_policy` |
 | **Browse** | The add-on shop: **Get the add-on list** (free add-ons with a public license, with picture, author, license, size, what each adds or replaces), search and filter, **Add**, **Remove**, **Update**, **Undo**; click one for its details (license link, description). See [Browse (add-on shop)](#browse-add-on-shop) | ini `shop` (no chat command) |
@@ -222,8 +222,10 @@ allows swaps again. `/model <player> reset` puts one player or bot back to their
 
 ## Cheats (sandbox)
 
-An opt-in sandbox for the **host**: god mode, flying, spawning ridden, forcing a horde, and so on. Everything is a chat
-command (type it in the game's chat box; a message starting with `/` is never sent to the other players).
+An opt-in sandbox for the **host**: god mode, flying, spawning ridden, forcing a horde, and so on. While the host has
+cheats on, **every player** can also add supply points, skull totem points and burn cards to **their own save**
+([Your own progression](#your-own-progression-permanent)). Everything is a chat command (type it in the game's chat
+box; a message starting with `/` is never sent to the other players) and a control in the `~` window's Cheats tab.
 
 **The rules:**
 - **Off until the host turns them on** with `/cheats on`. `/cheats off` turns them off again, and they switch off by
@@ -232,12 +234,14 @@ command (type it in the game's chat box; a message starting with `/` is never se
   into the next chapter, but everything they were doing stops at the map change: god mode, fly, noclip, infinite ammo, game
   speed, freeze, size and the free camera (spawned ridden and director changes go with the old map). Everyone sees
   `[b4bcoop] cheats still on; effects reset`. Copper and cards already given stay, like any copper or card.
-- **Host only.** Every cheat command works only on the host (the player whose game the others joined, or your own
-  offline game). Typed by someone who joined, it only replies `host only` and does nothing.
+- **Host only**, except your own save. Every cheat command works only on the host (the player whose game the others
+  joined, or your own offline game). Typed by someone who joined, it only replies `host only` and does nothing. The
+  [own progression](#your-own-progression-permanent) commands work for everyone while the host has cheats on, and
+  only ever change the save of the player who typed them.
 - **Everyone is told.** Turning cheats on or off, and every cheat that affects another player or the whole game, shows
   a `[b4bcoop] host ...` line in everyone's chat (for example `[b4bcoop] host gave god mode to Mellon`).
-- **Rewards and stats are never withheld.** Cheats change the running game, or the host's own save (`/supply`,
-  `/unlockall`), never another player's save directly. A map played with cheats still gives every player their
+- **Rewards and stats are never withheld.** Cheats change the running game, or your own save (`/supply`, `/skulls`,
+  `/burncards`, `/unlockall`), never another player's save. A map played with cheats still gives every player their
   supply points, skull totem points, unlocks, stats and achievements as usual, so one stray cheat can't cost anyone
   their run's rewards.
 - Cheats that change a hero (god, fly, infinite ammo, speed, freeze) last until the map changes; `/cheats off` undoes
@@ -253,7 +257,7 @@ number then.
 |---|---|---|
 | `/cheats on` | Turns cheats on for this game (they stay on into the mission and the next chapter; each map change resets their effects). Everyone sees `host enabled cheats`. | `/cheats on` |
 | `/cheats off` | Turns them off and undoes god mode, infinite ammo, game speed, freeze, size and the free camera. | `/cheats off` |
-| `/cheats` or `/cheats help` | Lists the cheat commands and what is on right now. | `/cheats` |
+| `/cheats` or `/cheats help` | Lists the cheat commands and what is on right now. Someone who joined sees the own-save commands and whether the host has cheats on. | `/cheats` |
 
 ### Survival
 
@@ -296,14 +300,26 @@ These act on the whole mission (only during a mission).
 
 ### Your own progression (permanent)
 
-These change **your own save, permanently**. They never touch another player's save.
+These change **your own save, permanently**. They never touch another player's save, and nothing is sent to the host
+or the other players.
+
+**Who:** everyone, while the game they are in has cheats on: the host after `/cheats on`, and a player who joined
+while that host has cheats on (`/cheats off` stops them again). In your own Fort Hope you are the host, so it is your
+own `/cheats on`. Joining someone else's game turns your own cheats off: their host decides there. A host on an older
+b4bcoop never tells the others that cheats are on, so for them these stay off.
 
 | Command | What it does | Example |
 |---|---|---|
 | `/supply <+N>` | Adds supply points to your save (1-100000). | `/supply +1000` |
-| `/unlockall` | Unlocks every item in the supply lines you don't have yet (not burn cards, which are consumables, and not DLC items). `/unlockall check` only counts them. | `/unlockall check`, `/unlockall` |
+| `/skulls <+N>` | Adds skull totem points to your save (1-100000). | `/skulls +200` |
+| `/burncards <card> [count]` | Adds burn cards to your save (1-99, default 1). Name as shown in the game (`windfall`, `hell can wait`) or its internal row name; spaces and case don't matter. Play them from the start saferoom's burn card screen as usual; playing one uses it up. DLC burn cards aren't offered. | `/burncards windfall 3` |
+| `/burncards list [filter]` | Lists the burn cards you can add. | `/burncards list dusty` |
+| `/unlockall` | Unlocks every item in the supply lines you don't have yet (not burn cards, which are consumables, and not DLC items). In Fort Hope. `/unlockall check` only counts them. | `/unlockall check`, `/unlockall` |
 
-Before the first `/supply` or `/unlockall` of a game session, your save is copied next to itself as
+In the `~` window these are the Cheats tab's **Your own save** section (supply points, skull totem points, a burn card
+picker with a count, Unlock all); in someone else's game it is at the top of the tab.
+
+Before the first own-save change of a game session, your save is copied next to itself as
 `PlayerProfileSettings-b4bcoop-backup-<date>-<time>.sav` (and `.json`), in
 `%LOCALAPPDATA%\Back4Blood\Steam\Saved\SaveGames`; the reply shows the full path. To go back, quit the game and
 copy the backup over `PlayerProfileSettings.sav`. If the backup can't be made, nothing is changed.
