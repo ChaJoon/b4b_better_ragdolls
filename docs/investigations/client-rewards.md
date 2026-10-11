@@ -19,7 +19,7 @@ The suspicion is half right. The host computes every player's rewards. Only some
 | Stats (kills, missions completed, …) | **Kept** (native) | Host sends `ClientApplyStatDeltas`; the client reconciles into its own profile on EndPlay/OnLeavingMap. |
 | Starting locations (map unlocks) | **Kept** (native, static evidence only) | Client runs the unlock itself from `GobiPlayerState::OnRep_UnlockedNewMap`. |
 | Achievement rewards (`CompleteAchievement`) | Unknown, probably lost | Server-side tracker; no client RPC exists. |
-| Things the client does in menus (decks, cosmetics, caravan purchases, recent character) | **Kept** (native) | Executed on the client's own, local, profile component. |
+| Things the client does in menus (decks, cosmetics, caravan purchases, recent character) | **Kept** (native) | Executed on the client's own, local, profile component. (Supply lines refreshing after a purchase: `supply-lines.md`, #48.) |
 | Campaign run | **Host only** | The run belongs to `RunOwner` (the host). The client records nothing and cannot resume it alone. |
 
 **Nothing is written to the host's profile on a client's behalf.** Offline writes go only to the `LocalPlayer` that

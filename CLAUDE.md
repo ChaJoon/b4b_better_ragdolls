@@ -102,6 +102,12 @@ Detailed engine findings (addresses, obfuscated layouts, class names): `docs/NOT
     gets the listen host's replicated `bIsActive=0` without the deactivation broadcast) is unregistered before
     `ResetParticles`; before that, GC freed it and the next significance ParallelFor crashed the client (Titan Tunnels
     finale). Dev `fxsig [fix|list|guard on|off|kill|gc]`. docs/investigations/particle-significance.md.
+  - `supplylines.c` (#48) client: the game's supply-line manager (UCaravanManager, owner of the list the supply-line
+    screen shows; replaces bought-out/expired lines, next static line, new dynamic ones) is turned on only by the
+    "profile loaded" event, which a client's profile often fires before the manager exists; off for 3 s on a network
+    client with the profile loaded → the agent calls the game's handler (0x141CB65F0) itself. Local, no protocol
+    bump; env `B4BCOOP_NO_SUPPLYLINES=1` = off. Dev `supplylines [fix|off|update|auto on|off|buy <line#> [item#|all]|
+    sp <N>]`. docs/investigations/supply-lines.md.
   - `slotguard.c` host: a joiner with no free survivor slot gets "Server full." at login (bots' slots count as free),
     a slotless player is kicked instead of spawned (was a host crash, #7); `slotguard` command.
     docs/investigations/slot-guard.md.
