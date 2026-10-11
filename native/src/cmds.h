@@ -187,6 +187,8 @@ int paks_cmd(const char *verb, char *rest, Out *o);        // dev builds: `paks`
 int paks_runtime_ready(void);                              // the pak layer is known (runtime mounts possible)
 int paks_file_exists(const char *key);                     // "gobi/content/..." exists in the engine's file system
 int paks_mount_runtime(const wchar_t *path, uint32_t order, char *err, size_t en);  // game thread: mount now
+int paks_async_loading(void);                              // engine IsAsyncLoading(): 1 busy, 0 idle, -1 unknown
+int paks_package_loaded(const char *const *names, int n);  // index of the first package ("/game/x/y") in memory, -1 none
 // addons.c: L4D-style add-ons, <game>\b4bcoop-addons\*.pak + addonlist.txt (docs/investigations/addons.md)
 #define MAX_ADDONS 512
 int addons_scan(void);                        // DllMain: config, folder, load order, conflicts; number to mount
@@ -211,7 +213,12 @@ const char *addons_dir8(void);
 typedef struct { int on, on_at_start, mounted, valid, gameplay; char hash[41], state[40]; } AddonState;
 int addons_state(const char *file, AddonState *st);   // 1 = present in the folder (st filled)
 int addons_set_on(const char *file, int on);          // addonlist.txt on/off (next start); 1 = saved
-int addons_add_runtime(const char *file, char *msg, size_t mn);   // 2 mounted now, 1 next start, 0 not added
+// game thread, add-ons loaded while the game runs (Browse tab, Add-ons tab): 2 loaded now, 1 at the next start (msg:
+// why), 3 the game's loader is busy (ask again in a moment; last=1: never 3), 0 not added
+int addons_add_runtime(const char *file, char *msg, size_t mn);   // a new file in the folder: listed, then loaded
+int addons_load_now(const char *file, int last, char *msg, size_t mn);   // a listed add-on, switched on, not loaded
+int addons_update_runtime(const char *file, const wchar_t *newpath, int last, char *msg, size_t mn);   // newer file
+int addons_session_allows(int gameplay, char *msg, size_t mn);   // addons_mp.c: as a client, the host's policy allows it
 // another add-on in the folder (not `skip`) with this content id or one of the outfits/weapon looks in a catalog
 // entry's adds list; returns its file name, why = what matched
 const char *addons_installed_like(const char *skip, const char *content_id, const char *adds, char *why, size_t wn);

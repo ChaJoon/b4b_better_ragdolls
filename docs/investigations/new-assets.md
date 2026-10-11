@@ -486,4 +486,6 @@ screen").
 - Rows are per machine: a player without the add-on never sees it in their screen (same rule as `/model`).
 - The remembered outfit is per survivor and per machine (not per Steam account); a profile restored from elsewhere
   keeps its own retail look.
-- A runtime-mounted add-on (Browse tab) gets its rows within 5 s.
+- A runtime-mounted add-on (Browse tab, `/addons on`) gets its rows at the next frame (`models_outfits_refresh`), also
+  when the screen was opened earlier in the session: the screen asks the table each time it opens (shop.md §1a). An
+  updated add-on with other mesh paths has its existing rows repointed.

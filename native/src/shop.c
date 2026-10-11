@@ -6,11 +6,13 @@
 //                 imgdecode.c looks at it).
 //   Add           the pak is streamed to <add-ons>\.shop\<id>.pak.part, its size and SHA-256 must equal the signed
 //                 list, then it becomes <add-ons>\<id>.pak and addons.c takes it (addons_add_runtime): appended to
-//                 addonlist.txt and mounted right away when that is safe (cosmetic, only new files: added outfits and
-//                 weapon looks, usable at once), else it applies at the next start (replacements of game files).
+//                 addonlist.txt and mounted right away when that is safe (addons.c addons_load_now: cosmetic, new
+//                 files or replaced assets not in memory, as a client within the host's policy), else at the next start.
 //   Remove        switched off in addonlist.txt and noted in .shop\pending.txt; the next start deletes the file before
 //                 anything is mounted (shop_early, from addons_scan in DllMain). A mounted pak is never unmounted.
-//   Update        (a newer file in the list) downloaded to .shop\<id>.pak.new, swapped in by the next start.
+//   Update        (a newer file in the list) downloaded to .shop\<id>.pak.new and swapped in by the next start; loaded
+//                 at once from there (above the old one) when nothing of the old version is in memory
+//                 (addons_update_runtime).
 // netguard lets GitHub's hosts through only while a request runs (the updater's scope). ini shop=0 hides the tab.
 // Dev builds only: shop_catalog=<url> (e.g. http://127.0.0.1:<port>/catalog.json), shop_pubkey=<64 hex> (a test key),
 // dev command `shop status|fetch|add <id>|remove <id>|undo <id>|list`.
@@ -100,6 +102,7 @@ typedef struct {
     char local_sha[65];             // SHA-256 of the file in the folder (worker, after the list arrived), "" unknown
     int pending;                    // 1 remove, 2 update (this session's clicks; .shop\pending.txt)
     int staged;                     // D_VERIFIED: 1 = <id>.pak in place (Add), 2 = .shop\<id>.pak.new (update)
+    int live_upd;                   // pending == 2 and the new file is already loaded (addons_update_runtime): no Undo
     int like_checked;               // like/like_why computed (game thread; reset when the folder's add-ons change)
     char like[64], like_why[48];    // the same add-on already in the folder under another file name (e.g. batman.pak)
 } ItemRt;
@@ -115,6 +118,8 @@ static char msg[300];
 static HANDLE worker;
 static volatile LONG64 dl_got;
 static int dl_item = -1;            // the running download
+static char retry_id[40];           // a verified download whose loading waits for the game's loader (addons_* 3)
+static ULONGLONG retry_until;
 typedef struct { uint8_t sha[32]; int tex; uint8_t *rgba; int w, h; } Thumb;   // by thumbnail SHA-256, whole session
 static Thumb thumbs[MAX_THUMBS];
 static int nthumbs;
@@ -332,7 +337,45 @@ static DWORD WINAPI download_worker(void *arg) {
     return 0;
 }
 
-// game thread: a verified download becomes an add-on
+// game thread: a verified download becomes an add-on (or the newer file of one): loaded now when addons.c finds that
+// safe, else at the next start. A busy loader (only matters for files that replace existing ones) is asked again
+// every frame for up to 15 s.
+static int find(const char *id);
+static void finish(int i, int last) {
+    char file[48], m[320];
+    snprintf(file, sizeof file, "%s.pak", cat.items[i].id);
+    int again = !strcmp(retry_id, cat.items[i].id);
+    if (rt[i].staged == 2) {
+        if (!again) {
+            EnterCriticalSection(&cs); rt[i].pending = 2; LeaveCriticalSection(&cs);
+            if (!pending_write()) { item_msg(i, D_ERROR, "Downloaded, but .shop\\pending.txt could not be written."); return; }
+        }
+        wchar_t nw[MAX_PATH * 2]; char nn[48];
+        snprintf(nn, sizeof nn, "%s.pak.new", cat.items[i].id);
+        shop_path(nw, nn);
+        int r = addons_update_runtime(file, nw, last, m, sizeof m);
+        if (r == 3) { snprintf(retry_id, sizeof retry_id, "%s", cat.items[i].id); return; }
+        retry_id[0] = 0;
+        if (r == 2) {
+            rt[i].live_upd = 1;
+            item_msg(i, D_DONE, "Updated and ready now.");
+            overlay_note("[browse] update ready");
+        } else {
+            item_msg(i, D_DONE, "Updated file downloaded: it replaces the old one when you restart the game (not now: %s).", m);
+            overlay_note("[browse] update downloaded; restart the game to use it");
+        }
+        return;
+    }
+    int r = again ? addons_load_now(file, last, m, sizeof m) : addons_add_runtime(file, m, sizeof m);
+    if (r == 3) { snprintf(retry_id, sizeof retry_id, "%s", cat.items[i].id); return; }
+    retry_id[0] = 0;
+    for (int k = 0; k < cat.n; k++) rt[k].like_checked = 0;   // a new add-on in the folder: "installed as" may change
+    if (r == 2) {
+        item_msg(i, D_DONE, "Added and ready now.");
+        overlay_note("[browse] add-on added and ready");
+    } else if (r == 1) item_msg(i, D_DONE, "Added: %s.", m);
+    else item_msg(i, D_ERROR, "Downloaded, but not added: %s.", m);
+}
 void shop_tick(float dt) {
     (void)dt;
     if (!cs_ready) return;
@@ -342,33 +385,28 @@ void shop_tick(float dt) {
         cat = next_cat; rt = next_rt; have_next = 0;
         memset(&next_cat, 0, sizeof next_cat); next_rt = NULL;
         LeaveCriticalSection(&cs);
+        for (int i = 0; i < old.n; i++) {   // this session's live updates stay known across a refreshed list
+            int k = find(old.items[i].id);
+            if (k >= 0) rt[k].live_upd = oldrt[i].live_upd;
+        }
         upd_catalog_free(&old); free(oldrt);
         pending_read();
+    }
+    if (retry_id[0]) {
+        int i = find(retry_id);
+        if (i < 0) retry_id[0] = 0;
+        else { finish(i, GetTickCount64() > retry_until); return; }
     }
     if (dl_item < 0 || busy()) return;
     int i = dl_item;
     EnterCriticalSection(&cs);
-    int st = rt && i < cat.n ? rt[i].dl : D_NONE, staged = rt && i < cat.n ? rt[i].staged : 0;
+    int st = rt && i < cat.n ? rt[i].dl : D_NONE;
     LeaveCriticalSection(&cs);
     if (st == D_DOWNLOADING) return;
     dl_item = -1;
     if (st != D_VERIFIED) return;
-    char file[48], m[200];
-    snprintf(file, sizeof file, "%s.pak", cat.items[i].id);
-    if (staged == 2) {
-        EnterCriticalSection(&cs); rt[i].pending = 2; LeaveCriticalSection(&cs);
-        if (!pending_write()) { item_msg(i, D_ERROR, "Downloaded, but .shop\\pending.txt could not be written."); return; }
-        item_msg(i, D_DONE, "Updated file downloaded: it replaces the old one when you restart the game.");
-        overlay_note("[browse] update downloaded; restart the game to use it");
-        return;
-    }
-    int r = addons_add_runtime(file, m, sizeof m);
-    for (int k = 0; k < cat.n; k++) rt[k].like_checked = 0;   // a new add-on in the folder: "installed as" may change
-    if (r == 2) {
-        item_msg(i, D_DONE, "Added and ready now.");
-        overlay_note("[browse] add-on added and ready");
-    } else if (r == 1) item_msg(i, D_DONE, "Added: %s.", m);
-    else item_msg(i, D_ERROR, "Downloaded, but not added: %s.", m);
+    retry_until = GetTickCount64() + 15000;
+    finish(i, 0);
 }
 
 // ---- actions (game thread) ----
@@ -415,6 +453,7 @@ static const char *add(int i) {
     if (busy()) return "busy";
     const char *old = too_old(&cat.items[i]);
     if (old) return old;
+    if (rt[i].live_upd) return "its update is loaded; restart the game before the next update";
     if (rt[i].pending) return "it has a change waiting for the next start";
     int upd = installed(i);
     static char as[120];
@@ -438,7 +477,8 @@ static const char *remove_(int i) {
     if (busy() && dl_item == i) return "busy";
     if (!installed(i)) return "not in your add-ons folder";
     char file[48]; snprintf(file, sizeof file, "%s.pak", cat.items[i].id);
-    if (rt[i].pending == 2) { wchar_t nw[MAX_PATH * 2]; char nn[48]; snprintf(nn, sizeof nn, "%s.pak.new", cat.items[i].id); shop_path(nw, nn); DeleteFileW(nw); }
+    // a downloaded update goes with it (a loaded one stays until the next start deletes both)
+    if (rt[i].pending == 2 && !rt[i].live_upd) { wchar_t nw[MAX_PATH * 2]; char nn[48]; snprintf(nn, sizeof nn, "%s.pak.new", cat.items[i].id); shop_path(nw, nn); DeleteFileW(nw); }
     rt[i].pending = 1;
     if (!pending_write()) { rt[i].pending = 0; return "could not write .shop\\pending.txt"; }
     addons_set_on(file, 0);
@@ -448,7 +488,8 @@ static const char *remove_(int i) {
 static const char *undo(int i) {
     if (i < 0 || i >= cat.n || !rt[i].pending) return "nothing to undo";
     int was = rt[i].pending;
-    rt[i].pending = 0;
+    if (rt[i].live_upd && was == 2) return "the update is already loaded";
+    rt[i].pending = rt[i].live_upd ? 2 : 0;   // undoing a removal after a loaded update: the update stays
     if (!pending_write()) { rt[i].pending = was; return "could not write .shop\\pending.txt"; }
     char file[48]; snprintf(file, sizeof file, "%s.pak", cat.items[i].id);
     if (was == 1) addons_set_on(file, 1);
@@ -510,7 +551,7 @@ static void panel(void) {
     ov_width(14);
     ov_input_text("##search", search, sizeof search, "search");
     ov_same_line();
-    static const char *F[] = {"All", "New looks (usable at once)", "Replacements (after restart)", "In my add-ons"};
+    static const char *F[] = {"All", "New looks (usable at once)", "Replacements", "In my add-ons"};
     ov_width(14);
     ov_combo("##filter", &filter, F, 4);
     if (ov_table_begin("shop", 3)) {
@@ -565,6 +606,9 @@ static void panel(void) {
             } else if (rs == 6) {
                 AddonState as;   // that add-on's state, short like an installed row's ("on", "off", ...)
                 ov_text("%s", addons_state(why, &as) ? as.state : "in the folder");
+            } else if (rs == 3 && rt[i].live_upd) {
+                ov_text("updated");
+                ov_tooltip("The new version is loaded now; its file replaces the old one in the add-ons folder when the game next starts.");
             } else if (rs == 2 || rs == 3) {
                 ov_text_warn(rs == 2 ? "removed after restart" : "updated after restart");
                 snprintf(lab, sizeof lab, "Undo##%s", it->id);
@@ -602,7 +646,7 @@ static void panel(void) {
         if (it->license_url[0]) { ov_same_line(); if (ov_button("Copy the license link")) ov_copy(it->license_url); }
         ov_text("Content: %s%s%s%s", it->cls, it->kinds[0] ? " (" : "", it->kinds, it->kinds[0] ? ")" : "");
         if (it->adds[0]) ov_text_dim("Adds: %s. New looks are ready right after Add: wear them in the Models tab.", it->adds);
-        if (it->replaces[0]) ov_text_dim("Replaces: %s. Replacements take effect after a restart.", it->replaces);
+        if (it->replaces[0]) ov_text_dim("Replaces: %s. A replacement works right after Add unless the game is using what it replaces (then after a restart).", it->replaces);
         if (!strcmp(it->cls, "gameplay")) ov_text_warn("Gameplay-affecting: hosts with addons_policy=cosmetic, none or match (without the same add-on) refuse players who run it.");
         size_str(it->size, sz, sizeof sz);
         upd_hex(it->sha256, 32, hex);

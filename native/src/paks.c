@@ -286,6 +286,37 @@ int paks_mount_runtime(const wchar_t *path, uint32_t order, char *err, size_t en
     return 1;
 }
 
+// The engine's global `bool (*IsAsyncLoading)()` (UObjectGlobals), read from FAsyncLoadingThread::FlushLoading
+// (0x142529160), whose first call is `call [rip+disp]` through it. Its static value is a `return false` stub
+// (0x140BA60E0) until the loader replaces it at start. 1 = packages are being loaded (queued or in flight), 0 = none,
+// -1 = unknown (pattern changed, or still the stub: callers treat it as "busy").
+#define ADDR_FLUSHLOADING_CALL VA(0x14252916Eull)
+#define ADDR_ISASYNC_STUB      VA(0x140BA60E0ull)
+int paks_async_loading(void) {
+    const uint8_t *c = (const uint8_t *)ADDR_FLUSHLOADING_CALL;
+    if (c[0] != 0xFF || c[1] != 0x15) return -1;
+    uint8_t (**fp)(void) = (uint8_t (**)(void))(c + 6 + *(const int32_t *)(c + 2));
+    if (!*fp || (void *)*fp == (void *)ADDR_ISASYNC_STUB) return -1;
+    return (*fp)() != 0;
+}
+
+// Is any of these packages in memory (also one being loaded, or unreachable and not yet purged)? names: lower case
+// "/game/ui/textures/x". Returns the index of the first one found, -1 none. Game thread.
+int paks_package_loaded(const char *const *names, int n) {
+    static UClass *pkg;
+    if (!pkg) pkg = ue_find_class("Package");
+    if (!pkg || n <= 0) return n > 0 ? 0 : -1;   // can't tell: as if loaded
+    int32_t total = ue_num_objects();
+    char b[300];
+    for (int32_t i = 0; i < total; i++) {
+        UObject *o = ue_object_at(i);
+        if (!o || U_CLASS(o) != pkg || U_OUTER(o)) continue;
+        ue_obj_name(o, b, sizeof b);
+        for (int k = 0; k < n; k++) if (!_stricmp(b, names[k])) return k;
+    }
+    return -1;
+}
+
 #ifndef B4B_RELEASE
 // ---- dumpassets ----
 typedef struct { wchar_t **v; int n, cap; } WList;
@@ -419,7 +450,18 @@ static void cmd_paks(Out *o) {
 }
 
 int paks_cmd(const char *verb, char *rest, Out *o) {
-    if (!strcmp(verb, "paks")) { cmd_paks(o); return 1; }
+    if (!strcmp(verb, "paks")) {
+        char nm[300];
+        if (rest && sscanf(rest, "loaded %299s", nm) == 1) {   // dev: is a package in memory (addons.c live checks)
+            for (char *c = nm; *c; c++) *c = (char)tolower((unsigned char)*c);
+            const char *v[1] = {nm};
+            out_printf(o, "package %s: %s; async loading: %d\n", nm, paks_package_loaded(v, 1) == 0 ? "in memory" : "not loaded", paks_async_loading());
+            return 1;
+        }
+        cmd_paks(o);
+        out_printf(o, "async loading now: %d (1 yes, 0 no, -1 unknown)\n", paks_async_loading());
+        return 1;
+    }
     if (!strcmp(verb, "mountpak")) {
         if (!pf_ok()) { out_printf(o, "pak platform file not found\n"); return 1; }
         char path[520] = "", sig[16] = ""; unsigned order = MODPAKS_ORDER + 500;

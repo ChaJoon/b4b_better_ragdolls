@@ -81,15 +81,31 @@ static void build_looks(void) {
             l->path[0], l->path[1], l->path[2]);
     }
 }
-// An add-on mounted at runtime (Browse tab): append its weapon looks; built entries stay.
+// An add-on loaded at runtime (Browse tab, Add-ons tab): append its weapon looks; a look whose add-on was updated
+// (addons_update_runtime: none of its old meshes was loaded) takes the new file's meshes and title.
 void wlooks_refresh(void) {
     if (n_looks < 0) return;
     AddonWeapon a[MAX_LOOKS];
     int n = addons_weapons(a, MAX_LOOKS);
-    for (int i = 0; i < n && n_looks < MAX_LOOKS; i++) {
+    for (int i = 0; i < n; i++) {
         int k = 0;
         while (k < n_looks && _stricmp(looks[k].name, a[i].name)) k++;
-        if (k < n_looks) continue;
+        if (k < n_looks) {
+            Look *l = &looks[k];
+            const char *np[NM] = {a[i].fp, a[i].sm3p, a[i].skm3p};
+            int ch = strcmp(l->title, a[i].title) || strcmp(l->addon, a[i].addon) || strcmp(l->code, a[i].code);
+            for (int m = 0; m < NM; m++) if (strcmp(l->path[m], np[m])) {
+                snprintf(l->path[m], 200, "%s", np[m]);
+                l->mesh[m] = NULL; l->idx[m] = 0; l->tried[m] = 0;
+                ch = 1;
+            }
+            if (!ch) continue;
+            snprintf(l->code, sizeof l->code, "%s", a[i].code);
+            snprintf(l->title, sizeof l->title, "%s", a[i].title); snprintf(l->addon, sizeof l->addon, "%s", a[i].addon);
+            LOG("wlooks: add-on weapon look %s for %s (\"%s\", %s) updated", l->name, l->code, l->title, l->addon);
+            continue;
+        }
+        if (n_looks == MAX_LOOKS) break;
         Look *l = &looks[n_looks++];
         memset(l, 0, sizeof *l);
         snprintf(l->name, sizeof l->name, "%s", a[i].name); snprintf(l->code, sizeof l->code, "%s", a[i].code);

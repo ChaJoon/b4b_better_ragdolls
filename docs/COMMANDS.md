@@ -356,7 +356,8 @@ holly_green.pak=0
 `=1` on, `=0` off. New add-ons are added at the bottom, switched on. The game loads them top to bottom: when two
 add-ons change the same file, **the one further down wins**. Move lines to change that. The `~` window's **Add-ons**
 tab (checkbox, **Up**/**Down**) and `/addons on|off` edit this file for you; editing it by hand while the game runs is
-picked up too. All changes apply the next time the game starts.
+picked up too. Switching an add-on **on** loads it right away when that is safe (the same rules as the Browse tab's
+**Add**, below), else at the next start; switching off and changing the load order apply at the next start.
 
 **`/addons`**: the list with numbers (in `addonlist.txt` order), the state of each (`on`, `off`, `on after restart`, `off after restart`,
 `on, NOT LOADED`) and conflicts:
@@ -436,15 +437,22 @@ you have.
 2. **Add** downloads the add-on, checks its size and SHA-256 against the signed list (a damaged or changed file is
    deleted: "Nothing was changed"), and puts it into your add-ons folder as `<name>.pak`, switched on, last in the
    load order.
-   - **New looks** (added outfits, weapon looks) are ready at once, even in the middle of a mission: wear them in the
-     **Models** tab (or `/model <name>`).
-   - **Replacements** (an add-on that changes something of the game, e.g. a survivor's textures) say "applies after a
-     restart" and load the next time the game starts.
-   - While you are in someone else's session, everything you add loads at the next start.
+   - **New looks** (added outfits, weapon looks) are ready at once, in Fort Hope, in the middle of a mission and in
+     someone else's session: wear them in the **Models** tab, the game's customization screen (also if you opened it
+     before) or with `/model <name>`. Players with the same add-on see it on you, the others your survivor.
+   - **Replacements** (an add-on that changes something of the game, e.g. a survivor's textures) are ready at once too
+     when the game isn't using what they replace right now; otherwise they say "applies after a restart (it replaces
+     an asset the game is using now: ...)" and load the next time the game starts.
+   - In someone else's session the host's `addons_policy` decides as it would when you join: under `none` the add-on
+     waits for the next start ("this host allows no add-ons"; with it on you can't join that host again).
+   - Gameplay add-ons and replacements of files the game reads only when it starts (sound banks, translations,
+     config) always wait for the next start.
 3. **Remove** (click twice) switches the add-on off at once and deletes its file the next time the game starts.
    **Undo** takes that back until then.
-4. **Update** appears when the list has a newer file than yours: it is downloaded now and replaces the old one at the
-   next start (**Undo** cancels).
+4. **Update** appears when the list has a newer file than yours. It is downloaded now and replaces the old file at
+   the next start. If nothing of the old version is in use right now (e.g. nobody wears that outfit), the new version
+   is also **ready at once** ("Updated and ready now"); otherwise it says why it waits (e.g. you are wearing it) and
+   **Undo** cancels it until the restart.
 5. **Installed (as batman.pak)** instead of **Add**: you already have that add-on under another file name (the same
    content, or an add-on that adds the same outfit or weapon look), so it isn't added twice. The **Add-ons** tab
    switches it on/off.
