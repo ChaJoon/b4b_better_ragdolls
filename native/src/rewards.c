@@ -97,8 +97,9 @@ static void execute_detour(UObject *ppc, void *cmd, uint8_t persist) {
         LOG("rewards: not forwarded: command type %d for remote player %s", type, hydra_id(ppc, id, sizeof id));
 }
 
-// cheats.c (/supply, /unlockall): run a profile command on the HOST's own, local profile component (the original
-// ExecuteCommand, persisted; never forwarded). -1 if the hook isn't in place or the component isn't local.
+// cheats.c (/supply, /skulls, /burncards, /unlockall): run a profile command on this machine's own, local profile
+// component (the original ExecuteCommand, persisted; never forwarded; on a client it never reaches rewardguard.c's RPC
+// hooks either: nothing is sent to or from the host). -1 if the hook isn't in place or the component isn't local.
 int rewards_execute_local(UObject *ppc, void *cmd) {
     if (!orig_execute || !ppc || !cmd || is_remote_pc(COMP_OWNER(ppc))) return -1;
     orig_execute(ppc, cmd, 1);

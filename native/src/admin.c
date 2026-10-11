@@ -4,7 +4,8 @@
 // Roles: a command typed on this machine acts on this machine. Each chat command has a permission (cmds.h), checked
 // here before its handler runs: CMD_ANYONE (every player: own view, own light, own session, lists), CMD_HOST (this
 // machine must be the server: listen host, or standalone for settings like teamsize/bots; a client gets "host only"),
-// CMD_CHEAT (host, and cheats on: cheats.c's verbs, which cheats_perm() reports).
+// CMD_CHEAT (host, and cheats on: cheats.c's verbs, which cheats_perm() reports), CMD_OWNSAVE (own save, cheats on in
+// this session: the host with cheats on, or a client whose host said its cheats are on; cheats_own_save_ok()).
 // A client's commands never reach the host (chat.c intercepts before anything is sent).
 //
 // Host-side enforcement (hook AGameModeBase::PreLogin override, the function that calls slotguard's ApproveLogin):
@@ -656,7 +657,7 @@ static void help(Out *o) {
     out_printf(o, "b4bcoop %s (protocol %d)\n/join steam:<id64>  /host  /leave\n/players  /ping  /flashlight [on|off|auto]\n"
                   "/thirdperson  (your own camera)\n/model list|<name>|reset\n/addons [on|off|info <#>|players]\n",
                coop_version(), coop_protocol());
-    if (is_client()) { out_printf(o, "(/kick /ban /lock ... are for the host)\n"); return; }
+    if (is_client()) { out_printf(o, "(/kick /ban /lock ... are for the host)\n/cheats  (when the host has cheats on: your own save)\n"); return; }
     out_printf(o, "host: /kick /ban <name|#>  /unban  /bans\n/lock  /unlock  /teamsize N  /bots on|off\n"
                   "/restart  /ready [vote]  /say <msg>\n/cheats on|off  (sandbox, /cheats help)\n"
                   "/model <player> <name>  /models on|off\n/addons policy any|cosmetic|none|match\n"
@@ -689,7 +690,9 @@ void admin_slash(char *line, Out *o) {
     for (; i < N_CMDS && strcmp(CMDS[i].name, verb); i++) {}
     int perm = i < N_CMDS ? CMDS[i].perm : cheats_perm(verb);
     if (perm < 0) { out_printf(o, "unknown command /%s (/help)\n", verb); return; }
-    if (perm != CMD_ANYONE && is_client()) { out_printf(o, "/%s: host only (you are a client)\n", verb); return; }
+    const char *why = NULL;
+    if (perm == CMD_OWNSAVE && !cheats_own_save_ok(&why)) { out_printf(o, "/%s: %s\n", verb, why); return; }
+    if (perm != CMD_ANYONE && perm != CMD_OWNSAVE && is_client()) { out_printf(o, "/%s: host only (you are a client)\n", verb); return; }
     if (perm == CMD_CHEAT && !cheats_enabled()) { out_printf(o, "/%s: cheats are off (the host types /cheats on first)\n", verb); return; }
     if (i == N_CMDS) { cheats_slash(verb, rest, o); return; }   // cheats.c: /cheats, /god, /fly, ...
     LOG("admin: /%s %s", verb, rest ? rest : "");

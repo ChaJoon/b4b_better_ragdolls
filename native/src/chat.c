@@ -182,7 +182,10 @@ static void ctm_detour(UObject *pc, UObject *sender, const FString *s, FName typ
     if (strcmp(tn, "Event")) LOG("chat: received %s message from %s: %s", tn, name, text);   // Event: game debug lines
     FName nt = chat_notice_type(0), kt = chat_notice_type(1), dt = chat_notice_type(2);
     if (type.idx == nt.idx && type.num == nt.num) { models_host_notice(text); show_text(name[0] ? name : "host", text); return; }
-    if (type.idx == dt.idx && type.num == dt.num) { wlooks_host_data(text); return; }   // data for this agent, not shown
+    if (type.idx == dt.idx && type.num == dt.num) {   // data for this agent, not shown
+        if (!strncmp(text, "cheats ", 7)) cheats_host_data(text); else wlooks_host_data(text);
+        return;
+    }
     if (type.idx == kt.idx && type.num == kt.num) {
         // only honoured from the server we are connected to (a client RPC can only come from it)
         LOG("chat: the host removed us: %s", text);

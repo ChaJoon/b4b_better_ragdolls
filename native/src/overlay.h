@@ -61,7 +61,7 @@ void ov_copy(const char *text);               // to the clipboard
 int ov_texture(const unsigned char *rgba, int w, int h);
 void ov_image(int tex, float w_em, float h_em);
 
-// ---- permissions (cmds.h CMD_ANYONE / CMD_HOST / CMD_CHEAT): disabled block with a reason ----
+// ---- permissions (cmds.h CMD_ANYONE / CMD_HOST / CMD_CHEAT / CMD_OWNSAVE): disabled block with a reason ----
 int ov_allowed(int perm, const char **why);   // 1 if this machine may run such a command now
 int ov_begin_perm(int perm);                  // returns ov_allowed(); always pair with ov_end_perm()
 void ov_end_perm(void);

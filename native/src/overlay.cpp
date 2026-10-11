@@ -796,6 +796,7 @@ extern "C" int ov_allowed(int perm, const char **why) {
     if (!why) why = &w;
     *why = nullptr;
     if (perm == CMD_ANYONE) return 1;
+    if (perm == CMD_OWNSAVE) return cheats_own_save_ok(why);   // own save: host with cheats on, or the host said so
     if (admin_is_client()) { *why = "Host only: you are in someone else's session."; return 0; }
     if (perm == CMD_CHEAT && !cheats_enabled()) { *why = "Turn cheats on first (Cheats on, above)."; return 0; }
     return 1;

@@ -31,7 +31,9 @@ local chat line from `coop`.
 
 Who may run what: every command has a permission in the dispatcher (`cmds.h`): `CMD_ANYONE` (all players; acts on
 their own game only), `CMD_HOST` (the "host" rows; a client gets `/<cmd>: host only (you are a client)`), `CMD_CHEAT`
-(host and `/cheats on`, cheats.c's verbs via `cheats_perm()`; else `cheats are off`). `admin_slash` checks it once
+(host and `/cheats on`, cheats.c's verbs via `cheats_perm()`; else `cheats are off`), `CMD_OWNSAVE` (own-save cheats,
+#49: the host with cheats on, or a client whose host said `cheats on` in a data line; `cheats_own_save_ok()`).
+`admin_slash` checks it once
 before any handler, so a new personal command only needs a `CMD_ANYONE` row.
 
 Dropped: **`/difficulty`**. A new run's difficulty is already picked in the war table (host's own UI, the path

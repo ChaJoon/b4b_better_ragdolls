@@ -80,7 +80,11 @@ Transport: PacketRelayNetDriver (IpNetDriver subclass) on UDP 7777 with DTLSHand
 - The profile component's ClientExecute*Command handlers return early on the server (game-mode IsA check), and the
   ServerExecute* ones are `_Validate = false` / empty. Host-side profile edits call ExecuteCommand (0x141BC4970) with
   commands built on their own vtables: FAdjustSupplyPointsCommand 0x1454E8880 (GetType 5), FUnlockProductCommand
-  0x1454E88F8 (GetType 6).
+  0x1454E88F8 (GetType 6), FAdjustSkullTotemPointsCommand 0x1454E8920 (GetType 20), FAdjustConsumableQuantityCommand
+  0x1454E8BA0 (GetType 19; from the ClientExecute*Command exec thunks' `lea rax, vtable`: 0x142131220, 0x1421310E0).
+  The same ExecuteCommand works on a client's own (local) component: own-save cheats (#49). Burn cards in the offline
+  save are the products table's consumable products (ProductRow +0x91 = 1; +0xA9 DLC; Unlock = the card row);
+  14 non-DLC, 13 DLC in this build.
 - Component RPCs (stat deltas, achievements) leave through UActorComponent::CallRemoteFunction 0x143B2C830.
 - FNamePool in this build: +0 current block, +4 byte cursor, +0x10 blocks (0x20000 bytes each).
 - Ridden classes: TallboyBasic/Squeezer (Crusher)/Smasher (Bruiser), BloaterBasic (Reeker)/Exploder/Vomiter (Retch),
