@@ -1169,3 +1169,34 @@ the same way is the reference (charsuite now adds it to the previews: column "pr
   (`/tmp/b4b-charsuite-l2-final`, after merging models 1b25e15); `e2e.py --quick` 14/14
   (`/tmp/b4b-e2e-l2-final`). New charsuite `--motion`: talking face (client view while the host's
   hero says a line) and the outfit on a bot running across the host's view.
+
+## 21. Unrigged models that bend wrong in game: placement, simulated bones, weight source (ada-fix, 2026-10-12)
+Ada Wong (RE4 remake, unrigged glTF, `--as adawong` on Karlee Elite 00) passed the suite but in game "her whole body
+morphs grotesquely" when crouching or turning, with dark flaps at the hips. Three causes, found with new game-like
+poses in `preview.py --pose crouch|turn|walk|aim` (each joint turned about the body's own axes; render the template the
+same way to compare):
+- **Placement.** An unrigged model is stood up by its bounding box, centred on the pelvis. Ada's hands reach 28 cm
+  forward in her rest pose, so the box's middle sat in front of her body and the whole body ended up 10-13 cm behind
+  the skeleton (calf vertices 12 cm behind the calf bone, face 12 cm behind Karlee's): every joint turned her about an
+  axis in front of her, and the face rig found nothing ("lips 0.2 cm from the head joint"; v1 had guessed the face
+  bones at half scale). Fix (`b4bfit`, 3P unrigged): the legs' band (25-42 % of the stature, 2 % trimmed front-back
+  middle) is put on the template's same band (`unrigged: centred front to back on the legs: moved +13.0 cm`). Ada's face
+  is now found (eyes from the eye mesh, mouth and chin from the profile; 15300 vertices on face bones, eyelids blink).
+- **Simulated bones.** Weights come from the template's nearest surface. Karlee's physics asset simulates `backpack`
+  (her jacket's back and hood, up to 73 % per vertex): Ada's back, hips, dress and holster got up to 70 % of it and
+  swung with that body. Now b4bmodel reads the template's `PhysType_Simulated` bodies (`cloth.simulated_bones`) and
+  passes `--sim_bones`; b4bfit gives those bones' template weights to the other bones of each vertex (or the parent)
+  before anything is copied (`weights: the survivor's simulated bones backpack left out ...`); hair chains the
+  model's hair is put on (`--hair_bones`) keep theirs.
+- **Weight source.** Karlee Elite 00's jacket tails cover her hips and thighs: a tight dress copied pelvis weights
+  there and hung like a curtain between the knees when crouching (dark tears where the leggings under it poked
+  through). Karlee Elite 03 (tight suit, same skeleton and physics asset, no weights on `backpack`) gives body-like
+  weights: the dress bends with the thighs. Guide: pick a tight-fitting outfit for unrigged models in tight clothes.
+- Ada v2: `--outfit TU07/Karlee/Elite_03`, `--cloth off --hair-physics off --hair-pin off` (Dan: nothing on her should
+  swing; the hair pin had put up to 84 % of her bob on spine_03, which stretches it when the head turns). Stills: crouch,
+  turn, walk and aim clean; at full crouch a few leggings vertices poke through the dress at the back of the thigh.
+- Live (lane 2, Flatpak Steam, `B4B_STEAM=flatpak B4B_GPU=4090`, new `charsuite.py --mission 1 --poses`): Ada worn in
+  Fort Hope and Evansburgh, host crouching (22 cm lower), jogging, turning in place and aiming seen from the client and
+  the host's 3P camera: no stretching, no flaps, nothing swinging; PASS, 0 new log errors. The leg centring also
+  moves the unrigged Pink/Yellow Rangers 4-6 cm (their knees bend cleaner in `--pose crouch`); their paks are v1.
+
