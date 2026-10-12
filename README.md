@@ -57,7 +57,8 @@ or accept their Steam invite. It works with your game closed or running: the gam
 Offline and joins them.
 
 Only the host's **Steam friends** can join. Press **`~`** in game for the b4bcoop window: players (kick, ban, lock),
-join/leave, camera, flashlight, keys, cheats, updates. The same things work as chat commands (`/help` in the game's chat).
+join/leave, camera, flashlight, keys, cheats, looks and add-ons, updates. The same things work as chat commands
+(`/help` in the game's chat).
 
 ## Play online
 Keep the mod installed and play the official online game: press **Play**, pick **Online**. b4bcoop then moves its
@@ -89,7 +90,8 @@ options need a game restart). Every option, with defaults and examples:
 - `host_ip=1`: **advanced**, only if you know you need it: host and join by IP address instead of through Steam. Needs
   port forwarding (UDP 7777) and triggers the Windows Firewall prompt. Everyone in the game needs it.
 
-Add-ons (textures, models): put the add-on's `.pak` in a `b4bcoop-addons` folder next to `Back4Blood.exe` and
+Add-ons (textures, models): press `~`, tab **Looks & add-ons**: **Get more** lists free ones (**Add**, then **Wear**),
+**Installed** manages yours. Or put an add-on's `.pak` in a `b4bcoop-addons` folder next to `Back4Blood.exe` and
 restart; `/addons` lists them. Only you see your add-ons, and nobody learns which ones you have. By default hosts
 let in players with any add-ons; a host can allow cosmetic ones only, or none (`addons_policy=`; your game checks
 yours before joining).
@@ -160,8 +162,8 @@ Making your own add-ons: see the modkit ([modkit/README.md](modkit/README.md), `
 - Everyone must run the same version; a mismatch is refused with a message that points to the Updates tab.
 
 **In game**
-- The **`~` window**: players, session, camera, flashlight, cheats, add-ons, models, add-on browser and updates, with
-  key bindings and settings saved for you. The same things also work as chat commands (`/help`).
+- The **`~` window**: players, session, camera, flashlight, cheats, looks and add-ons, and updates, with key bindings
+  and settings saved for you. The same things also work as chat commands (`/help`).
 - **Manual flashlight** toggle (L), plus a wider, longer or brighter beam for your own view.
 - **Third-person camera** for your own hero (`/thirdperson`, N), with free look while you stand still.
 - **Change your look** with `/model`: other survivors' outfits and pieces, and add-on outfits. Others see it too if
@@ -172,10 +174,11 @@ Making your own add-ons: see the modkit ([modkit/README.md](modkit/README.md), `
 
 **Add-ons**
 - Drop `.pak` add-ons into `b4bcoop-addons`: textures, custom outfits and weapon looks (up to 512 add-ons and 512
-  outfits). Added outfits are also in the game's customization screen, for every survivor. Load order and on/off in
-  the `~` window. Nobody learns which add-ons you have; the host decides whether
-  joiners may bring gameplay-changing ones.
-- **Browse** tab: add, remove and update free add-ons from a signed catalog (still empty for now).
+  outfits). Added outfits are also in the game's customization screen, for every survivor. Nobody learns which
+  add-ons you have; the host decides whether joiners may bring gameplay-changing ones.
+- One **Looks & add-ons** tab in the `~` window: **Get more** finds free add-ons in a signed catalog and adds them
+  (most are ready at once), **Wear** puts on an outfit or weapon look (yours, other survivors', NPC bodies),
+  **Installed** switches add-ons on/off, sets the load order, updates and removes them.
 - **Modkit** (separate download, `b4bcoop-modkit-<version>.zip`): turn a downloaded character (FBX, glTF/glb, VRM, OBJ,
   DAE, .blend) or a gun model into an outfit or weapon look, with hair physics, cloth for skirts, coats and capes,
   talking and blinking faces, and first-person arms. See [modkit/README.md](modkit/README.md).

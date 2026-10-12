@@ -73,20 +73,26 @@ Detailed engine findings (addresses, obfuscated layouts, class names): `docs/NOT
   - `addons.c` add-ons (#20): `<game>\b4bcoop-addons\*.pak` (ini `addons_dir=`, `addons=0`), read in DllMain:
     `addonlist.txt` on/off + load order (later wins, read order 1000+), embedded `b4bcoop-addoninfo.txt`, index SHA1
     checked, conflicts (same file; "mixed" = one package from two add-ons) logged + one chat notice; chat
-    `/addons [on|off|info <#>]` (off/order: next start; on: loaded at once when safe); `~` Add-ons tab (on/off, Up/Down load order = `ord[]` + file,
-    details, host `addons_policy`; addons.md §8). Packer `modkit/addon.py pack|info|check`. `addons_mp.c` (#22, private
+    `/addons [on|off|info <#>]` (off/order: next start; on: loaded at once when safe); `~` Installed (Looks & add-ons tab, `addons_installed_panel`: on/off, Up/Down load
+    order = `ord[]` + file, details under the row, Wear/Use `addons_look_buttons`; addons.md §8). Packer `modkit/addon.py pack|info|check`. `addons_mp.c` (#22, private
     #35): nothing about a player's add-ons is sent; the host announces `addons_policy` (presence ` addons:<policy>`,
     else a login refusal ending `[addons:<policy>]`), the joiner checks itself, declines locally or logs in with
     `?b4bcoopaddonsok=<policy>`; older clients' `?b4bcoopaddons=` summary still judged, never logged (`log_redact_addons`).
     Client-side only, no protocol bump. docs/investigations/addons.md. Loading without a restart (shop.md §1):
-    `addons_add_runtime` (Browse Add: appended to addonlist.txt) / `addons_load_now` (also `/addons on`) /
-    `addons_update_runtime` (Browse Update, mounts `.shop\<id>.pak.new` above all add-ons): cosmetic only; as a client
+    `addons_add_runtime` (Get more's Add: appended to addonlist.txt) / `addons_load_now` (also `/addons on`) /
+    `addons_update_runtime` (Update, mounts `.shop\<id>.pak.new` above all add-ons): cosmetic only; as a client
     only within the host's announced policy (`addons_session_allows`); new paths always; replaced files only whole
     packages (.uasset/.uexp/.ubulk/.uptnl) that are not in memory (`paks_package_loaded`, GUObjectArray) while the
     engine's `IsAsyncLoading` (`paks_async_loading`) is idle (busy: the shop asks again for 15 s), never another add-on's
     files above it in the load order (owner table `own_*`); else next start. Then `models_outfits_refresh` (rows on the
     customization screen next frame) / `wlooks_refresh` (updated entries too).
-  - `shop.c` the `~` **Browse** tab (#36, add-on shop; ini `shop=0` hides it): on click `catalog.json` + `.sig`
+  - `looks.c` the `~` **Looks & add-ons** tab (replaced the Models, Add-ons and Browse tabs): modes **Wear**
+    (models.c `models_wear_panel` + weaponlooks.c `wlooks_panel`), **Installed** (addons.c), **Get more** (shop.c),
+    one shared search box, **Host rules** header under every mode (`models_host_panel`, `addons_mp_panel`); a mode row
+    is `ov_tabs`; `looks_show()` switches mode (Installed's "Wear (n)"). Dev `overlay tab Models|Add-ons|Browse|Wear|
+    Installed|Get more` = the tab in that mode (`overlay_add_alias`). docs/investigations/overlay.md "Looks & add-ons".
+  - `shop.c` the add-on shop (#36): **Get more** (ini `shop=0` hides it and Update) + Installed's Update/Remove/Undo
+    (`shop_installed_actions`; Remove works for any add-on file): on click `catalog.json` + `.sig`
     (ed25519, its own shop key, never the release key: `signkeys.h`; `upd_catalog_*` in updcore.c) from the public
     shop repo `actuallydan/back4blood-shop` (its workflow builds + signs the list; raw.githubusercontent.com, inside
     netguard's updater scope), thumbnails (SHA-256 from the signed list, then stb_image in `imgdecode.c`, `ov_texture`),
@@ -122,7 +128,7 @@ Detailed engine findings (addresses, obfuscated layouts, class names): `docs/NOT
     `overlay_key`, `overlay_scale`. Panels: `overlay.h` (`overlay_add_panel` from a module's init + C `ov_*` widgets;
     actions `ov_run` = the chat path `admin_slash`, settings `ov_setting` = ini live handler + writer; `ov_begin_perm`
     greys out host/cheat controls). Tabs live next to their module (presence.c Session, admin.c Players,
-    thirdperson.c Camera, flashlight.c Flashlight, cheats.c Cheats, addons.c Add-ons, models.c Models). Dev `overlay
+    thirdperson.c Camera, flashlight.c Flashlight, cheats.c Cheats, looks.c Looks & add-ons). Dev `overlay
     open|close|status|tab|press|set|locate|mouse|wheel|log`, `screenshot <path>` (presented frame as PNG,
     launch/shot.sh); e2e has a smoke check. docs/investigations/overlay.md (parity checklist). **It replaces the chat
     commands:** port every chat command into it; once it has them all, new features get overlay controls (+ ini keys)
@@ -154,7 +160,7 @@ Detailed engine findings (addresses, obfuscated layouts, class names): `docs/NOT
     default weapon; a dropped weapon keeps its look on the floor (pickup's `3P_<Code>_SM`; the host pairs it by
     PreviousOwner, add-on or not, and names it to clients and late joiners in `wlook floor|gone|hello` data lines;
     clients guess by position until then), the next owner's own choice applies; world pickups and the dropped magazine
-    stay retail; `~` Models tab; dev `wlook dump|swap|select|drop|drophero|row|pickups|use|guess` (new-assets.md §9).
+    stay retail; `~` Looks & add-ons, Wear; dev `wlook dump|swap|select|drop|drophero|row|pickups|use|guess` (new-assets.md §9).
     docs/investigations/model-swap.md, player page docs/commands-models.md.
   - `cheats.c` Cheats: opt-in, host-only sandbox through chat (`/cheats on|off`, then `/god /heal /revive /ammo /copper
     /card /fly /noclip /walk /tp /freecam /size /horde /director /spawn /killall /freeze /slomo /win /lose`); own-save
@@ -459,6 +465,10 @@ Verified live (2026-09-23/24; details and evidence in `docs/investigations/*.md`
 - Add-on shop (#36, 2026-09-27, lane 2 / Flatpak Proton, dev build + local catalog): Browse tab, signed catalog,
   thumbnails, runtime mount of new-path cosmetic add-ons (outfit worn right after Add, weapon look added mid-mission),
   replacements/removals/updates at the next start (`tools/shop-test.py` 32/32). No real shop repo yet.
+
+- One `~` tab, Looks & add-ons (2026-10-12, lane 2 / Flatpak Proton): Models, Add-ons and Browse merged (Wear /
+  Installed / Get more, one search box, Host rules), host and client, 960x540 and 1080p, text size 1.25 and 0.75;
+  `tools/shop-test.py` 58/58.
 
 Known issues / open:
 - #8 (fixed): the 5th hero in the post-round lineup stands in the back row, dimmer and without a name plate.

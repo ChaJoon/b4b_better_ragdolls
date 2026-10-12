@@ -83,7 +83,7 @@ Hope, `/model holly_elite_00` showed the replacement model in third person (scre
   player's `batman.pak` and the shop's `batman-any.pak`) or declaring the same outfit/weapon look name (only the later
   one's is worn). Logged `addons: duplicate: a.pak and b.pak are the same add-on ...` / `... both add outfit x: b.pak's
   is used`; notice `Add-on "X" is installed twice (a.pak and b.pak): switch one off.` / `Add-ons a.pak and b.pak both
-  add outfit x ...`; `/addons` and the Add-ons tab say the same instead of "overrides" (identical paks also share every
+  add outfit x ...`; `/addons` and Installed (`~` window) say the same instead of "overrides" (identical paks also share every
   file path, which alone read as a plain conflict).
 - `addons_mount()` from the `FPakPlatformFile::Initialize` hook, right after the retail paks:
   `paks_mount_unsigned(path, order)` (bSigned cleared for that Mount only, path recorded for the other two
@@ -161,7 +161,7 @@ L4D-like: add-ons are local content, nothing is downloaded, and since #35 nothin
 their PC (no ids, names or counts; Dan: "I don't want other clients to know what I have installed"). A player sees
 their own add-ons on everyone, the others see vanilla. Code: `native/src/addons_mp.c`; gate in `admin.c` PreLogin;
 join side in `cmds.c` `cmd_join`, `presence.c` `handle_connect`, `chat.c` `chat_on_join_failed`.
-- **Policy** (host): ini `addons_policy=` / chat `/addons policy <x>` (session only) / `~` Add-ons tab, default =
+- **Policy** (host): ini `addons_policy=` / chat `/addons policy <x>` (session only) / `~` Looks & add-ons, Host rules, default =
   `ADDONS_POLICY_DEFAULT` in addons_mp.c (`any` since #43, 0.8.1 and before `cosmetic`): `any` = everyone;
   `cosmetic` = no gameplay add-ons; `none` = no add-ons; `match` = gameplay add-ons exactly the host's (cosmetic free).
   A change during a session (chat, `~` tab, live ini) seats the remote players present at that moment (`seated[]`,
@@ -176,12 +176,12 @@ join side in `cmds.c` `cmd_join`, `presence.c` `handle_connect`, `chat.c` `chat_
 - **Joiner checks itself** against the announced policy (`addons_join_refused`): Steam Join Game / invite / launch
   command line (`handle_connect`: before arming the join, so no connection at all), and `steam:<id64>` joins from the
   CLI/ini/overlay read the host's presence from Steam's friends cache (`presence_note_host_addons`). Fail -> local
-  chat only, e.g. `Could not join: This host allows only cosmetic add-ons; turn off Walker data table test (~ window,
-  tab Add-ons, or /addons off <#>) and restart the game.` / `This host allows no add-ons; turn off ...` / `This host
+  chat only, e.g. `Could not join: This host allows only cosmetic add-ons; turn off Walker data table test (~ window:
+  Looks & add-ons, Installed; or /addons off <#>) and restart the game.` / `This host allows no add-ons; turn off ...` / `This host
   requires the same gameplay add-ons as theirs. Turn off: X. Turn on or install: Y (id; not installed here). Then
   restart the game.`; auto-join and the session join target stop (only a restart changes add-ons). Pass -> the login
   carries `?b4bcoopaddonsok=<policy>` ("checked against your policy": nothing the host wouldn't learn from the join).
-- **Add-ons loaded during a session** (Browse tab, `/addons on`; 2026-10-11, shop.md §1a): as a client the joiner
+- **Add-ons loaded during a session** (Get more, then the Browse tab; `/addons on`; 2026-10-11, shop.md §1a): as a client the joiner
   applies the same check to the add-on it is about to load (`addons_session_allows`, the policy this join learned):
   cosmetic ones load at once under `any`/`cosmetic`/`match` (so its claim for the mission-start reconnect stays true),
   under `none` they wait for the next start ("this host allows no add-ons"). Nothing is sent; gameplay add-ons never
@@ -271,25 +271,35 @@ committed)
 - `tools/e2e.py --quick` checked the summary in the login and `/addons players` on the host (replaced in #35).
 - `tools/e2e.py --quick` on this branch's dev build: 13/13 PASS (incl. the new add-ons check).
 
-## 8. `~` window: Add-ons tab (#26)
-Code: `addons_panel()` in `addons.c` (registered from `addons_init`, order 70), host part `addons_mp_panel()` in
-`addons_mp.c`. Same code paths as the chat: the row checkbox runs `/addons on|off <file>` (`ov_run`), "Show in the log"
-`/addons info`, `/addons`, `/addons players`; the policy radios are `ov_setting("addons_policy")` = `addons_live()`
-(new: `addons_policy` also applies live from a hand-edited `b4bcoop.ini`) + the ini writer.
+## 8. `~` window: Installed (Looks & add-ons tab; the Add-ons tab until 2026-10-12, #26)
+Code: `addons_installed_panel()` in `addons.c`, drawn by `looks.c` as the **Installed** mode of the **Looks & add-ons**
+tab (overlay.md "Looks & add-ons"); the policy is `addons_mp_panel()` in `addons_mp.c`, under that tab's **Host rules**
+header. Same code paths as the chat: the row checkbox runs `/addons on|off <file>` (`ov_run`), "Show in the log"
+`/addons info`, `/addons`; the policy radios are `ov_setting("addons_policy")` = `addons_live()` (new: `addons_policy`
+also applies live from a hand-edited `b4bcoop.ini`) + the ini writer.
 - Load order: `A[]` stays in mounted order after the scan (conflicts `C[]` hold indices into it, outfits `OF[]`
   pointers); `ord[]` is the order of `addonlist.txt`. Up/Down (`addons_move`) swap with the next present add-on in
   `ord[]` and rewrite the file (reverted if the write fails). `/addons` lists and numbers in `ord[]` order, so `<#>`
-  matches what the list shows. A `<#>` that is a file name starting with digits is no longer read as a number.
+  matches what the list shows (the rows say "#. title" too). A `<#>` that is a file name starting with digits is no
+  longer read as a number.
 - Switching on (checkbox, `/addons on`) an add-on that isn't loaded loads it at once when the live rules allow it
   (shop.md §1a: `addons_load_now`, `<title>: on, ready now`), else `on, applies after a restart (<why>)`.
 - Pending changes: `on != on_at_start` or a present add-on's place != `pos0` -> banner "addonlist.txt differs from what
   is loaded now (N switched, load order changed): restart the game to apply"; rows say `off after restart`,
   `moves after restart`. Hand edits of `addonlist.txt` while the game runs are re-read (mtime, checked once a second
-  while the tab is shown: `addons: addonlist.txt changed outside the game, re-read`), so the next write keeps them.
-- Details: title/version/author/category/description, file, state, load order, `not loaded: <why>`, content class and
-  first gameplay file, author's `content=` label if it disagrees, id (Copy), outfits it adds (`outfit=` lines), its
-  conflicts both ways. Folder path with Copy (no "open folder": the game is full screen). "Load add-ons" = ini
-  `addons` (restart).
+  while Installed is shown: `addons: addonlist.txt changed outside the game, re-read`), so the next write keeps them.
+- Row: kind from the add-on's own lines and class: `gameplay`, `outfit` / `N outfits` (`outfit=`), `weapon look (AR02)`
+  (`weapon=`), else `replacement`; Wear / Use while it is loaded (`addons_look_buttons`, also on Get more's rows: one
+  look runs `/model <name>`, several show "Wear (n)", which opens Wear searched for the add-on's title); Update / Undo
+  and the shop's last message (shop.c `shop_installed_actions`, `shop_item_note`). The tab's search box filters rows
+  (title, file, author, category, description, version, outfit and weapon look names).
+- Details (click the title; drawn under the row: the table ends and a second one with the same id continues, so the
+  columns stay aligned): author/category/description, file, state, load order, `not loaded: <why>`, content class and
+  first gameplay file, author's `content=` label if it disagrees, id (Copy), the outfits / weapon looks it adds with
+  Wear / Use, its conflicts both ways, `/addons info`, **Remove** (two clicks; `shop_remove`: any add-on with a plain
+  `.pak` file name, written to `.shop\pending.txt` as `remove <file>`; the next start's `shop_early` deletes it before
+  anything is read). "Folder and troubleshooting" header: folder path with Copy (no "open folder": the game is full
+  screen), "Load add-ons" = ini `addons` (restart), `/addons`. With `addons=0` the checkbox is at the top instead.
 - Client: the policy radios are greyed out (`ov_begin_perm(CMD_HOST)`: "Host only: you are in someone else's
   session."). (Before #35 a players' section showed each login's summary; removed.)
 

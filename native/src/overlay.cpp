@@ -534,6 +534,17 @@ extern "C" void overlay_add_panel(const char *name, int order, OverlayDrawFn dra
     for (int a = 1; a < n_panels; a++)   // keep them sorted by order (tiny insertion sort)
         for (int b = a; b > 0 && panels[b].order < panels[b - 1].order; b--) { Panel t = panels[b]; panels[b] = panels[b - 1]; panels[b - 1] = t; }
 }
+// Other names of a tab (dev `overlay tab <alias>`): that tab is shown and select(arg) runs (e.g. a mode inside it).
+struct Alias { char name[32], panel[32]; void (*select)(int); int arg; };
+static Alias aliases[16];
+static int n_aliases;
+extern "C" void overlay_add_alias(const char *alias, const char *panel, void (*select)(int), int arg) {
+    if (n_aliases == 16) return;
+    Alias *a = &aliases[n_aliases++];
+    snprintf(a->name, sizeof a->name, "%s", alias);
+    snprintf(a->panel, sizeof a->panel, "%s", panel);
+    a->select = select; a->arg = arg;
+}
 
 // ---- test driving (dev `overlay press|set`): a control consumes a pending request that names its label ----
 static char drive_label[128], drive_value[256], drive_result[200], cur_tab[32], select_tab[32];
@@ -543,6 +554,11 @@ static ULONGLONG drive_t0;
 static int drive_done_item;     // the last control was set by a request: ov_edit_done() returns 1
 static int label_match(const char *label, const char *want) {
     if (!_stricmp(label, want)) return 1;
+    if (want[0] == '#' && want[1] == '#') {   // "##id": the id part alone (rows whose shown text varies)
+        const char *id = strstr(label, "##");
+        while (id && id[2] == '#') id++;
+        return id && !_stricmp(id, want);
+    }
     if (strstr(want, "##")) return 0;
     size_t n = strstr(label, "##") ? (size_t)(strstr(label, "##") - label) : strlen(label);
     return strlen(want) == n && !_strnicmp(label, want, n);
@@ -760,7 +776,32 @@ extern "C" void ov_width(float em) { LOCKED; if (em > 0) ImGui::SetNextItemWidth
 extern "C" void ov_tooltip(const char *text) { LOCKED; if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) ImGui::SetTooltip("%s", text); }
 extern "C" int ov_header(const char *label, int default_open) {
     LOCKED;
-    return ImGui::CollapsingHeader(label, default_open ? ImGuiTreeNodeFlags_DefaultOpen : 0);
+    ImGuiID id = ImGui::GetID(label);
+    int open = ImGui::CollapsingHeader(label, default_open ? ImGuiTreeNodeFlags_DefaultOpen : 0);
+    after_item();
+    if (drive_take(label, 1)) ImGui::GetStateStorage()->SetInt(id, !open);   // dev press: opens/closes it next frame
+    return open;
+}
+// A row of tabs inside a panel (a mode switch): *cur = the one shown; setting *cur selects it from the next frame.
+extern "C" int ov_tabs(const char *id, const char *const *labels, int n, int *cur) {
+    LOCKED;
+    ImGuiStorage *st = ImGui::GetStateStorage();
+    ImGuiID key = ImGui::GetID(id);
+    int last = st->GetInt(key, -1), shown = -1, driven = -1, was = *cur;
+    if (ImGui::BeginTabBar(id)) {
+        for (int i = 0; i < n; i++) {
+            bool sel = ImGui::BeginTabItem(labels[i], nullptr, i == *cur && i != last ? ImGuiTabItemFlags_SetSelected : 0);
+            after_item();
+            if (drive_take(labels[i], 1)) driven = i;
+            if (sel) { shown = i; ImGui::EndTabItem(); }
+        }
+        ImGui::EndTabBar();
+    }
+    if (driven >= 0) *cur = driven;
+    else if (last >= 0 && shown >= 0 && shown != last) *cur = shown;   // clicked (or our SetSelected arrived)
+    if (last >= 0 && shown >= 0 && shown != last) ImGui::SetScrollY(0);   // another mode starts at its top
+    st->SetInt(key, shown);
+    return *cur != was;
 }
 extern "C" void ov_push_id(int id) { LOCKED; ImGui::PushID(id); }
 extern "C" void ov_pop_id(void) { LOCKED; ImGui::PopID(); }
@@ -1141,7 +1182,19 @@ extern "C" int overlay_cmd(const char *verb, char *rest, Out *o) {
     while (b && *b == ' ') b++;
     if (a && !strcmp(a, "open")) { if (!open_) try_open(); }
     else if (a && !strcmp(a, "close")) { if (open_) set_open(0); }
-    else if (a && !strcmp(a, "tab") && b) { LOCKED; snprintf(select_tab, sizeof select_tab, "%s", b); }
+    else if (a && !strcmp(a, "tab") && b) {   // a tab's name or one of its aliases (overlay_add_alias)
+        LOCKED;
+        snprintf(select_tab, sizeof select_tab, "%s", b);
+        int known = 0;
+        for (int i = 0; i < n_panels; i++) known |= !_stricmp(panels[i].name, b);
+        for (int i = 0; i < n_aliases && !known; i++)
+            if (!_stricmp(aliases[i].name, b)) {
+                snprintf(select_tab, sizeof select_tab, "%s", aliases[i].panel);
+                if (aliases[i].select) aliases[i].select(aliases[i].arg);
+                known = 1;
+            }
+        if (!known) { out_printf(o, "no tab '%s'\n", b); return 1; }
+    }
     else if (a && !strcmp(a, "mouse") && b) {   // put the software cursor there (client pixels), for a real click
         LOCKED;
         float x, y;
