@@ -1266,3 +1266,8 @@ on whole bodies (Ahsoka 0.02, Spider-Man Miles 0.00, Becky Lynch 0.02) and their
   still looks wet. `preview.py --textures` renders the game's PBR texture (G roughness; B metallic except on skin
   masters) from the `_pbr` entry b4bmodel now writes into `preview_textures_*.json`: before, previews used a fixed
   roughness 0.7, which is why the stills never showed the shine.
+- **Rebuilt and checked** (fnx suite, 49 outfits; the 4 skirt outfits of §22 among the 53 got the same sources in their
+  own rebuild): builds 49/49, every character material now 0.4-0.85 except intended shine (stormtrooper helmet 0.28,
+  metal suits); preview stills old vs new: the wet sheen gone. Live (lane 1, Proton, `multi.sh 2`): 12 of them worn by
+  host and client in Fort Hope, one in Evansburgh, 0 new log errors; skin and clothes matte in the client's views.
+  The other published outfits (fortnite, l4d2 and other suites) already had roughness >= 0.35 everywhere.
