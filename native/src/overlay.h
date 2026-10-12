@@ -11,7 +11,7 @@
 //  - Controls a player may not use are drawn disabled with the reason: wrap them in ov_begin_perm(CMD_HOST/CMD_CHEAT)
 //    ... ov_end_perm().
 //  - Labels follow ImGui: "Kick##3" shows "Kick" with a unique id; the dev command `overlay press <label>` /
-//    `overlay set <label> <value>` drives a control by its label (tests).
+//    `overlay set <label> <value>` drives a control by its label (tests); `##id` alone matches the id part.
 #pragma once
 #ifdef __cplusplus
 extern "C" {
@@ -19,9 +19,11 @@ extern "C" {
 
 typedef void (*OverlayDrawFn)(void);
 // order: tab position (lower first). Built-in: Session 10, Players 20, Camera 30, Flashlight 40, Cheats 50,
-// Add-ons 70 (addons.c), Browse 72 (shop.c), Settings 90, Updates 95 (updater.c), Help 100. Up to 24 panels; a second call with the same
-// name replaces the draw function, draw NULL removes the tab.
+// Looks & add-ons 60 (looks.c), Settings 90, Updates 95 (updater.c), Help 100. Up to 24 panels; a second call with the
+// same name replaces the draw function, draw NULL removes the tab.
 void overlay_add_panel(const char *name, int order, OverlayDrawFn draw);
+// Another name for a tab (dev `overlay tab <alias>`, e.g. a tab's old name): shows `panel` and runs select(arg).
+void overlay_add_alias(const char *alias, const char *panel, void (*select)(int), int arg);
 int overlay_is_open(void);
 void overlay_note(const char *text);   // a line in the window's log (any thread)
 
@@ -47,7 +49,10 @@ void ov_same_line(void);
 void ov_separator(void);
 void ov_width(float em);                      // width of the next control, in font heights (0 = default)
 void ov_tooltip(const char *text);            // for the last control (also when disabled)
-int ov_header(const char *label, int default_open);   // collapsing section; 1 = open
+int ov_header(const char *label, int default_open);   // collapsing section; 1 = open (dev press toggles it)
+// A row of tabs inside a panel (a mode switch; draw the chosen mode's content after it). *cur = the shown tab;
+// setting *cur shows that tab from the next frame. 1 when it changed.
+int ov_tabs(const char *id, const char *const *labels, int n, int *cur);
 void ov_push_id(int id);
 void ov_pop_id(void);
 int ov_table_begin(const char *id, int cols);          // 1 = draw rows, then ov_table_end() (only then)

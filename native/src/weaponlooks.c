@@ -81,7 +81,7 @@ static void build_looks(void) {
             l->path[0], l->path[1], l->path[2]);
     }
 }
-// An add-on loaded at runtime (Browse tab, Add-ons tab): append its weapon looks; a look whose add-on was updated
+// An add-on loaded at runtime (the ~ window's Get more / Installed, /addons on): append its weapon looks; a look whose add-on was updated
 // (addons_update_runtime: none of its old meshes was loaded) takes the new file's meshes and title.
 void wlooks_refresh(void) {
     if (n_looks < 0) return;
@@ -944,7 +944,7 @@ have:
     return 1;
 }
 
-// code NULL: every weapon type (/model reset); else only that weapon type (Models tab, per weapon)
+// code NULL: every weapon type (/model reset); else only that weapon type (the ~ window's Wear, per weapon)
 void wlooks_reset_code(const char *code, Out *o) {
     UObject **it;
     int n = items_of(my_pawn(), &it), k = 0;
@@ -994,23 +994,46 @@ void wlooks_status(Out *o) {
         if (wish[w].on) out_printf(o, "your %s: %s%s\n", wish[w].code, wish[w].name, wish[w].gave_up ? " (refused by the host)" : "");
 }
 
-// ~ overlay, Models tab (models.c draws the tab): the add-ons' weapon looks by weapon type, through /model
+// ~ window, "Looks & add-ons" tab, Wear (models.c draws it): the add-ons' weapon looks by weapon type, through /model.
+// search: only looks whose name, title, add-on or weapon code has it; hdr: a section heading for a search across every
+// list (drawn only when something matches, no "nothing" lines). Returns the number of looks shown.
 static int carries(const char *code) {   // this player's hero holds a weapon of that type now
     UObject **it;
     int n = items_of(my_pawn(), &it);
     for (int i = 0; i < n; i++) if (is_live(it[i]) && item_code(it[i], code)) return 1;
     return 0;
 }
-void wlooks_panel(int blocked, const char *why) {
+int wlooks_count(void) {
     if (n_looks < 0) build_looks();
-    ov_heading("Weapon looks (add-ons)");
-    if (!n_looks) { ov_text_dim("No add-on with weapon looks is loaded (mod maker's kit: b4bmod weapon --as <name>)."); return; }
-    ov_text_dim("Your weapon of that type shows the add-on's model, also every one you pick up later. Players without "
-                "the add-on see the normal weapon.");
-    int done[MAX_LOOKS] = {0};
+    return n_looks;
+}
+static int look_match(const Look *l, const char *s) {
+    const char *f[4] = {l->name, l->title, l->addon, l->code};
+    size_t n = strlen(s);
+    if (!n) return 1;
+    for (int k = 0; k < 4; k++)
+        for (const char *h = f[k]; *h; h++) if (!_strnicmp(h, s, n)) return 1;
+    return 0;
+}
+int wlooks_panel(int blocked, const char *why, const char *search, const char *hdr) {
+    if (n_looks < 0) build_looks();
+    if (!n_looks) {
+        if (!hdr) ov_text_dim("No add-on weapon looks yet: Get more (above) lists free ones; mod makers: b4bmod weapon --as <name>.");
+        return 0;
+    }
+    int done[MAX_LOOKS] = {0}, shown = 0;
     for (int i = 0; i < n_looks; i++) {
         if (done[i]) continue;
         const char *code = looks[i].code;
+        int any = 0;
+        for (int j = i; j < n_looks; j++) if (!_stricmp(looks[j].code, code) && look_match(&looks[j], search)) any++;
+        if (!any) { for (int j = i; j < n_looks; j++) if (!_stricmp(looks[j].code, code)) done[j] = 1; continue; }
+        if (!shown) {
+            if (hdr) ov_heading(hdr);
+            else ov_text_dim("Your weapon of that type shows the add-on's model, also every one you pick up later. Players "
+                             "without the add-on see the normal weapon.");
+        }
+        shown += any;
         Wish *mine = NULL;
         for (int w = 0; w < MAX_WISH; w++) if (wish[w].on && !_stricmp(wish[w].code, code)) mine = &wish[w];
         ov_push_id(i);
@@ -1035,6 +1058,7 @@ void wlooks_panel(int blocked, const char *why) {
             for (int j = i; j < n_looks; j++) {
                 if (_stricmp(looks[j].code, code)) continue;
                 done[j] = 1;
+                if (!look_match(&looks[j], search)) continue;
                 ov_push_id(j);
                 ov_table_next();
                 ov_begin_disabled(blocked, why);
@@ -1053,6 +1077,8 @@ void wlooks_panel(int blocked, const char *why) {
         }
         ov_pop_id();
     }
+    if (!shown && !hdr) ov_text_dim("Nothing matches.");
+    return shown;
 }
 
 int wlooks_init(void) {

@@ -460,7 +460,7 @@ What the survivor pipeline prints, and what to do about it.
 ## Add a weapon look
 The weapon pipeline above **replaces** the weapon for everyone who has your add-on. Add `--as <name>` and it **adds** a
 look instead: the game's AR02 stays as it is, and a player who wants your model on their AR02 types `/model <name>`
-(or presses Use in the `~` window's Models tab).
+(or presses Use in the `~` window's Looks & add-ons tab, Wear).
 ```
 b4bmod weapon ak.fbx --fp-mesh AR02 ^
     --slot AkMaterial=AR02_Reciever_M --slot Ammunition=AR02_Mag_M ^

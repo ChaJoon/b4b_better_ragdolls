@@ -173,7 +173,7 @@ Built (#33): §11.
   `3P_AR02_SKM`) gets the add-on's mesh (SetSkeletalMesh/SetStaticMesh, overrides emptied). Hooked right after
   ApplyCustomization (instant on OnRep, pickups, FP setup) plus a 1 s tick. When the row stops being ours, the retail
   mesh and the FP materials (kept at swap time) go back **before** the game applies the new skin.
-- **Chooser**: `/model <look>` (and the `~` Models tab, `Use`) = a wish per weapon code; the owner's agent sends
+- **Chooser**: `/model <look>` (and `Use` in the `~` window's Wear) = a wish per weapon code; the owner's agent sends
   `ServerCustomizationRow(<Code>_Customization_DT, b4bcoop.weapon.<name>)` for every item of that code in its
   inventory (`Inventory.EquipmentSlots`, class `<Code>_<n>_BP_C`) whose row differs, and remembers the row it
   replaced; `/model reset` sends that row back.
@@ -486,6 +486,6 @@ screen").
 - Rows are per machine: a player without the add-on never sees it in their screen (same rule as `/model`).
 - The remembered outfit is per survivor and per machine (not per Steam account); a profile restored from elsewhere
   keeps its own retail look.
-- A runtime-mounted add-on (Browse tab, `/addons on`) gets its rows at the next frame (`models_outfits_refresh`), also
+- A runtime-mounted add-on (Get more, `/addons on`) gets its rows at the next frame (`models_outfits_refresh`), also
   when the screen was opened earlier in the session: the screen asks the table each time it opens (shop.md §1a). An
   updated add-on with other mesh paths has its existing rows repointed.

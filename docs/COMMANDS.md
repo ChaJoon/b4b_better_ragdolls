@@ -30,15 +30,35 @@ of the window, and also in your chat.
 | **Camera** | Third person on/off, start the game in third person, its key, sliders for distance, side, height and FOV (Ctrl+click a slider to type a number), Swap shoulder, Reset camera, aim correction, free look on/off | `/thirdperson ...`; ini `thirdperson*` |
 | **Flashlight** | Your light (Toggle, On, Off; host: Automatic), its key, sticky mode; **Beam (your view)**: sliders for width, range and brightness, Reset beam | `/flashlight ...`; ini `flashlight_key`, `flashlight_sticky`, `flashlight_width`, `flashlight_range`, `flashlight_brightness` |
 | **Cheats** | Host: **Cheats on**, a player picker (`me`, everyone, a player) for the buttons marked `*`, then every cheat: god, heal, revive, infinite ammo, copper, cards, fly, noclip, walk, teleport, free camera, size, horde, kill all ridden, freeze, director phases, spawn, game speed, win, lose, and your own save's supply points / skull totems / burn cards / unlock all (everyone, while the host has cheats on) | every `/cheats` command |
-| **Models** | Your look now and your pick, the host's refusal when it said no, **Reset my look**; lists to wear with a search box (click a name): **Survivors** (per survivor: whole survivor, outfits, heads, torsos, legs), **NPC bodies** (Fort Hope NPCs, other survivors, cultists), **Add-on outfits** (by add-on); **Weapon looks** per weapon type (**Use**, which add-on it comes from, **Reset** for that weapon type); **Everyone's look** (every player and bot); host: **Change the look of** a player or bot (then click a look), their **Reset**, **Model swaps allowed** (greyed on a client, with the host's last announced state) | `/model`, `/model list ...`, `/model <name>`, `/model reset`, `/model <player> <name>\|reset`, `/models on\|off` |
-| **Add-ons** | Your add-ons in load order: on/off, **Up**/**Down** (load order), cosmetic or gameplay (and what kind), "not loaded" with the reason, conflicts (who wins); click one for its details (author, description, id with Copy, outfits it adds); a banner when `addonlist.txt` differs from what is loaded (restart to apply); the folder path (Copy); "Load add-ons" (`addons`); host: who may join with add-ons (`addons_policy`; nobody sees other players' add-ons) | `/addons`, `/addons on\|off`, `/addons info`, `/addons policy`; ini `addons`, `addons_policy` |
-| **Browse** | The add-on shop: **Get the add-on list** (free add-ons with a public license, with picture, author, license, size, what each adds or replaces), search and filter, **Add**, **Remove**, **Update**, **Undo**; click one for its details (license link, description). See [Browse (add-on shop)](#browse-add-on-shop) | ini `shop` (no chat command) |
+| **Looks & add-ons** | Three modes and one search box for all of them (see [Looks & add-ons](#the--windows-looks--add-ons-tab) below). **Wear**: your look and your pick, **Reset my look**; lists to wear (click a name): **Survivors** (per survivor: whole survivor, outfits, heads, torsos, legs), **NPC bodies**, **Add-on outfits**, **Weapon looks** (**Use**, **Reset** per weapon type); a search shows every list's matches; **Everyone's look**; host: **Change the look of** a player or bot, their **Reset**. **Installed**: your add-ons in load order with on/off, kind (outfit, weapon look, replacement, gameplay) and state, **Wear** / **Use**, **Update** (newer in the shop), **Up**/**Down**, conflicts; click one for its details (author, content, looks it adds, conflicts, **Remove**); **Check for updates**; folder and "Load add-ons" (`addons`). **Get more**: the add-on shop (**Get the add-on list**, filter, **Add**, then **Wear** / **Use** on the row; **Update**, **Undo**). **Host rules** (collapsed, under every mode): **Model swaps allowed**, who may join with add-ons (`addons_policy`); greyed on a client | `/model ...`, `/models on\|off`, `/addons ...`; ini `addons`, `addons_policy`, `shop` |
 | **Settings** | The window's text size and key, the flashlight and third-person keys; **Game start**: ask co-op or online every time, always b4bcoop co-op, always online (see [Co-op or online](#co-op-or-online-at-the-game-start)) | ini `overlay_scale`, `overlay_key`, `flashlight_key`, `thirdperson_key`, `launch` |
 | **Updates** | Your version; **Check for updates** (the latest release: version, protocol, short notes); **Download and install on next start**; the host's version after a "same version" refusal (**Check** it); **Go back to** the previous version. See [Updates](#updates) | ini `updates` (no chat command) |
 | **Help** | Your version, a box to run any chat command (without the `/`) | `/help` |
 
 Buttons that change something for everyone or permanently (Ban, Restart, Leave, Win, Lose, Unlock all, Add supply
-points, Unban all) need a second click within 3 seconds ("Sure?"). `overlay=0` in `b4bcoop.ini` turns the window off.
+points, Unban all, Remove an add-on) need a second click within 3 seconds ("Sure?"). `overlay=0` in `b4bcoop.ini`
+turns the window off.
+
+### The ~ window's Looks & add-ons tab
+
+Everything about how you look and about add-ons, in one tab (it replaced the Models, Add-ons and Browse tabs). Three
+modes at its top, one search box for all of them:
+
+- **Wear**: put something on. Your look now (**Reset my look** goes back to your own), then what to wear: the game's
+  **Survivors** (every outfit, head, torso and legs) and **NPC bodies**, your add-ons' **Add-on outfits** and
+  **Weapon looks**. Click a name to wear it (`/model <name>`); a weapon look's **Use** puts it on your weapon of that
+  type. Typing in the search box shows the matches of all four lists at once. **Everyone's look** lists every player
+  and bot. The host can **Change the look of** a player or bot here (pick them, then click a look).
+- **Installed**: your add-ons, in load order (further down wins when two change the same file). Each row: on/off,
+  what it is (outfit, weapon look, replacement, gameplay) and its state, **Wear** / **Use** for the look it adds
+  (**Wear (n)** for several: shows them in Wear), **Update** when the add-on shop has a newer file, **Up** / **Down**.
+  Click an add-on for its details (author, content, id, the looks it adds, conflicts) and **Remove** (switched off
+  now, its file deleted at the next game start; **Undo** until then). **Check for updates** asks the shop. At the
+  bottom: the add-ons folder (Copy) and **Load add-ons** (`addons=0` turns all add-ons off, for troubleshooting).
+- **Get more**: the add-on shop, see [Get more (add-on shop)](#get-more-add-on-shop). Once an add-on is ready its row
+  offers **Wear** / **Use** right there.
+- **Host rules** (under every mode, click to open; greyed out on a client): **Model swaps allowed** (`/models on|off`)
+  and who may join with add-ons (`addons_policy`).
 
 ## How to use chat commands
 
@@ -139,7 +159,7 @@ Join Game, it keeps trying for 3 minutes if the host doesn't answer yet (for exa
 **`/model`**: wear another survivor's outfit (`/model walker_elite_07`), a whole survivor's look (`/model holly`),
 single pieces (`/model holly_head_03`), a Fort Hope NPC (`/model vanessa`) or an outfit one of your add-ons adds
 (`/model list outfits`), or put an add-on's model on your weapon (`/model list weapons`, e.g. `/model ak47` for your
-AR02). The `~` window's **Models** tab has all of it as lists (click to wear). Everyone sees survivor outfits; NPC looks only players with b4bcoop; add-on
+AR02). The `~` window's **Looks & add-ons** tab (**Wear**) has all of it as lists (click to wear). Everyone sees survivor outfits; NPC looks only players with b4bcoop; add-on
 outfits and weapon looks only players with the same add-on (the others see your survivor, the normal weapon). Kept through map changes, death and respawn; nothing is saved. `/model` alone shows
 what you wear. All names, examples and limits: `docs/commands-models.md`.
 
@@ -337,7 +357,7 @@ copy the backup over `PlayerProfileSettings.sav`. If the backup can't be made, n
 ## Add-ons
 
 Add-ons change how the game looks (textures, models, UI), Left 4 Dead style: drop a file in a folder, restart (or get
-free ones from the `~` window's **Browse** tab, see [Browse (add-on shop)](#browse-add-on-shop)). Add-ons are **only on your PC**: other players don't need them and don't see them. If you have
+free ones from **Get more** in the `~` window's **Looks & add-ons** tab, see [Get more (add-on shop)](#get-more-add-on-shop)). Add-ons are **only on your PC**: other players don't need them and don't see them. If you have
 a survivor skin add-on, you see it on every survivor wearing that outfit; players without it see the normal outfit.
 Some add-ons **add** outfits instead of replacing one: they are in the game's customization screen for every survivor
 (kept for that survivor; your profile keeps its previous outfit), and `/model list outfits` lists them, `/model <name>`
@@ -354,9 +374,9 @@ holly_magenta.pak=1
 holly_green.pak=0
 ```
 `=1` on, `=0` off. New add-ons are added at the bottom, switched on. The game loads them top to bottom: when two
-add-ons change the same file, **the one further down wins**. Move lines to change that. The `~` window's **Add-ons**
-tab (checkbox, **Up**/**Down**) and `/addons on|off` edit this file for you; editing it by hand while the game runs is
-picked up too. Switching an add-on **on** loads it right away when that is safe (the same rules as the Browse tab's
+add-ons change the same file, **the one further down wins**. Move lines to change that. The `~` window's **Installed**
+(**Looks & add-ons** tab: checkbox, **Up**/**Down**) and `/addons on|off` edit this file for you; editing it by hand while the game runs is
+picked up too. Switching an add-on **on** loads it right away when that is safe (the same rules as Get more's
 **Add**, below), else at the next start; switching off and changing the load order apply at the next start.
 
 **`/addons`**: the list with numbers (in `addonlist.txt` order), the state of each (`on`, `off`, `on after restart`, `off after restart`,
@@ -390,7 +410,7 @@ allows (`addons_policy`), and **your game checks your own add-ons** before joini
 | `match` | Cosmetic add-ons are free; gameplay add-ons must be exactly the host's. The host's own gameplay add-ons' short ids are shown to people joining (that's how they can match them); the other policies reveal nothing about the host's add-ons |
 
 If yours don't fit, your game doesn't join and tells only you, e.g. `Could not join: This host allows only cosmetic
-add-ons; turn off Walker data table test (~ window, tab Add-ons, or /addons off <#>) and restart the game.` (or `This
+add-ons; turn off Walker data table test (~ window: Looks & add-ons, Installed; or /addons off <#>) and restart the game.` (or `This
 host allows no add-ons; ...`, `This host requires the same gameplay add-ons as theirs. Turn off: ... Turn on or
 install: ...`). The host sees nothing about it. Add-ons apply at game start, so switch them off and restart before
 joining again. The host's own add-ons don't matter under `cosmetic`, `any` and `none`.
@@ -405,13 +425,13 @@ joining again. The host's own add-ons don't matter under `cosmetic`, `any` and `
 
 **`/addons policy <x>`** (host) changes the policy until the host quits (for new joiners: players already in the
 session keep playing, also after the next map change); `addons_policy=` in `b4bcoop.ini` keeps it
-(the `~` window's Add-ons tab sets both). There is no list of other players' add-ons (`/addons players` is gone).
+(the `~` window's Host rules, in Looks & add-ons, set both). There is no list of other players' add-ons (`/addons players` is gone).
 
 Messages (in your chat after the game starts):
 - `Add-on conflict: "B" overrides "A". /addons`: both change the same files; B wins (it is further down the list).
   Fine if that's what you want; otherwise switch one off or reorder `addonlist.txt`.
 - `Add-on "A" is installed twice (a.pak and a-any.pak): switch one off.`: the same add-on under two file names (e.g.
-  your own copy and the one from the Browse tab). Switch one off or delete one of the files.
+  your own copy and the one from Get more). Switch one off or delete one of the files.
 - `Add-ons a.pak and b.pak both add outfit x: b.pak's is used. Switch one off.`: two add-ons bring an outfit (or a
   weapon look) of the same name; `/model x` wears the one further down the list.
 - `Add-ons "A" and "B" mix parts of one asset (may crash): switch one off.`: each add-on replaces a different part of
@@ -424,22 +444,23 @@ Messages (in your chat after the game starts):
 Only install add-ons from people you trust. Making add-ons: the mod maker's kit (`b4bcoop-modkit-<version>.zip` from
 the releases, `modkit/` in the source repository); players don't need it.
 
-## Browse (add-on shop)
+## Get more (add-on shop)
 
-The **Browse** tab of the `~` window lists free add-ons from the b4bcoop add-on shop
+**Get more** in the `~` window's **Looks & add-ons** tab lists free add-ons from the b4bcoop add-on shop
 (github.com/actuallydan/back4blood-shop): outfits, weapon looks and replacements that their makers released under a
 public license (CC0, CC-BY, MIT, ...). Nothing is downloaded until you click, and nobody else learns which add-ons
 you have.
 
 1. **Get the add-on list** downloads the list (and the pictures). It carries the add-on shop's signature: a list
-   that isn't signed with it is not shown. **Refresh the list** gets it again. Search box and filter: all, new looks,
-   replacements, the ones in your add-ons folder.
+   that isn't signed with it is not shown. **Refresh the list** gets it again. The tab's search box and a filter: all,
+   new looks, replacements, not installed yet. Click an add-on for its details (license link, description, file).
 2. **Add** downloads the add-on, checks its size and SHA-256 against the signed list (a damaged or changed file is
    deleted: "Nothing was changed"), and puts it into your add-ons folder as `<name>.pak`, switched on, last in the
    load order.
    - **New looks** (added outfits, weapon looks) are ready at once, in Fort Hope, in the middle of a mission and in
-     someone else's session: wear them in the **Models** tab, the game's customization screen (also if you opened it
-     before) or with `/model <name>`. Players with the same add-on see it on you, the others your survivor.
+     someone else's session: the row then offers **Wear** (an outfit) or **Use** (a weapon look) right there, and
+     they are in **Wear**, the game's customization screen (also if you opened it before) and `/model <name>`.
+     Players with the same add-on see it on you, the others your survivor.
    - **Replacements** (an add-on that changes something of the game, e.g. a survivor's textures) are ready at once too
      when the game isn't using what they replace right now; otherwise they say "applies after a restart (it replaces
      an asset the game is using now: ...)" and load the next time the game starts.
@@ -447,21 +468,23 @@ you have.
      waits for the next start ("this host allows no add-ons"; with it on you can't join that host again).
    - Gameplay add-ons and replacements of files the game reads only when it starts (sound banks, translations,
      config) always wait for the next start.
-3. **Remove** (click twice) switches the add-on off at once and deletes its file the next time the game starts.
+3. **Update** appears (here and in **Installed**) when the list has a newer file than yours. It is downloaded now and
+   replaces the old file at the next start. If nothing of the old version is in use right now (e.g. nobody wears that
+   outfit), the new version is also **ready at once** ("Updated and ready now"); otherwise it says why it waits (e.g.
+   you are wearing it) and **Undo** cancels it until the restart. **Check for updates** in **Installed** gets the list
+   for that.
+4. **Remove** is in **Installed** (click the add-on, then **Remove** twice): it switches the add-on off at once and
+   deletes its file the next time the game starts, for any add-on (also ones you put in the folder yourself).
    **Undo** takes that back until then.
-4. **Update** appears when the list has a newer file than yours. It is downloaded now and replaces the old file at
-   the next start. If nothing of the old version is in use right now (e.g. nobody wears that outfit), the new version
-   is also **ready at once** ("Updated and ready now"); otherwise it says why it waits (e.g. you are wearing it) and
-   **Undo** cancels it until the restart.
 5. **Installed (as batman.pak)** instead of **Add**: you already have that add-on under another file name (the same
-   content, or an add-on that adds the same outfit or weapon look), so it isn't added twice. The **Add-ons** tab
-   switches it on/off.
+   content, or an add-on that adds the same outfit or weapon look), so it isn't added twice. **Installed** switches it
+   on/off.
 
-Added add-ons are ordinary add-ons: the **Add-ons** tab switches them on/off and sets the load order, and the host's
+Added add-ons are ordinary add-ons: **Installed** switches them on/off and sets the load order, and the host's
 `addons_policy` treats them like any other. A row shows "needs b4bcoop X or newer" when the add-on needs a newer
 b4bcoop (the **Updates** tab gets it). Files: the add-on in `b4bcoop-addons`, downloads and pending changes in the
-hidden `b4bcoop-addons\.shop` folder. Getting the list and downloading are the only times the tab contacts anything
-(GitHub, only while that request runs). `shop=0` in `b4bcoop.ini` hides the tab.
+hidden `b4bcoop-addons\.shop` folder. Getting the list and downloading are the only times the shop contacts anything
+(GitHub, only while that request runs). `shop=0` in `b4bcoop.ini` hides **Get more** (and **Update**).
 
 ## Updates
 
@@ -487,7 +510,7 @@ What an update changes: `X3DAudio1_7.dll`, `xinput1_3.dll` and the `b4bcoop-*.tx
   `<new> did not start properly 2 times, so <old> was put back`.
 - A host with another b4bcoop version refused you (`Everyone needs the same version`): the tab shows the host's
   version with a **Check** button, which offers exactly that version.
-- The check and the download (and the Browse tab's list and downloads) are the only time b4bcoop contacts anything besides Steam: `api.github.com`,
+- The check and the download (and the add-on shop's list and downloads, Get more) are the only time b4bcoop contacts anything besides Steam: `api.github.com`,
   `github.com` and GitHub's download server, and only while that request runs. GitHub allows 60 checks an hour per
   internet address; the tab tells you when that's used up.
 - Releases from before the updater (0.6.1 and older) can't be installed from the tab; it links the release page
@@ -673,7 +696,7 @@ join=steam:7656119XXXXXXXXXX
 | `addons_dir` | `<game>\b4bcoop-addons` | Another add-ons folder, a full Windows path, e.g. `addons_dir=D:\b4b-addons` |
 | `addons_policy` | `cosmetic` | Host: which add-ons joiners may have: `cosmetic`, `any`, `none`, `match` (see Add-ons; joiners check themselves, `match` shows them your gameplay add-ons' ids) |
 | `updates` | `1` | `0`: hide the `~` window's Updates tab (see [Updates](#updates)) |
-| `shop` | `1` | `0`: hide the `~` window's Browse tab (the add-on shop, see [Browse](#browse-add-on-shop)) |
+| `shop` | `1` | `0`: hide **Get more** (the add-on shop, see [Get more](#get-more-add-on-shop)) and **Update** in the `~` window's Looks & add-ons tab |
 
 ## Launch options & troubleshooting
 
@@ -744,7 +767,7 @@ same reason appears in your chat as `Could not join: ...` once the popup is clos
 | Message | Meaning | What to do |
 |---|---|---|
 | `Host runs b4bcoop X (protocol N); you have Y (protocol M). Everyone needs the same version.` | You and the host have different b4bcoop versions | Press `~`, tab **Updates**: **Check** the host's version and install it (or everyone installs the latest release). Both versions are in the message; the host sees `<name> could not join: they have ...` |
-| `This host allows only cosmetic add-ons; turn off ...` (or `allows no add-ons`, `requires the same gameplay add-ons`) | Your game checked your add-ons against the host's `addons_policy`: some don't fit. Only you see this | `/addons off <#>` (or the `~` Add-ons tab) for the ones named, restart the game, join again; or the host sets `/addons policy any` |
+| `This host allows only cosmetic add-ons; turn off ...` (or `allows no add-ons`, `requires the same gameplay add-ons`) | Your game checked your add-ons against the host's `addons_policy`: some don't fit. Only you see this | `/addons off <#>` (or the `~` window: Looks & add-ons, Installed) for the ones named, restart the game, join again; or the host sets `/addons policy any` |
 | `Server full.` | Every survivor slot is taken by a player (bot slots count as free) | Wait for a free slot, or the host sets `teamsize=5` |
 | `This host only accepts their Steam friends. ...` | You're not on the host's Steam friends list | Become Steam friends, or the host adds you with `allow_steamids=` |
 | `Could not reach the host over Steam. Is it still hosting? ...` | The host quit, or refused you (not friends) | Check the host is in Fort Hope or a mission; see the line above |
