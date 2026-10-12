@@ -79,6 +79,7 @@ int teamsize_get(void);                                  // teamsize= (0 = the g
 int dialogue_init(void);                                 // dialogue.c: one cutscene VO line per cue on clients
 int bots_init(void);                                     // bots.c: pinged toolkit doors opened by bots (host)
 int bots_live(const char *key, const char *val);          // bot_toolkit_doors=0|1
+int bots_toolkit_doors(void);                            // the setting; -1 = hooks off (signature mismatch)
 int bots_cmd(const char *verb, char *rest, Out *o);      // dev builds: `botdoor [doors|ping|target|tp]`
 int fxsig_init(void);                                    // fxsig.c: inactive particles leave the significance manager (#46)
 int fxsig_cmd(const char *verb, char *rest, Out *o);     // dev builds: `fxsig [fix | guard on|off]`

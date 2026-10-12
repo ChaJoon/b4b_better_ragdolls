@@ -1585,6 +1585,12 @@ static void cheats_panel(void) {
     if (ov_checkbox("Cheats on##cheats", &en)) ov_run(en ? "cheats on" : "cheats off");
     ov_tooltip("Host only. Everyone is told. Stays on between Fort Hope and missions, but every map change "
                "resets the effects (god, fly, ammo, speed, ...). Stays on in Fort Hope too; off in the menus.");
+    int tk = bots_toolkit_doors();
+    ov_begin_disabled(tk < 0, "Not available with this game version.");
+    if (ov_checkbox("Bots open pinged toolkit doors##bottoolkit", &tk)) ov_setting("bot_toolkit_doors", tk ? "1" : "0", 1);
+    ov_end_disabled();
+    ov_tooltip("Host only, works without cheats. Ping a supply-stash door and the nearest bot carrying a toolkit "
+               "(up to 40 m away) goes and opens it. Off = the game's own behaviour (a bot only reacts when it is close).");
     ov_end_perm();
     if (admin_is_client()) own_save_panel();
     if (on) ov_text_dim("god on %d hero(es), ammo %s, speed %.2fx%s%s", n_gods, ammo_inf ? "infinite" : "normal", slomo,

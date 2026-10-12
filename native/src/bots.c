@@ -849,6 +849,9 @@ static void ini_key(const char *k, const char *v, void *ctx) {
     if (!strcmp(k, "bot_toolkit_doors")) toolkit_doors = atoi(v) != 0;
 }
 
+// For the ~ Cheats tab: -1 = not available (hooks off), else the setting
+int bots_toolkit_doors(void) { return ping_count ? toolkit_doors : -1; }
+
 int bots_live(const char *key, const char *val) {
     if (strcmp(key, "bot_toolkit_doors")) return 0;
     toolkit_doors = !val || atoi(val) != 0;
