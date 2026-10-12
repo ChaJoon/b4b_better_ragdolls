@@ -1245,3 +1245,29 @@ crouches (a stiff block behind the hips).
   `cheatprobe press`) while the client's camera and the host's 3P camera take shots): all 7 worn by host and client,
   0 new log errors; crouching, every skirt rests on the thighs in front and drapes at the back, nothing torn or
   floating; the Pink Ranger's rear stays on her hips. Screenshots local (`/tmp/b4b-charsuite-skirts-live1`, `-live2`).
+
+## 23. Wet-looking outfits: roughness from packed specular maps (outfit-fixes, 2026-10-12)
+Reported after play: several game-rip outfits (Ahsoka, Alan Wake, Anakin, Rey, Becky Lynch, Kirk Hammett, Doja Cat's
+skin) looked glossy and wet in game. The game's PBR texture is R AO, G roughness, B metallic (retail hero roughness
+averages 0.5-0.9: Holly E00 Body 0.82, Walker E00 Body 0.81; skin slots 0.6-0.7; skin masters (`Master_Hero_Head_M`)
+use B for something other than metal: retail Holly Arm/Head B 0.82/0.99). The published builds had roughness 0.00-0.13
+on whole bodies (Ahsoka 0.02, Spider-Man Miles 0.00, Becky Lynch 0.02) and their "metallic" at 0.6-0.8.
+- **Root cause** (outside the kit): the private rip converter turned Unreal specular-mask textures into a glTF ORM image
+  assuming one layout, R specular / G metallic / B roughness. Newer source materials (2023+ parents, texture
+  parameter `SRM`; older masters with the static switch `SwizzleRoughnessToGreen`) store G roughness / B metallic, so
+  their roughness became the metallic channel (~0) and vice versa: a mirror. 166 of 200 `SRM` materials have G > B,
+  127 of 156 of the others G < B; the switch and the parameter name explain all but eye materials sharing the head's map
+  and black placeholder maps (no specular at all: now roughness 1). The converter now picks the layout per texture; 53
+  model files were corrected in place and their outfits rebuilt.
+- **In the kit** (`b4bfit.pbr_sanity`, `compose`): every character material's roughness/metallic average is logged
+  (`pbr:` lines, `glossy` below 0.3); a material whose roughness averages < 0.15 while its metallic averages > 0.3 (a
+  mirror: characters almost never are) gets the two swapped, logged (`B4B_PBR_SWAP=0` keeps them). `--roughness
+  MAT=MIN` (repeatable, MAT a name/regex/`*`) lifts a material's roughness (r -> MIN + (1 - MIN) r) for one that
+  still looks wet. `preview.py --textures` renders the game's PBR texture (G roughness; B metallic except on skin
+  masters) from the `_pbr` entry b4bmodel now writes into `preview_textures_*.json`: before, previews used a fixed
+  roughness 0.7, which is why the stills never showed the shine.
+- **Rebuilt and checked** (fnx suite, 49 outfits; the 4 skirt outfits of §22 among the 53 got the same sources in their
+  own rebuild): builds 49/49, every character material now 0.4-0.85 except intended shine (stormtrooper helmet 0.28,
+  metal suits); preview stills old vs new: the wet sheen gone. Live (lane 1, Proton, `multi.sh 2`): 12 of them worn by
+  host and client in Fort Hope, one in Evansburgh, 0 new log errors; skin and clothes matte in the client's views.
+  The other published outfits (fortnite, l4d2 and other suites) already had roughness >= 0.35 everywhere.

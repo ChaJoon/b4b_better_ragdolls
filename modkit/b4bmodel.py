@@ -37,6 +37,10 @@ and installs); guide: docs/meshes.md. How it works: docs/investigations/mesh-mod
                                bones hang under the pelvis (most Fortnite skirts) when cloth looks wrong in game
         [--hair texture|tint]   hair slot: texture (default) = your hair texture's own colours, masked by its alpha;
                                 tint = the game's hair shader, one colour root to tip (your texture's average)
+        [--roughness MAT=MIN]...  lifts a material's roughness so its smoothest texel is MIN (MAT: a material name,
+                                a regex or *), for clothes or skin that still look wet or plastic in game. The log
+                                prints each material's roughness (`pbr:` lines; glossy ones are pointed out), and a
+                                packed map read with roughness and metallic the wrong way round (a mirror) is swapped
         [--as <name> [--as-title <text>]]   an ADDED outfit: new packages under /Game/b4bcoop/outfits/<name>/ and an
                                             `outfit=` line in <moddir>/addoninfo.txt (in game: /model <name>)
   b4bmodel.py weapon <model> --fp-mesh <FP weapon SKM> [--3p-mesh <3P weapon SKM>] [--static <SM>]... -o <moddir>
@@ -85,7 +89,7 @@ def log(*a):
 
 
 class Opts:
-    def __init__(self, argv, multi=("slot", "tex", "part", "static", "fp_slot")):
+    def __init__(self, argv, multi=("slot", "tex", "part", "static", "fp_slot", "roughness")):
         self.pos, self.o = [], {k: [] for k in multi}
         i = 0
         while i < len(argv):
@@ -293,6 +297,22 @@ def linear_to_srgb(c): return c * 12.92 if c <= 0.0031308 else 1.055 * c ** (1 /
 # hero hair (Master_Hair_M, BLEND_Masked, two-sided, dithered): with its static switch "Enable MultiMask" (all retail
 # hero hair MIs) it samples one RGBA "Hair MultiMask" on UV0 whose A is the strand alpha; colour = RootColor..TipColor
 HAIR_MASTER_RX = re.compile(r"/Master_Hair_M(\.|$)")
+SKIN_MASTER_RX = re.compile(r"/Master_Hero_Head_M(\.|$)")
+
+
+def parse_roughness(items):
+    """--roughness MAT=MIN (repeatable; MAT = a source material name, a regex matching it, or *): that material's
+    roughness is lifted so its smoothest texel is MIN (r -> MIN + (1 - MIN) r), for a material that still looks wet or
+    plastic in game. Returns [(regex, MIN)]."""
+    out = []
+    for it in items:
+        if "=" not in it: die(f"--roughness {it}: MATERIAL=MIN, e.g. --roughness 'Body=0.5'")
+        k, v = it.rsplit("=", 1)
+        try: v = float(v)
+        except ValueError: die(f"--roughness {it}: {v} is not a number")
+        if not 0 <= v <= 1: die(f"--roughness {it}: MIN between 0 and 1")
+        out.append((".*" if k == "*" else k, v))
+    return out
 HAIR_ROOT_DARKEN = 0.6
 # --hair texture (default): the hair slot gets a copy of a retail material instance that draws a colour TEXTURE with its
 # alpha as the mask: the Cultist Melee's hair (Master_Zombie_Outfit_M: two-sided, masked + dithered like hero hair, cloth
@@ -328,6 +348,8 @@ class TexTool:
         if self.max_tex not in (None, 512, 1024, 2048, 4096): die("--max-texture: 512, 1024, 2048 or 4096")
         self.dims = {}
         self.preview = {}                # texture set -> base colour PNG (preview_textures_*.json)
+        self.preview_pbr = {}            # texture set -> (PBR PNG, B is metallic) for the preview's roughness/metal
+        self.rough_min = parse_roughness(o.get("roughness") or [])
         self.mi_sets = []                # (MI, texture parameter, new texture) for textures that were shared
         self.adopted = {}                # shared MI package -> its copy in the template's folder
         self.meshes = []                 # the cooked meshes written (repointed when an MI is adopted)
@@ -393,9 +415,13 @@ class TexTool:
             size = set_size(tiles, ROLE_KEYS[role], cap, canvas) if role in ROLE_KEYS else const_size(tiles, cap, canvas)
             self.jobs.append({"out": out, "size": size,
                               "role": role, "tiles": tiles, "mean_from": self.retail_png(f),
-                              "normal_dx": self.normal_dx, "asset": asset, "path": path, "kind": self.kind})
+                              "normal_dx": self.normal_dx, "asset": asset, "path": path, "kind": self.kind,
+                              "roughness_min": self.rough_min})
             self.done.add(tex)
             if role in ("basecolor", "hairmm") and set_name: self.preview.setdefault(set_name, out)
+            if role == "pbr" and set_name:
+                # skin masters (Master_Hero_Head_M) use B for something else (retail skin: B ~0.8-1)
+                self.preview_pbr.setdefault(set_name, (out, not (master and SKIN_MASTER_RX.search(master))))
             if role == "hairmm":
                 # Master_Hair_M has no colour texture: the colour is RootColor -> TipColor along the strand (MultiMask).
                 # Take it from the model's hair texture (compose writes its average next to the PNG).
@@ -420,7 +446,8 @@ class TexTool:
             n = set_size(tiles, ROLE_KEYS[role], cap, canvas)
             self.jobs.append({"out": out, "size": n, "role": role, "tiles": tiles,
                               "mean_from": self.retail_png(upkg.game_path_to_file(tex, self.src)),
-                              "normal_dx": self.normal_dx, "asset": asset, "path": path, "kind": self.kind})
+                              "normal_dx": self.normal_dx, "asset": asset, "path": path, "kind": self.kind,
+                              "roughness_min": self.rough_min})
             if role == "hairbc" and set_name: self.preview.setdefault(set_name, out)
         self.copy_pkg(HAIR_TEX_MI, new_mi, refs)
         self.mi_scalars.append((new_mi, HAIR_TEX_SCALARS))
@@ -1143,6 +1170,9 @@ def survivor(o):
     tt.run()
     for (man, _), tag in zip(mans, ("3p", "fp")):
         prev = {slot: tt.preview[st] for slot, st in man["slots"].items() if st in tt.preview}
+        pbr = {slot: {"png": tt.preview_pbr[st][0], "metallic": tt.preview_pbr[st][1]}
+               for slot, st in man["slots"].items() if st in tt.preview_pbr}
+        if pbr: prev["_pbr"] = pbr          # preview.py: G roughness (B metallic) like the game
         json.dump(prev, open(os.path.join(work, f"preview_textures_{tag}.json"), "w"), indent=1)
     log(f"check it before the game: blender -b --python {os.path.join(HERE, 'blender', 'preview.py')} -- "
         f"{os.path.join(work, 'fit3p', 'lod0.glb')} preview.png --textures {os.path.join(work, 'preview_textures_3p.json')}"

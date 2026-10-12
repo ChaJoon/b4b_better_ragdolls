@@ -4212,6 +4212,43 @@ def hair_basecolor(j, W, H):
     return canvas
 
 
+PBR_SWAP_ROUGH = 0.15    # a character map whose roughness averages below this ...
+PBR_SWAP_METAL = 0.3     # ... while its metallic averages above this has the two channels the other way round
+PBR_GLOSSY = 0.3         # roughness average below this on a character material: logged (wet / mirror look in game)
+
+
+def name_matches(rx, name):
+    try: return re.fullmatch(rx, name, re.I) is not None
+    except re.error: return False
+
+
+def pbr_sanity(mat, tx, rough, metal, kind):
+    """Roughness and metallic of one character material, checked before they go into the game's PBR texture. Packed
+    maps come in more layouts than names tell: glTF ORM (G roughness, B metallic), Unreal rips' specular masks
+    (R specular, G metallic, B roughness in older Fortnite masters, G roughness, B metallic in "SRM" ones), Unity mask
+    maps. Read the wrong way round, cloth and skin get roughness ~0 and metallic ~0.8: a mirror, wet look in game
+    (B4B's retail hero roughness averages 0.5-0.9). Characters are almost never mostly metal with a mirror finish, so
+    a material whose roughness channel averages < 0.15 while its metallic channel averages > 0.3 gets them swapped
+    (logged). B4B_PBR_SWAP=0 turns the swap off (log only)."""
+    import numpy as np
+    if kind != "character" or not any(tx.get(k) for k in ("roughness", "metallic", "orm", "mask", "gloss")):
+        return rough, metal
+    r, m = float(np.mean(rough)), float(np.mean(metal))
+    if r < PBR_SWAP_ROUGH and m > PBR_SWAP_METAL:
+        if os.environ.get("B4B_PBR_SWAP", "1") != "0":
+            log(f"pbr: {mat}: roughness averages {r:.2f} with metallic {m:.2f} (a mirror): the map's roughness and "
+                f"metallic channels look swapped; swapped them (roughness {m:.2f}, metallic {r:.2f}; B4B_PBR_SWAP=0 "
+                f"keeps them)")
+            return metal, rough
+        log(f"pbr: {mat}: roughness averages {r:.2f} with metallic {m:.2f}: looks swapped (B4B_PBR_SWAP=0: kept)")
+    elif r < PBR_GLOSSY:
+        log(f"pbr: {mat}: glossy (roughness averages {r:.2f}, metallic {m:.2f}): looks wet in game unless the "
+            f"material is meant to shine; --roughness {mat}=<min> sets a floor")
+    else:
+        log(f"pbr: {mat}: roughness {r:.2f}, metallic {m:.2f}")
+    return rough, metal
+
+
 def compose(job_path):
     """Jobs: [{out, size, role basecolor|normal|pbr|zero|mean|hairmm|hairbc, tiles, mean_from, normal_dx}]"""
     import numpy as np
@@ -4265,8 +4302,17 @@ def compose(job_path):
                         if key == "roughness" and ok("gloss"): return 1.0 - load(tx["gloss"])[..., 0]
                         return np.full((ph, pw), const, np.float32)
                     region[..., 0] = chan("ao", 0, 1.0)
-                    region[..., 1] = chan("roughness", 1, val.get("roughness", 0.7))
-                    region[..., 2] = chan("metallic", 2, val.get("metallic", 0.0) if j.get("kind") != "character" else 0.0)
+                    rough = chan("roughness", 1, val.get("roughness", 0.7))
+                    metal = chan("metallic", 2, val.get("metallic", 0.0) if j.get("kind") != "character" else 0.0)
+                    rough, metal = pbr_sanity(t["material"], tx, rough, metal, j.get("kind"))
+                    for rx, lo in j.get("roughness_min") or []:       # --roughness MAT=MIN
+                        if rx.lower() == t["material"].lower() or name_matches(rx, t["material"]):
+                            rough = lo + (1.0 - lo) * rough
+                            log(f"pbr: {t['material']}: roughness lifted to at least {lo} (--roughness), now averages "
+                                f"{float(np.mean(rough)):.2f}")
+                            break
+                    region[..., 1] = rough
+                    region[..., 2] = metal
                     region[..., 3] = mean[3]
         save_px(np.clip(canvas, 0, 1), j["out"])
         log("composed", os.path.basename(j["out"]), role, f"{W}x{H}")
