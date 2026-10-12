@@ -332,7 +332,7 @@ static int ini_stat(FILETIME *mt, DWORD *sz) {
 static int ini_apply_live(const char *key, const char *val) {
     return thirdperson_live(key, val) || flashlight_live(key, val) || joinpolicy_live(key, val) ||
            presence_live(key, val) || teamsize_live(key, val) || overlay_live(key, val) || addons_live(key, val) ||
-           updater_live(key, val) || shop_live(key, val) || online_live(key, val);
+           updater_live(key, val) || shop_live(key, val) || online_live(key, val) || bots_live(key, val);
 }
 const char *cmds_ini_value(const char *key) {
     const IniKV *e = ini_last.n >= 0 ? ini_find(&ini_last, key) : NULL;
@@ -871,7 +871,7 @@ void cmds_run(char *line, Out *o) {
                !presence_cmd(verb, rest, o) && !rewardguard_cmd(verb, rest, o) && !joinpolicy_cmd(verb, rest, o) &&
                !cheats_cmd(verb, rest, o) && !thirdperson_cmd(verb, rest, o) && !overlay_cmd(verb, rest, o) &&
                !paks_cmd(verb, rest, o) && !models_cmd(verb, rest, o) && !poststats_cmd(verb, rest, o) &&
-               !updater_cmd(verb, rest, o) && !shop_cmd(verb, rest, o) && !fxsig_cmd(verb, rest, o) &&
+               !updater_cmd(verb, rest, o) && !shop_cmd(verb, rest, o) && !fxsig_cmd(verb, rest, o) && !bots_cmd(verb, rest, o) &&
                !supplylines_cmd(verb, rest, o))
         out_printf(o, "unknown command: %s\n", verb);
 }
