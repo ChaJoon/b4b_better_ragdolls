@@ -6,7 +6,8 @@ Cycles on the CPU (works without a GPU). For checking a model before and after t
   --sim <work>/fit3p/manifest.json: the cloth simulation meshes (skirts, coats, capes) drawn as red wire.
   --pose test bends arms, legs, spine and head of a B4B skeleton (skmgltf export or b4bfit output) to check weights.
   --textures: {"<material / slot name>": "<base colour png>"}, e.g. <work>/preview_textures.json written by
-  `b4bmod survivor` (the fitted model with the textures made for the game). Views follow the model's own facing when
+  `b4bmod survivor` (the fitted model with the textures made for the game; its "_pbr" entry gives the game's PBR
+  textures, so roughness (and metallic on clothing) render as in game: wet or mirror-like materials show). Views follow the model's own facing when
   it has a B4B skeleton (front = the face).
   --face <work>/face_preview.json [--face-pose AH|Joy|...] [--face-blink DEG]: close-up of the head with the face bones
   where the game will have them (moved onto the model's face) and one of the survivor's face poses applied the way the
@@ -170,6 +171,9 @@ meshes = [o for o in bpy.data.objects if o.type == "MESH" and (not opts["focus"]
 if opts["textures"]:
     import json, re
     tex = {k.lower(): v for k, v in json.load(open(opts["textures"])).items()}
+    # "_pbr": {slot: {png, metallic}} (b4bmodel): the game's PBR texture, G roughness, B metallic (not on skin
+    # masters), so the stills show what will look glossy or wet in game; without it roughness 0.7
+    pbr = {k.lower(): v for k, v in (tex.pop("_pbr", None) or {}).items()}
     for o in meshes:
         for i, m in enumerate(o.data.materials):
             if m is None: continue
@@ -190,6 +194,14 @@ if opts["textures"]:
             if not b.inputs["Alpha"].is_linked:
                 t.image.alpha_mode = "CHANNEL_PACKED"   # A is a mask for the game's shader, not opacity (else black)
             b.inputs["Roughness"].default_value = 0.7
+            pp = pbr.get(re.sub(r"\.\d{3}$", "", m.name).lower())
+            if pp and os.path.exists(pp["png"]):
+                pt = nm.node_tree.nodes.new("ShaderNodeTexImage"); pt.image = bpy.data.images.load(pp["png"])
+                pt.image.colorspace_settings.name = "Non-Color"
+                sep = nm.node_tree.nodes.new("ShaderNodeSeparateColor")
+                nm.node_tree.links.new(pt.outputs["Color"], sep.inputs[0])
+                nm.node_tree.links.new(sep.outputs[1], b.inputs["Roughness"])
+                if pp.get("metallic"): nm.node_tree.links.new(sep.outputs[2], b.inputs["Metallic"])
             nm.use_backface_culling = m.use_backface_culling
             o.data.materials[i] = nm
 if FACE_ARM is not None:

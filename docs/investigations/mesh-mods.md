@@ -1169,3 +1169,24 @@ the same way is the reference (charsuite now adds it to the previews: column "pr
   (`/tmp/b4b-charsuite-l2-final`, after merging models 1b25e15); `e2e.py --quick` 14/14
   (`/tmp/b4b-e2e-l2-final`). New charsuite `--motion`: talking face (client view while the host's
   hero says a line) and the outfit on a bot running across the host's view.
+
+## 21. Wet-looking outfits: roughness from packed specular maps (outfit-fixes, 2026-10-12)
+Reported after play: several game-rip outfits (Ahsoka, Alan Wake, Anakin, Rey, Becky Lynch, Kirk Hammett, Doja Cat's
+skin) looked glossy and wet in game. The game's PBR texture is R AO, G roughness, B metallic (retail hero roughness
+averages 0.5-0.9: Holly E00 Body 0.82, Walker E00 Body 0.81; skin slots 0.6-0.7; skin masters (`Master_Hero_Head_M`)
+use B for something other than metal: retail Holly Arm/Head B 0.82/0.99). The published builds had roughness 0.00-0.13
+on whole bodies (Ahsoka 0.02, Spider-Man Miles 0.00, Becky Lynch 0.02) and their "metallic" at 0.6-0.8.
+- **Root cause** (outside the kit): the private rip converter turned Unreal specular-mask textures into a glTF ORM image
+  assuming one layout, R specular / G metallic / B roughness. Newer source materials (2023+ parents, texture
+  parameter `SRM`; older masters with the static switch `SwizzleRoughnessToGreen`) store G roughness / B metallic, so
+  their roughness became the metallic channel (~0) and vice versa: a mirror. 166 of 200 `SRM` materials have G > B,
+  127 of 156 of the others G < B; the switch and the parameter name explain all but eye materials sharing the head's map
+  and black placeholder maps (no specular at all: now roughness 1). The converter now picks the layout per texture; 53
+  model files were corrected in place and their outfits rebuilt.
+- **In the kit** (`b4bfit.pbr_sanity`, `compose`): every character material's roughness/metallic average is logged
+  (`pbr:` lines, `glossy` below 0.3); a material whose roughness averages < 0.15 while its metallic averages > 0.3 (a
+  mirror: characters almost never are) gets the two swapped, logged (`B4B_PBR_SWAP=0` keeps them). `--roughness
+  MAT=MIN` (repeatable, MAT a name/regex/`*`) lifts a material's roughness (r -> MIN + (1 - MIN) r) for one that
+  still looks wet. `preview.py --textures` renders the game's PBR texture (G roughness; B metallic except on skin
+  masters) from the `_pbr` entry b4bmodel now writes into `preview_textures_*.json`: before, previews used a fixed
+  roughness 0.7, which is why the stills never showed the shine.
