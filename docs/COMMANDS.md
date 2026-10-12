@@ -688,6 +688,7 @@ join=steam:7656119XXXXXXXXXX
 | Option | Default | What it does |
 |---|---|---|
 | `steam_p2p` | `1` | `0`: no joins through Steam at all (then only `host_ip=1` joins work) |
+| `bot_toolkit_doors` | `1` | Host: when anyone pings a locked supply-stash door (the ones that need a toolkit), the nearest bot carrying a toolkit (up to 40 m away) goes and opens it, also when the ping hit a teammate in front of the door. `0`: bots answer such pings only as in the original game (only from close by, and only a clean ping on the door) |
 | `outfits_screen` | `1` | `0`: add-on outfits are not offered in the game's customization screen (only `/model`); restart to apply |
 | `presence_addr` | your LAN address | With `host_ip=1`: the address friends' **Join Game** connects to, e.g. `presence_addr=203.0.113.5:7777` (your public IP) |
 | `netguard_eos` | `1` | `0`: don't switch off the Epic Online Services network layer (troubleshooting only) |

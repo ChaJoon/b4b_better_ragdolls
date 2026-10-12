@@ -120,6 +120,11 @@ Detailed engine findings (addresses, obfuscated layouts, class names): `docs/NOT
     client with the profile loaded → the agent calls the game's handler (0x141CB65F0) itself. Local, no protocol
     bump; env `B4BCOOP_NO_SUPPLYLINES=1` = off. Dev `supplylines [fix|off|update|auto on|off|buy <line#> [item#|all]|
     sp <N>]`. docs/investigations/supply-lines.md.
+  - `bots.c` host: bots open pinged toolkit (supply-stash) doors. Retail bots answer only an actor ping of a door
+    inside their ~12 m tether, and a ping blocked by a teammate becomes a location ping they ignore; the host turns a
+    location ping aimed at a closed toolkit door into the door's ping and sends the nearest bot with the toolkit (40 m),
+    lifting its tether checks for that door (hooks on ServerSpawnPing_Implementation 0x141E887C0, tether 0x1415E9AB0 /
+    0x1415E96E0, ClearAllTargets 0x1415B5D50). Ini `bot_toolkit_doors=0`. Dev `botdoor ...`. docs/investigations/bot-pings.md.
   - `slotguard.c` host: a joiner with no free survivor slot gets "Server full." at login (bots' slots count as free),
     a slotless player is kicked instead of spawned (was a host crash, #7); `slotguard` command.
     docs/investigations/slot-guard.md.
