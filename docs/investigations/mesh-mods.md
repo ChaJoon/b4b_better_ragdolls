@@ -1195,4 +1195,8 @@ same way to compare):
 - Ada v2: `--outfit TU07/Karlee/Elite_03`, `--cloth off --hair-physics off --hair-pin off` (Dan: nothing on her should
   swing; the hair pin had put up to 84 % of her bob on spine_03, which stretches it when the head turns). Stills: crouch,
   turn, walk and aim clean; at full crouch a few leggings vertices poke through the dress at the back of the thigh.
+- Live (lane 2, Flatpak Steam, `B4B_STEAM=flatpak B4B_GPU=4090`, new `charsuite.py --mission 1 --poses`): Ada worn in
+  Fort Hope and Evansburgh, host crouching (22 cm lower), jogging, turning in place and aiming seen from the client and
+  the host's 3P camera: no stretching, no flaps, nothing swinging; PASS, 0 new log errors. The leg centring also
+  moves the unrigged Pink/Yellow Rangers 4-6 cm (their knees bend cleaner in `--pose crouch`); their paks are v1.
 
