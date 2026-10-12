@@ -274,6 +274,18 @@ b4bfit: cloth: ['Coat'] -> 6672 cloth faces (lower), simulation mesh open panel 
   <work>/fit3p/manifest.json` draws the simulation meshes as red wire over the model.
 - Both are shown to everyone who has the add-on (each machine simulates its own copy). Far away (the last two
   LODs) the garment is skinned, not simulated.
+- **`--skirt legs`**: a skirt or dress that looks wrong as cloth in the game (tears, floats away from the hips) or
+  stays rigid on the hips while the legs go through it: it is skinned to the hips and thighs instead, with no cloth.
+  At the waist it stays on the pelvis; lower down each half follows the thigh of its side, the front and back centre
+  are shared by both thighs (they stretch smoothly when one leg lifts), and the back keeps more of the pelvis so it
+  drapes over the seat when crouching (the front rests on the thighs: a slight plume). Which vertices: those on the
+  model's own skirt/dress/coat bones (`skirt`, `dress`, `kilt`, `gown`, `tutu`, Fortnite `dyn_coat_*` ... in the bone
+  name) and faces of materials named like a skirt, dress or coat, below the waist; the log says
+  `skirt: N vertices ... follow the pelvis and thighs (no cloth)`. Capes stay cloth. Best for skirts above the knee;
+  a long skirt or robe follows the thighs down to its hem (the calves can come through it when kneeling).
+- Unrigged models take their weights from the survivor's mesh; the survivor's gear bones (Holly Elite 00's bag on
+  `backpack`, gas masks) are left out of that (`weights: the survivor's gear bones (backpack) left out ...`): the
+  animations move them on their own, and a model's lower back or skirt on them swung out behind it.
 
 ## Add an outfit
 The survivor pipeline above **replaces** the template: everyone with your add-on sees your model instead of Mom's

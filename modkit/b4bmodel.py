@@ -31,6 +31,10 @@ and installs); guide: docs/meshes.md. How it works: docs/investigations/mesh-mod
                                    garments must also hang like one (from above the crotch to well below it), parts
                                    named like accessories (necklace, belt, strap, boots) stay skinned, and only
                                    materials on slots that draw cloth (bUsedWithClothing: clothing, not skin) swing
+        [--skirt cloth|legs]   cloth (default): skirts as above; legs: skirts, dresses and coat tails are skinned to
+                               the pelvis and thighs instead (no cloth): each half follows its thigh, front and back
+                               stretch between the legs, crouching the front rests on the thighs. For rigs whose skirt
+                               bones hang under the pelvis (most Fortnite skirts) when cloth looks wrong in game
         [--hair texture|tint]   hair slot: texture (default) = your hair texture's own colours, masked by its alpha;
                                 tint = the game's hair shader, one colour root to tip (your texture's average)
         [--as <name> [--as-title <text>]]   an ADDED outfit: new packages under /Game/b4bcoop/outfits/<name>/ and an
@@ -728,7 +732,7 @@ def textures_for(manifest, mesh_file, tt, static=False):
 NO_MATERIAL = "none"          # b4bfit's label for faces/objects without a material (--slot none=..., --tex none=...)
 
 
-def fit_args(o, keys=("bonemap", "drop", "weights", "twist", "facing", "face", "mouth", "face_eyes")):
+def fit_args(o, keys=("bonemap", "drop", "weights", "twist", "facing", "face", "mouth", "face_eyes", "skirt")):
     a = []
     for k in keys:
         if o.get(k): a += ["--" + k, o[k]]
@@ -963,6 +967,7 @@ def survivor(o):
     moddir = o.o["out"]
     tp = asset_file(o.get("outfit") or die("--outfit <3P outfit SKM> is required"), src)
     fp = asset_file(o["fp"], src) if o.get("fp") else None
+    if o.get("skirt", "cloth") not in ("cloth", "legs"): die(f"--skirt {o['skirt']}: cloth or legs")
     info = inspect(model, work, o.o["tex"])
     mats = [m for m in info["materials"] if m]
     log(f"model: {len(info['objects'])} objects, materials {mats}, "

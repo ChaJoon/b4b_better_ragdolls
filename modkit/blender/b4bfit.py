@@ -8,6 +8,7 @@ Guide: docs/meshes.md; how it works: docs/investigations/mesh-mods.md §6 (b4b-c
         [--slot SRCMAT=SLOT]... [--drop REGEX]
         [--weights source|transfer] [--twist template|none] [--textures DIR] [--facing -y] [--atlas SET=m1,m2]...
         [--drop_mat MATERIAL]... [--face auto|off] [--mouth auto|on|off] [--face_eyes x,y,z;x,y,z] [--hair_bones a,b,c;d,e [--hair_swing 1]] [--hair_pin on|off] [--cloth auto|MAT,...]
+        [--skirt cloth|legs] (legs: skirts/dresses/coat tails skinned to the pelvis and thighs, not cloth)
         [--slotset SLOT=SET]... [--tex MAT=<prefix|dir>]... [--probe 1]
   blender -b --python blender/b4bfit.py -- weapon --template T.glb --source gun.fbx --out DIR
         [--forward +x] [--up +z] [--scale fit|<factor>] [--anchor trigger|grip|none] [--part REGEX=BONE]...
@@ -959,6 +960,7 @@ def fit_character(o):
                 log("dropping", x.name, "(only dropped materials)"); bpy.data.objects.remove(x); src_objs.remove(x)
     mark_cloth_bones(src_objs, o.get("cloth", ""))
     if o.get("mode", "3p") == "3p": dangle_module().mark_hair_bones(src_objs, log)
+    if o.get("mode", "3p") == "3p" and o.get("skirt") == "legs": dangle_module().mark_skirt_bones(src_objs, log)
     keyed = [x.name for x in src_objs if x.type == "MESH" and x.data.shape_keys]
     face_on = o.get("mode", "3p") == "3p" and o.get("face", "auto") != "off"
     face_src = None
@@ -1217,6 +1219,7 @@ def fit_character(o):
                 mw = x.matrix_world.copy(); x.parent = None; x.matrix_world = mw
         smeshes = meshes
         o["weights"] = "transfer"
+        dangle_module().drop_template_gear(tpl, log)   # Holly's bag bone: no part of the model goes on it
         face = AXES[o.get("facing", "-y")]
         tfwd = Vector((1, 0, 0))                    # B4B heroes face +X
         R = face.rotation_difference(tfwd).to_matrix().to_4x4()
@@ -1252,8 +1255,14 @@ def fit_character(o):
         # the template (skeleton + meshes) takes the model's proportions too: later steps (twist weights, the face)
         # compare against it, and its joints become the mesh's bind skeleton (manifest extras bind_bones_m)
         rebind_template(tpl, own_bind, chains, chain_of, o)
+    # --skirt legs: skirts follow the hips and thighs (before the twist split, which shares the thighs' part like the
+    # legs'; an unrigged model's after its weights come from the template)
+    skirt = mode == "3p" and o.get("skirt") == "legs" and not o.get("probe")
+    if skirt and o.get("weights") != "transfer":
+        dangle_module().skirt_legs(tpl, smeshes, log)
     if o.get("weights") == "transfer":
         transfer_weights(tpl, smeshes, all_groups=True)
+        if skirt: dangle_module().skirt_legs(tpl, smeshes, log)
     elif o.get("twist", "template") == "template":
         transfer_weights(tpl, smeshes, all_groups=False)
     if face_on and not o.get("probe"):
@@ -1470,6 +1479,10 @@ def secondary_motion(o, tpl, meshes):
             ok_slots = {x.lower() for x in o["cloth_slots"].split(",") if x}
             cloth_ok = lambda mat: slot_of.get(mat, "").lower() in ok_slots if mat in slot_of else True
         mats, objs = dm.cloth_materials(meshes, tpl, o["cloth"], log, cloth_ok)
+        if o.get("skirt") == "legs":                # skirts, dresses, coat tails follow the legs instead (skirt_legs)
+            low = sorted(n for n, k in mats.items() if k == "lower")
+            if low: log(f"cloth: {low} not simulated (--skirt legs: they follow the pelvis and thighs)")
+            mats = {n: k for n, k in mats.items() if k != "lower"}
         pieces, sims = dm.cloth_regions(tpl, meshes, mats, log, objs)
         if sims:
             meshes = [m for m in meshes if len(m.data.polygons)] + pieces
