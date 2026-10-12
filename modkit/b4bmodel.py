@@ -991,7 +991,7 @@ def survivor(o):
     unrigged = not info["armatures"]
     run_blender(["character", "--template", template_glb(tp, work), "--source", os.path.abspath(model), "--out", rp,
                  "--mode", "3p", "--probe", "regions", "--proportions", o.get("proportions") or "own"] + fit_args(o.o) +
-                (["--rigged_out", rigged] if unrigged else []))
+                sim_args(tp, src) + (["--rigged_out", rigged] if unrigged else []))
     rig_args = ["--rigged", rigged] if unrigged and os.path.exists(rigged) else []
     regions = json.load(open(os.path.join(rp, "regions.json")))
     slot3, drop = auto_slots(mats, minfo, s3, user, regions, cloth_on=o.get("cloth", "auto") != "off")
@@ -1086,7 +1086,8 @@ def survivor(o):
     run_blender(["character", "--template", template_glb(tp, work), "--source", os.path.abspath(model), "--out", d3,
                  "--mode", "3p", "--lods", o.get("lods", "1,0.5,0.3,0.15,0.06"),
                  "--proportions", o.get("proportions") or "own"] + fit_args(o.o) + atlas_args + density_args(o.o) +
-                slotset3 + [x for m, s in slot3.items() for x in ("--slot", f"{m}={s}")] + dangle_args(o.o, tp, src))
+                slotset3 + [x for m, s in slot3.items() for x in ("--slot", f"{m}={s}")] + sim_args(tp, src) +
+                dangle_args(o.o, tp, src))
     man3 = json.load(open(os.path.join(d3, "manifest.json")))
     # the game's hair shader tints vertex-coloured strands (retail: mostly black); the colour-texture material doesn't
     # (the cultist's hair is white, the default)
@@ -1435,6 +1436,22 @@ def master_uses_clothing(master, src):
             pass
     n = master.split(".")[-1]
     return bool(re.search(r"outfit|cloth|hair|gear", n, re.I)) and not re.search(r"head|skin|eye", n, re.I)
+
+
+def sim_args(tp, src):
+    """--sim_bones for b4bfit: the bones the template's physics asset simulates (Karlee's backpack, Holly's hair ...).
+    The model gets no weights on them through the template's (cloth.simulated_bones; the physics asset is extracted
+    if it isn't yet)."""
+    import cloth
+    sim, pa = cloth.simulated_bones(tp, src)
+    if sim is None and find_b4bmod():
+        subprocess.run([sys.executable, find_b4bmod(), "extract", pa.split(".")[0], "-o", src], capture_output=True,
+                       text=True)
+        sim, pa = cloth.simulated_bones(tp, src)
+    if sim is None:
+        log(f"physics: {os.path.basename(tp)}'s physics asset {pa.split('.')[0]} could not be extracted: its "
+            f"simulated bones aren't known")
+    return ["--sim_bones", ",".join(sorted(sim))] if sim else []
 
 
 def dangle_args(o, tp, src):
