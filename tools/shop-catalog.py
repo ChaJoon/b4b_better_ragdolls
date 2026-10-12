@@ -46,7 +46,7 @@ def what_it_does(info, files):
     adds = []
     for v in info.get("outfit", []):
         f = v.split("|")
-        adds.append(f"outfit {f[0]}" + (f" ({f[1]})" if len(f) > 1 and f[1] else ""))
+        adds.append(f"outfit {f[0]}")   # any survivor can wear it: its base survivor is no news to a player
     for v in info.get("weapon", []):
         f = v.split("|")
         adds.append(f"weapon look {f[0]}" + (f" ({f[1]})" if len(f) > 1 and f[1] else ""))
