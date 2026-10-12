@@ -816,6 +816,7 @@ void cmds_tick(float dt) {
     rewardguard_tick(dt);
     cheats_tick(dt);
     thirdperson_tick(dt);
+    bots_tick(dt);
     models_tick(dt);
     poststats_tick(dt);
     updater_tick(dt);
@@ -872,7 +873,7 @@ void cmds_run(char *line, Out *o) {
                !cheats_cmd(verb, rest, o) && !thirdperson_cmd(verb, rest, o) && !overlay_cmd(verb, rest, o) &&
                !paks_cmd(verb, rest, o) && !models_cmd(verb, rest, o) && !poststats_cmd(verb, rest, o) &&
                !updater_cmd(verb, rest, o) && !shop_cmd(verb, rest, o) && !fxsig_cmd(verb, rest, o) && !bots_cmd(verb, rest, o) &&
-               !supplylines_cmd(verb, rest, o))
+               !bots_heal_cmd(verb, rest, o) && !supplylines_cmd(verb, rest, o))
         out_printf(o, "unknown command: %s\n", verb);
 }
 #endif  // !B4B_RELEASE

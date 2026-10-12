@@ -125,6 +125,12 @@ Detailed engine findings (addresses, obfuscated layouts, class names): `docs/NOT
     location ping aimed at a closed toolkit door into the door's ping and sends the nearest bot with the toolkit (40 m),
     lifting its tether checks for that door (hooks on ServerSpawnPing_Implementation 0x141E887C0, tether 0x1415E9AB0 /
     0x1415E96E0, ClearAllTargets 0x1415B5D50). Ini `bot_toolkit_doors=0`. Dev `botdoor ...`. docs/investigations/bot-pings.md.
+    Heal requests (any machine: key `bot_heal_key`, default H; host decides, ini `bot_heal_requests=0`, `~` Cheats tab):
+    the nearest bot with an Aid_Heal item usable on a teammate gets a job: its item-use cooldowns removed (120 s after
+    any successful use), thresholds 1.0 + score +10 for the requester (hooks on the item-use score 0x1415D6030 / target
+    eval 0x1415D67D0), saferoom rule lifted, tether lifted; next bot after 4 s untaken / 8 s + 0.5 s/m unhealed. A
+    client's request = ServerSpawnCommWheelPing(GroupUp) with Scale3D (1,1,0.875) (hook 0x141E88840; older host shows
+    "Group up"; no protocol bump). Dev `botheal ...`. bot-pings.md "Heal requests".
   - `slotguard.c` host: a joiner with no free survivor slot gets "Server full." at login (bots' slots count as free),
     a slotless player is kicked instead of spawned (was a host crash, #7); `slotguard` command.
     docs/investigations/slot-guard.md.

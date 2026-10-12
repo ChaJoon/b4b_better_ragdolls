@@ -1,6 +1,13 @@
 // Bots open pinged toolkit doors (supply-stash doors that need a toolkit): host only, ini bot_toolkit_doors=0 turns it
 // off. Why retail bots often ignore such a ping and what the host changes: the "the fix" section below and
 // docs/investigations/bot-pings.md.
+// Heal requests: a player presses bot_heal_key and the nearest bot with a healing item heals them (host decides; a
+// client's request travels as a marked retail comm-wheel ping); ini bot_heal_requests=0 = off. "heal requests" below.
+//
+// Dev `botheal`: heroes (health, the bots' max, heal items with use/target types, thresholds, item-use target) and
+// open jobs; `botheal hurt <hero#> <pct>` (HealthComponent.SetHealth, host), `ask [hero#]` (as the key / for that hero),
+// `key` (holds the real key 300 ms), `keys <KeyName>` (the game's mappings on a key), `watch` (log SetItemUseItem and a
+// job bot's ClearItemUseItem), `fix [on|off]`.
 //
 // Dev commands (`botdoor ...`; `bots` is the chat command /bots): `botdoor` (bot controllers: hero, ping-usable query,
 // interact target, toolkits of door 0's row), `botdoor doors [all]` (toolkit doors / all Door actors: state, usable,
@@ -13,6 +20,7 @@
 // `botdoor send <door#>` (the fix's bot choice without a ping), `botdoor fix [on|off]`, `botdoor watch` (log every
 // ClearInteractTarget with its reason and caller), `botdoor call <hex> <Func>`.
 #include <windows.h>
+#include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -622,7 +630,14 @@ static void remember_sent(UObject *ctl, UObject *scr, UObject *door, UObject *us
     sent[k].until = GetTickCount64() + 30000;
 }
 
+// heal requests (below) share the tether and ClearAllTargets hooks
+static volatile LONG n_heal;
+static int heal_tether_actor(UObject *ctl, UObject *actor);
+static int heal_tether_loc(UObject *ctl, const float *loc);
+static int heal_keeps_targets(UObject *scr);
+
 static uint8_t tether_actor_detour(void *tether, UObject *actor, float extra, void *out) {
+    if (n_heal && actor && tether && heal_tether_actor(TETHER_OWNER(tether), actor)) return 1;
     if (n_sent && actor && tether)
         for (int i = 0; i < MAX_SENT; i++)
             if (sent[i].door == actor && sent[i].ctl == TETHER_OWNER(tether) && job_open(i)) return 1;
@@ -630,6 +645,7 @@ static uint8_t tether_actor_detour(void *tether, UObject *actor, float extra, vo
 }
 
 static uint8_t tether_loc_detour(void *tether, const float *loc, float extra, void *out) {
+    if (n_heal && loc && tether && heal_tether_loc(TETHER_OWNER(tether), loc)) return 1;
     if (n_sent && loc && tether)
         for (int i = 0; i < MAX_SENT; i++)
             if (sent[i].ctl && sent[i].ctl == TETHER_OWNER(tether) && dist3(loc, sent[i].at) < 400.f && job_open(i)) return 1;
@@ -645,6 +661,14 @@ static UObject *scripting_target(UObject *scr) {
 }
 
 static void clear_targets_detour(UObject *scr, uint8_t a, uint8_t b) {
+    // the tether update's ClearAllTargets also clears the item use (ClearItemUseItem): kept for a bot on a heal request
+    if (n_heal && heal_keeps_targets(scr)) {
+        if (__builtin_return_address(0) == (void *)ADDR_TETHER_CLEAR_RET) return;
+#ifndef B4B_RELEASE
+        LOG("bots: heal: ClearAllTargets(%d, %d) on a job bot from %llx", a, b,
+            (unsigned long long)((uintptr_t)__builtin_return_address(0) - g_base_delta));
+#endif
+    }
     if (n_sent)
         for (int i = 0; i < MAX_SENT; i++) {
             if (sent[i].scr != scr || !job_open(i)) continue;
@@ -844,17 +868,654 @@ static void spawnping_detour(UObject *comp, UObject *pc, const void *xform, uint
     LOG("bots: toolkit door %s pinged: %s", ue_obj_name(door, nm, sizeof nm), send_bot_to_door(door, pc, why, sizeof why));
 }
 
+// ---- heal requests: a player asks the bots to heal them (hotkey bot_heal_key; host decides) ----
+// Retail (docs/investigations/bot-pings.md "Heal requests"): a bot's inventory update (0x1415D5210, every bot tick on
+// the host) scores each item it carries for a use (0x1415D6030) and, for an item whose ItemUseConfig.UseType has
+// Aid_Heal, each teammate as target (0x1415D67D0): a teammate counts only below HealthAlertPctTeamOOC (0.76) of their
+// full max health, in combat (an enemy set) below HealthAlertPctTeamInCombat (0.66); score (1 - health/max) * the slot's
+// priority, the best item/target wins and becomes the bot's item use (SetItemUseItem 0x1415B7BE0: blackboard ItemUse +
+// ItemUseNavActor), which Bot_BT runs before interacting and fighting (walk to the teammate, Bot_ItemUse_GA). No
+// distance limit, but: Aid_Heal is never used inside a saferoom (ItemUseTypesSaferoomNotAllowed); after ANY successful
+// item use (a heal, a grenade) the bot uses no healing item for 120 s (heal_clear_cooldowns); one item use at a time,
+// in a fight often a grenade on a common; the tether update clears the item use with every other target
+// (ClearAllTargets -> ClearItemUseItem) when bot and teammate are outside the bot's tether; and nothing a player does
+// asks for it (no ping, comm-wheel action or voice line).
+// The host, on a request: the nearest living bot that carries a heal item usable on a teammate gets a job (40 s at
+// most): its item-use cooldowns are removed; for that bot and the requester the thresholds are 1.0 (any missing health)
+// and the score +10 (the requester wins over other teammates and items); the saferoom rule is lifted; its tether
+// counts the requester and every location as inside (no turning back, no teleport to the team). The game's own checks
+// still decide (the item must apply: e.g. not grappled, temporary health not full). A bot that has not taken the
+// requester as its item-use target after 4 s, or has and not healed after 8 s + 0.5 s per metre (Bot_ItemUse_GA's
+// own 5 s use timeout can repeat), is replaced by the next candidate.
+// A client's request reaches the host as a retail RPC: ServerSpawnCommWheelPing(GroupUp) at its hero with Scale3D
+// HEAL_MARK; this host runs the request instead of the comm ping; a host without it shows "Group up" there (no protocol
+// bump). Feedback: a chat notice to everyone when a bot takes the job ("<player> needs healing: <bot> is on the way"),
+// to the requester when nothing happens and why; the bot's own healing barks play as in retail. (The requester's own
+// "Low_Health" voice line can't be played: DialogueComponent.SayLine looks for the Wwise event DX_<Voice>_<Response>,
+// the real events are Dx_B_<Voice>_<Response>_NN; mesh-mods.md.) ini bot_heal_requests=0 = off (host: requests
+// ignored; any machine: no key).
+#define ADDR_ITEMUSE_SCORE VA(0x1415D6030ull)   // float ScoreItemUse(ABotController*, FBotItemUseInfo*)
+static const uint8_t SIG_ITEMUSE_SCORE[] = {0x40,0x55,0x53,0x41,0x57,0x48,0x8d,0xac,0x24,0x50,0xfc,0xff,0xff,0x48,0x81,0xec,
+                                            0xb0,0x04,0x00,0x00,0x48,0x8b,0xda,0x4c};
+#define ADDR_ITEMUSE_EVAL VA(0x1415D67D0ull)    // float EvalItemUseTarget(ABotController*, FBotItemUseInfo*, AActor* Target,
+                                                //   bool bSelf, FVector* OutLoc)
+static const uint8_t SIG_ITEMUSE_EVAL[] = {0x40,0x55,0x56,0x57,0x41,0x55,0x41,0x56,0x48,0x8d,0xac,0x24,0x20,0xfc,0xff,0xff,
+                                           0x48,0x81,0xec,0xe0,0x04,0x00,0x00,0x48,0x8b,0xfa};
+#define ADDR_COMMPING_IMPL VA(0x141E88840ull)   // UPlayerWaypointsComponent::ServerSpawnCommWheelPing_Implementation(this,
+                                                //   AGobiPlayerController*, const FTransform&, ECommWheelAction) (vtable +0x420)
+static const uint8_t SIG_COMMPING[] = {0x48,0x89,0x5c,0x24,0x08,0x48,0x89,0x6c,0x24,0x10,0x48,0x89,0x74,0x24,0x18,0x57,
+                                       0x48,0x83,0xec,0x20,0x41,0x0f,0xb6,0xf9};
+// BotController: active playstyle config +0x3000; CombatConfig.HealthInfo (+0xB20): SelfOOC, TeamOOC, SelfInCombat,
+// TeamInCombat; InventoryConfig (+0x628): ItemUseUseTypesAllowed +0x1AC, ItemUseTypesSaferoomNotAllowed +0x1AE
+#define BC_HEALTH_INFO 0x3B20
+#define BC_ITEMUSE_TYPES 0x37D4
+#define BC_ITEMUSE_SAFEROOM_NOT 0x37D6
+#define ITEM_USE_TYPE(it)    (*(uint16_t *)((char *)(it) + 0x440))   // Item.ItemRow (+0x360).ItemUseConfig (+0xE0).UseType
+#define ITEM_TARGET_TYPE(it) (*(uint16_t *)((char *)(it) + 0x490))   // ... .TargetType (+0x50)
+#define USE_AID_HEAL 2           // EItemUseType::Aid_Heal
+#define TARGET_TEAMMATE 2        // EItemTargetType::Actor_Teammate
+#define INFO_ITEM(info)      (*(UObject **)((char *)(info) + 0x20))   // FBotItemUseInfo: the item
+static const float HEAL_MARK[3] = {1.0f, 1.0f, 0.875f};   // Scale3D of a client's heal request comm ping
+#define HEAL_ACTION 5            // ECommWheelAction::GroupUp (what a host without this shows)
+#define HEAL_MAX_DIST 6000.f     // cm: bots further away are not asked
+#define HEAL_JOB_MS 40000
+#define HEAL_TAKE_MS 4000        // a bot that has not taken the job by then: next candidate
+#define HEAL_USE_MS 8000         // ... or has taken it and not healed by then (+ 0.5 s per metre to the requester; e.g.
+                                 // its item use keeps timing out)
+#define MAX_HEAL 4
+
+typedef float (*ItemScoreFn)(UObject *ctl, void *info);
+typedef float (*ItemEvalFn)(UObject *ctl, void *info, UObject *target, uint8_t self, float *loc);
+typedef void (*CommPingFn)(UObject *comp, UObject *pc, const float *xform, uint8_t action);
+static ItemScoreFn orig_item_score;
+static ItemEvalFn orig_item_eval;
+static CommPingFn orig_commping;
+static int heal_requests = 1;          // ini bot_heal_requests=0 turns it off
+static int heal_key = 'H';             // ini bot_heal_key (VK), 0 = no key
+static int heal_hooked;
+
+static struct {
+    UObject *ctl, *scr, *bot, *req, *req_pc;   // bot controller, its scripting component, its hero; requester's hero/PC
+    int32_t ctl_i, scr_i, bot_i, req_i, req_pc_i;
+    float hp0, tmp0;                           // requester's health / temporary health at the request
+    float at[3];                               // requester's location (tick)
+    ULONGLONG t0, until, take_by;
+    int taken, announced;
+    UObject *tried[MAX_BOTS];                  // bots already asked for this request
+    int n_tried;
+} heal[MAX_HEAL];
+
+static UObject *pawn_fn_obj(UObject *pawn, const char *fn) {   // a parameterless getter returning an object
+    UFunction *f = fn_of(pawn, fn);
+    uint8_t p[16] = {0};
+    if (!f || UFN_PARMSSIZE(f) > (int)sizeof p) return NULL;
+    ue_process_event(pawn, f, p);
+    return *(UObject **)p;
+}
+static int pawn_flag(UObject *pawn, const char *fn) {   // IsIncap / IsAlive / IsDead ...
+    UFunction *f = fn_of(pawn, fn);
+    uint8_t p[16] = {0};
+    if (!f) return -1;
+    ue_process_event(pawn, f, p);
+    return p[parm_off(f, "ReturnValue")];
+}
+// health, temporary health, full max (InitialMaxHealth, what the bots compare with), current max (trauma)
+static int hero_health(UObject *pawn, float *hp, float *tmp, float *max, float *cur) {
+    UObject *hc = pawn ? pawn_fn_obj(pawn, "GetHealthComponent") : NULL;
+    static int32_t o_hp = -1, o_tmp, o_cur, o_tune;
+    if (!hc) return 0;
+    if (o_hp < 0) {
+        o_hp = ue_prop_offset(hc, "Health"); o_tmp = ue_prop_offset(hc, "TemporaryHealth");
+        o_cur = ue_prop_offset(hc, "CurrentMaxHealth"); o_tune = ue_prop_offset(hc, "HealthTuning");
+        if (o_tmp < 0 || o_cur < 0 || o_tune < 0) o_hp = -1;
+        if (o_hp < 0) return 0;
+    }
+    *hp = *(float *)((char *)hc + o_hp);
+    if (tmp) *tmp = *(float *)((char *)hc + o_tmp);
+    // HealthTuning.InitialMaxHealth (+0xF0) .Value (+0x20): the bots' "max" (HealthComponent +0x638)
+    if (max) *max = *(float *)((char *)hc + o_tune + 0xF0 + 0x20);
+    if (cur) *cur = *(float *)((char *)hc + o_cur);
+    return 1;
+}
+
+// the hero's first carried item that heals a teammate (Aid_Heal, Actor_Teammate), its slot in *slot
+static UObject *heal_item(UObject *pawn, int *slot) {
+    UObject *inv = pawn ? inventory_of(pawn) : NULL;
+    static int32_t o_slots = -1;
+    if (!inv) return NULL;
+    if (o_slots < 0) o_slots = ue_prop_offset(inv, "EquipmentSlots");
+    if (o_slots < 0) return NULL;
+    TArray *a = (TArray *)((char *)inv + o_slots);
+    for (int i = 0; a->data && i < a->num && i < 16; i++) {
+        UObject *it = ((UObject **)a->data)[i];
+        if (!it || !is_live(it)) continue;
+        if ((ITEM_USE_TYPE(it) & USE_AID_HEAL) && (ITEM_TARGET_TYPE(it) & TARGET_TEAMMATE)) { if (slot) *slot = i; return it; }
+    }
+    return NULL;
+}
+
+// a player's name, or a bot's survivor (HeroCharacter.GetHeroCharacterVoiceName: Holly, Walker, Mom, ...)
+static void hero_name(UObject *pawn, char *buf, size_t n) {
+    UObject *ps = pawn ? ue_get_ptr(pawn, "PlayerState") : NULL;
+    if (ps) admin_display_name(ps, buf, n); else buf[0] = 0;
+    if (buf[0] && strcmp(buf, "bot") && strcmp(buf, "?")) return;
+    snprintf(buf, n, "A bot");
+    UFunction *f = fn_of(pawn, "GetHeroCharacterVoiceName");
+    uint8_t p[16] = {0};
+    char nm[64];
+    if (!f) return;
+    ue_process_event(pawn, f, p);
+    if (((FName *)p)->idx && ue_name(*(FName *)p, nm, sizeof nm)[0] && strcmp(nm, "None")) snprintf(buf, n, "%s", nm);
+}
+
+static void heal_tell(UObject *pc, const char *fmt, ...) {   // the requester's chat (host: local line)
+    char msg[240], line[260];
+    va_list ap; va_start(ap, fmt);
+    vsnprintf(msg, sizeof msg, fmt, ap);
+    va_end(ap);
+    snprintf(line, sizeof line, "[b4bcoop] %s", msg);
+    LOG("bots: heal: %s", msg);
+    if (!pc) return;
+    if (pc == ue_local_pc()) chat_local("%s", line); else admin_notice_to(pc, line);
+}
+
+// the job's objects still exist (object indices: map change safe) and it has time left; the tick closes the others
+static int heal_open(int i) {
+    return heal[i].ctl && still(heal[i].ctl, heal[i].ctl_i) && still(heal[i].scr, heal[i].scr_i) &&
+           still(heal[i].bot, heal[i].bot_i) && still(heal[i].req, heal[i].req_i) && GetTickCount64() < heal[i].until;
+}
+static void heal_close(int i) {
+    if (!heal[i].ctl) return;
+    memset(&heal[i], 0, sizeof heal[i]);
+    InterlockedDecrement(&n_heal);
+}
+
+static int heal_find_ctl(UObject *ctl) {
+    for (int i = 0; i < MAX_HEAL; i++) if (heal[i].ctl == ctl && heal_open(i)) return i;
+    return -1;
+}
+
+static int heal_tether_actor(UObject *ctl, UObject *actor) {
+    int i = heal_find_ctl(ctl);
+    return i >= 0 && actor == heal[i].req;
+}
+// every location: the tether's group-up / teleport-back check (0x1415E9000: ClearAllTargets at 0x1415E957C and
+// 0x1415E964C, then a go-to or teleport toward the team) looks at the bot's own way there, not only at the requester
+static int heal_tether_loc(UObject *ctl, const float *loc) {
+    (void)loc;
+    return heal_find_ctl(ctl) >= 0;
+}
+static int heal_keeps_targets(UObject *scr) {
+    for (int i = 0; i < MAX_HEAL; i++) if (heal[i].scr == scr && heal_open(i)) return 1;
+    return 0;
+}
+
+// the nearest living bot (not yet asked for this request, not on another job) carrying a heal item; NULL = none
+static int heal_pick(int j, UObject **ctl_out, UObject **scr_out, float *dist_out, int *holders_out) {
+    UObject *ctl[MAX_BOTS], *scr[MAX_BOTS];
+    int n = collect_bots(ctl, scr, MAX_BOTS), best = -1, holders = 0;
+    float at[3], bd = 0;
+    actor_loc(heal[j].req, at);
+    for (int k = 0; k < n; k++) {
+        UObject *pawn = ue_get_ptr(ctl[k], "Pawn");
+        float bl[3];
+        if (!scr[k] || !pawn || pawn == heal[j].req || !pawn_alive(pawn) || pawn_flag(pawn, "IsIncap") == 1 ||
+            !heal_item(pawn, NULL) || !actor_loc(pawn, bl)) continue;
+        holders++;
+        int skip = 0;
+        for (int t = 0; t < heal[j].n_tried && !skip; t++) skip = heal[j].tried[t] == ctl[k];
+        for (int o = 0; o < MAX_HEAL && !skip; o++) skip = o != j && heal[o].ctl == ctl[k] && heal_open(o);
+        float dd = dist3(bl, at);
+        if (skip || dd > HEAL_MAX_DIST) continue;
+        if (best < 0 || dd < bd) { best = k; bd = dd; }
+    }
+    if (holders_out) *holders_out = holders;
+    if (best < 0) return 0;
+    *ctl_out = ctl[best]; *scr_out = scr[best]; *dist_out = bd;
+    return 1;
+}
+
+// The bot's item-use cooldowns (Bot_ItemUse_GA: Bot_ItemUseSuccess_Cooldown_GE, 120 s after ANY successful item use,
+// a heal or a grenade; Bot_ItemUse_Cooldown_GE, 2 s after a failed one). Their tag Bot.Actions.Item.Use.Cooldown(.Success)
+// zeroes every Aid item's score, blocks Bot_BT's ItemUse branch and the action itself. Removed for the bot asked to
+// heal (GameplayEffectsComponent.Remove, all stacks); returns how many.
+static int heal_clear_cooldowns(UObject *bot) {
+    static UClass *gec;
+    static int32_t o_target = -1, o_comp = -1;
+    if (!gec) gec = ue_find_class("GameplayEffect");
+    int n = 0;
+    char cn[96];
+    for (int32_t i = 0, m = ue_num_objects(); gec && bot && i < m; i++) {
+        UObject *e = ue_object_at(i);
+        if (!e || !is_live(e) || !ue_is_a(e, gec)) continue;
+        if (o_target < 0) { o_target = ue_prop_offset(e, "TargetActor"); o_comp = ue_prop_offset(e, "OwningGameplayEffectComponent"); }
+        if (o_target < 0 || o_comp < 0 || *(UObject **)((char *)e + o_target) != bot) continue;
+        if (strncmp(ue_obj_name(U_CLASS(e), cn, sizeof cn), "Bot_ItemUse", 11) || !strstr(cn, "Cooldown_GE")) continue;
+        UObject *comp = *(UObject **)((char *)e + o_comp);
+        UFunction *f = fn_of(comp, "Remove");
+        int32_t oe = parm_off(f, "Effect"), ort = parm_off(f, "RemovalType");
+        if (oe < 0 || ort < 0) continue;
+        uint8_t p[32] = {0};
+        *(UObject **)(p + oe) = e;
+        p[ort] = 1;   // EGameplayEffectStackRemovalRules::RemoveAllStacks
+        ue_process_event(comp, f, p);
+        n++;
+    }
+    return n;
+}
+
+static int heal_assign(int j) {   // the next bot for request j; 0 = none left
+    UObject *c, *s;
+    float d;
+    int holders;
+    if (!heal_pick(j, &c, &s, &d, &holders)) return 0;
+    UObject *bot = ue_get_ptr(c, "Pawn");
+    int cleared = heal_clear_cooldowns(bot);
+    if (cleared) LOG("bots: heal: removed %d item-use cooldown(s)", cleared);
+    heal[j].ctl = c; heal[j].scr = s; heal[j].bot = bot;
+    heal[j].ctl_i = U_INDEX(c); heal[j].scr_i = U_INDEX(s); heal[j].bot_i = U_INDEX(bot);
+    heal[j].take_by = GetTickCount64() + HEAL_TAKE_MS;
+    heal[j].taken = 0;
+    if (heal[j].n_tried < MAX_BOTS) heal[j].tried[heal[j].n_tried++] = c;
+    char bn[64];
+    hero_name(bot, bn, sizeof bn);
+    LOG("bots: heal: asked %s (%.0f m away, %d holder(s))", bn, d / 100.f, holders);
+    return 1;
+}
+
+// host: the hero `req` (its controller `pc` for the replies, may be NULL) asks for healing; returns what happened
+static const char *heal_request(UObject *req, UObject *pc, char *why, size_t wl) {
+    float hp, tmp, max, cur;
+    if (!heal_hooked || !heal_requests) return "off";
+    if (req && pawn_flag(req, "IsIncap") == 1) {   // IsAlive is false while down
+        heal_tell(pc, "You are down: bots revive downed players on their own.");
+        return "requester is down";
+    }
+    if (!req || !pawn_alive(req) || !hero_health(req, &hp, &tmp, &max, &cur)) return "no living hero";
+    if (max <= 0 || hp >= max - 0.5f) { heal_tell(pc, "You are not hurt."); return "not hurt"; }
+    int j = -1;
+    for (int i = 0; i < MAX_HEAL && j < 0; i++) if (heal[i].req == req && heal_open(i)) j = i;
+    if (j >= 0) { snprintf(why, wl, "already asked (%s)", heal[j].taken ? "on the way" : "waiting"); return why; }
+    for (int i = 0; i < MAX_HEAL && j < 0; i++) if (!heal[i].ctl) j = i;
+    if (j < 0) return "too many requests";
+    memset(&heal[j], 0, sizeof heal[j]);
+    heal[j].req = req; heal[j].req_i = U_INDEX(req);
+    heal[j].req_pc = pc; heal[j].req_pc_i = pc ? U_INDEX(pc) : 0;
+    heal[j].hp0 = hp; heal[j].tmp0 = tmp;
+    actor_loc(req, heal[j].at);
+    heal[j].t0 = GetTickCount64();
+    heal[j].until = heal[j].t0 + HEAL_JOB_MS;
+    if (!heal_assign(j)) {
+        UObject *c, *s; float d; int holders = 0;
+        heal_pick(j, &c, &s, &d, &holders);
+        heal[j].req = NULL;
+        heal_tell(pc, holders ? "No bot can heal you right now." : "No bot carries a healing item.");
+        snprintf(why, wl, "no bot (%d holder(s), %.0f%% health)", holders, 100.f * hp / max);
+        return why;
+    }
+    InterlockedIncrement(&n_heal);
+    char bn[64];
+    hero_name(heal[j].bot, bn, sizeof bn);
+    snprintf(why, wl, "asked %s (%.0f%% health)", bn, 100.f * hp / max);
+    return why;
+}
+
+// game thread: job progress (taken / healed / given up), the requester's location for the tether check
+static void heal_jobs_tick(void) {
+    static UFunction *f_target;
+    for (int j = 0; n_heal && j < MAX_HEAL; j++) {
+        if (!heal[j].ctl) continue;
+        UObject *pc = heal[j].req_pc && still(heal[j].req_pc, heal[j].req_pc_i) ? heal[j].req_pc : NULL;
+        if (!heal_open(j)) {
+            if (GetTickCount64() >= heal[j].until) heal_tell(pc, "No bot reached you in time.");
+            heal_close(j);
+            continue;
+        }
+        float hp, tmp, max, cur;
+        actor_loc(heal[j].req, heal[j].at);
+        char bn[64];
+        hero_name(heal[j].bot, bn, sizeof bn);
+        if (hero_health(heal[j].req, &hp, &tmp, &max, &cur) && (hp > heal[j].hp0 + 1.f || tmp > heal[j].tmp0 + 1.f)) {
+            heal_tell(pc, "%s healed you.", bn);
+            heal_close(j);
+            continue;
+        }
+        if (!pawn_alive(heal[j].req) || pawn_flag(heal[j].req, "IsIncap") == 1) {   // down: the bots' revive takes over
+            heal_close(j);
+            continue;
+        }
+        if (!pawn_alive(heal[j].bot) || pawn_flag(heal[j].bot, "IsIncap") == 1) {
+            if (!heal_assign(j)) { heal_tell(pc, "No bot can heal you right now."); heal_close(j); }
+            continue;
+        }
+        if (!f_target) f_target = fn_of(heal[j].scr, "GetCurItemUseTargetActor");
+        uint8_t p[16] = {0};
+        if (f_target) ue_process_event(heal[j].scr, f_target, p);
+        UObject *t = *(UObject **)p;
+#ifndef B4B_RELEASE
+        static ULONGLONG last_log;
+        if (GetTickCount64() - last_log > 1000) {
+            float bl[3] = {0};
+            char tn[96];
+            last_log = GetTickCount64();
+            actor_loc(heal[j].bot, bl);
+            LOG("bots: heal: job %d %s %.1f m from the requester, item-use target %s", j, bn, dist3(bl, heal[j].at) / 100.f,
+                t ? ue_obj_name(t, tn, sizeof tn) : "-");
+        }
+#endif
+        if (!heal[j].taken && t == heal[j].req) {
+            float bl[3] = {0};
+            actor_loc(heal[j].bot, bl);
+            heal[j].taken = 1;
+            heal[j].take_by = GetTickCount64() + HEAL_USE_MS + (ULONGLONG)(dist3(bl, heal[j].at) * 5.f);   // 0.5 s/m
+            LOG("bots: heal: %s took it", bn);
+            if (!heal[j].announced) {
+                char rn[64];
+                hero_name(heal[j].req, rn, sizeof rn);
+                admin_notice("%s needs healing: %s is on the way.", rn, bn);
+                heal[j].announced = 1;
+            }
+        } else if (GetTickCount64() > heal[j].take_by) {
+            LOG("bots: heal: %s %s", bn, heal[j].taken ? "took it but did not heal" : "did not take it");
+            if (!heal_assign(j)) {
+                heal_tell(pc, "No bot can heal you right now.");
+                heal_close(j);
+            }
+        }
+    }
+}
+
+static float item_score_detour(UObject *ctl, void *info) {
+    int j = n_heal ? heal_find_ctl(ctl) : -1;
+    if (j < 0) return orig_item_score(ctl, info);
+    uint16_t *sr = (uint16_t *)((char *)ctl + BC_ITEMUSE_SAFEROOM_NOT), keep = *sr;
+    *sr = (uint16_t)(keep & ~USE_AID_HEAL);   // heal items may be used inside a saferoom for this request
+    float s = orig_item_score(ctl, info);
+    *sr = keep;
+    return s;
+}
+
+static float item_eval_detour(UObject *ctl, void *info, UObject *target, uint8_t self, float *loc) {
+    int j = n_heal && !self && target ? heal_find_ctl(ctl) : -1;
+    if (j < 0 || target != heal[j].req) return orig_item_eval(ctl, info, target, self, loc);
+    float *hi = (float *)((char *)ctl + BC_HEALTH_INFO), keep[4];
+    memcpy(keep, hi, sizeof keep);
+    hi[1] = hi[3] = 1.f;   // TeamOOC, TeamInCombat: any missing health counts
+    float s = orig_item_eval(ctl, info, target, self, loc);
+    memcpy(hi, keep, sizeof keep);
+    UObject *it = INFO_ITEM(info);
+    if (s > 0.f && it && (ITEM_USE_TYPE(it) & USE_AID_HEAL)) s += 10.f;
+    return s;
+}
+
+static void commping_detour(UObject *comp, UObject *pc, const float *xform, uint8_t action) {
+    if (xform && action == HEAL_ACTION && !memcmp(xform + 8, HEAL_MARK, sizeof HEAL_MARK)) {
+        UFunction *go = fn_of(comp, "GetOwner");   // the client's own controller (the RPC arrived on its component)
+        uint8_t p[16] = {0};
+        if (go) ue_process_event(comp, go, p);
+        UObject *owner = *(UObject **)p, *pawn = owner ? ue_get_ptr(owner, "Pawn") : NULL;
+        char why[160], nm[64];
+        hero_name(pawn, nm, sizeof nm);
+        if (!heal_requests) heal_tell(owner, "The host has heal requests off.");
+        LOG("bots: heal request from %s: %s", nm, heal_requests ? heal_request(pawn, owner, why, sizeof why) : "off");
+        return;   // ours either way: no "Group up" ping
+    }
+    orig_commping(comp, pc, xform, action);
+}
+
+// any machine: the local player asks (host: at once; client: the marked comm ping to the host)
+static void heal_ask_local(void) {
+    UObject *pc = ue_local_pc(), *pawn = pc ? ue_get_ptr(pc, "Pawn") : NULL;
+    char why[160];
+    if (!pawn) return;
+    if (!admin_is_client()) { LOG("bots: heal request (host): %s", heal_request(pawn, pc, why, sizeof why)); return; }
+    UObject *pw = ue_get_ptr(pc, "PlayerWaypoints");
+    UFunction *f = fn_of(pw, "ServerSpawnCommWheelPing");
+    static uint8_t p[256];
+    if (!f || UFN_PARMSSIZE(f) > (int)sizeof p) return;
+    memset(p, 0, sizeof p);
+    float at[3];
+    actor_loc(pawn, at);
+    *(UObject **)(p + parm_off(f, "OwnerController")) = pc;
+    float *t = (float *)(p + parm_off(f, "Transform"));
+    t[3] = 1.f; memcpy(t + 4, at, 12); memcpy(t + 8, HEAL_MARK, 12);
+    p[parm_off(f, "Action")] = HEAL_ACTION;
+    ue_process_event(pw, f, p);
+    LOG("bots: heal request sent to the host");
+}
+
+#ifndef B4B_RELEASE
+static ULONGLONG key_test_up;   // botheal key: the heal key held for 300 ms (real key messages to the game window)
+static HWND key_test_wnd;
+static void heal_key_test_tick(void) {
+    if (key_test_up && GetTickCount64() >= key_test_up) {
+        UINT sc = MapVirtualKeyW(heal_key, 0);
+        PostMessageW(key_test_wnd, WM_KEYUP, heal_key, 1 | (sc << 16) | 0xC0000000u);
+        key_test_up = 0;
+    }
+}
+#endif
+
+void bots_tick(float dt) {
+    static int was_down;
+    static ULONGLONG last;
+    (void)dt;
+#ifndef B4B_RELEASE
+    heal_key_test_tick();
+#endif
+    if (heal_key && heal_requests) {
+        int down = cmds_hotkey_down(heal_key);
+        if (down && !was_down && GetTickCount64() - last > 1500) { last = GetTickCount64(); heal_ask_local(); }
+        was_down = down;
+    }
+    if (n_heal) heal_jobs_tick();
+}
+
+int bots_heal_requests(void) { return heal_hooked ? heal_requests : -1; }
+int bots_heal_hotkey(void) { return heal_key; }
+
+#ifndef B4B_RELEASE
+static UObject *nth_hero(int want) {
+    static UClass *hc;
+    if (!hc) hc = ue_find_class("HeroCharacter");
+    int k = 0;
+    for (int32_t i = 0, n = ue_num_objects(); hc && i < n; i++) {
+        UObject *h = ue_object_at(i);
+        if (!h || !is_live(h) || !ue_is_a(h, hc) || !in_map(h)) continue;
+        if (k++ == want) return h;
+    }
+    return NULL;
+}
+
+// botheal watch: log every UBotAIScriptingComponent::SetItemUseItem(this, const FBotItemUseInfo*) (item, nav actor)
+#define ADDR_SET_ITEMUSE VA(0x1415B7BE0ull)
+static const uint8_t SIG_SET_ITEMUSE[] = {0x48,0x89,0x5c,0x24,0x10,0x48,0x89,0x74,0x24,0x18,0x55,0x57,0x41,0x54,0x41,0x56,
+                                          0x41,0x57,0x48,0x8b,0xec,0x48,0x83,0xec};
+typedef uint8_t (*SetItemUseFn)(UObject *scr, void *info);
+static SetItemUseFn orig_set_itemuse;
+static uint8_t set_itemuse_detour(UObject *scr, void *info) {
+    uint8_t r = orig_set_itemuse(scr, info);
+    UObject *it = info ? INFO_ITEM(info) : NULL, *nav = info ? *(UObject **)((char *)info + 0x30) : NULL;
+    char a[96], b[96], c[96];
+    LOG("bots: SetItemUseItem on %s: item %s (use %x target %x) on %s -> %d", ue_obj_name(U_OUTER(scr), a, sizeof a),
+        it ? ue_obj_name(it, b, sizeof b) : "-", it ? ITEM_USE_TYPE(it) : 0, it ? ITEM_TARGET_TYPE(it) : 0,
+        nav ? ue_obj_name(nav, c, sizeof c) : "-", r);
+    return r;
+}
+
+// ... and every UBotAIScriptingComponent::ClearItemUseItem(this) of a bot on a heal job, with its caller
+#define ADDR_CLEAR_ITEMUSE VA(0x1415B84D0ull)
+static const uint8_t SIG_CLEAR_ITEMUSE[] = {0x48,0x89,0x5c,0x24,0x08,0x48,0x89,0x74,0x24,0x10,0x57,0x48,0x83,0xec,0x40,0x33,
+                                            0xff,0x48,0x8b,0xd9};
+typedef void (*ClearItemUseFn)(UObject *scr);
+static ClearItemUseFn orig_clear_itemuse;
+static void clear_itemuse_detour(UObject *scr) {
+    if (n_heal && heal_keeps_targets(scr)) {
+        void *bt[3];
+        USHORT nb = RtlCaptureStackBackTrace(1, 3, bt, NULL);
+        LOG("bots: heal: ClearItemUseItem on a job bot from %llx %llx",
+            nb > 0 ? (unsigned long long)((uintptr_t)bt[0] - g_base_delta) : 0ull,
+            nb > 1 ? (unsigned long long)((uintptr_t)bt[1] - g_base_delta) : 0ull);
+    }
+    orig_clear_itemuse(scr);
+}
+
+static void cmd_heal_list(Out *o) {
+    char a[96], b[96];
+    UObject *me = ue_local_pc() ? ue_get_ptr(ue_local_pc(), "Pawn") : NULL;
+    for (int i = 0; ; i++) {
+        UObject *h = nth_hero(i);
+        if (!h) break;
+        float hp = 0, tmp = 0, max = 0, cur = 0;
+        hero_health(h, &hp, &tmp, &max, &cur);
+        UObject *ctl = ue_get_ptr(h, "Controller");
+        int slot = -1;
+        UObject *it = heal_item(h, &slot);
+        char cn[96];
+        hero_name(h, b, sizeof b);
+        ue_obj_name(U_CLASS(h), cn, sizeof cn);
+        out_printf(o, "#%d %s [%s] (%s)%s health %.0f/%.0f (max now %.0f, temp %.0f) incap=%d heal item: ", i, b, cn,
+                   ctl ? ue_obj_name(U_CLASS(ctl), a, sizeof a) : "-", h == me ? " (you)" : "", hp, max, cur, tmp,
+                   pawn_flag(h, "IsIncap"));
+        out_printf(o, "%s", it ? ue_obj_name(it, a, sizeof a) : "-");
+        if (it) out_printf(o, " slot %d use %x target %x range %d", slot, ITEM_USE_TYPE(it), ITEM_TARGET_TYPE(it),
+                           *((uint8_t *)it + 0x508));   // ItemUseConfig.TargetRange: 0 close (the bot walks there), 1 ranged
+        static UClass *bc;
+        if (!bc) bc = ue_find_class("BotController");
+        if (ctl && bc && ue_is_a(ctl, bc)) {
+            const float *hi = (const float *)((char *)ctl + BC_HEALTH_INFO);
+            UObject *s = scripting_of(ctl);
+            UFunction *f = fn_of(s, "GetCurItemUseTargetActor");
+            uint8_t p[16] = {0};
+            if (f) ue_process_event(s, f, p);
+            out_printf(o, "\n    thresholds self %.2f/%.2f team %.2f/%.2f (ooc/combat), use types %x, not in saferoom %x, "
+                       "item-use target %s", hi[0], hi[2], hi[1], hi[3], *(uint16_t *)((char *)ctl + BC_ITEMUSE_TYPES),
+                       *(uint16_t *)((char *)ctl + BC_ITEMUSE_SAFEROOM_NOT),
+                       *(UObject **)p ? ue_obj_name(*(UObject **)p, a, sizeof a) : "-");
+            // every carried item's use/target types
+            UObject *inv = inventory_of(h);
+            int32_t os = inv ? ue_prop_offset(inv, "EquipmentSlots") : -1;
+            TArray *arr = os >= 0 ? (TArray *)((char *)inv + os) : NULL;
+            for (int k = 0; arr && arr->data && k < arr->num; k++) {
+                UObject *x = ((UObject **)arr->data)[k];
+                if (x) out_printf(o, "\n    slot %d %s use %x target %x", k, ue_obj_name(x, a, sizeof a), ITEM_USE_TYPE(x),
+                                  ITEM_TARGET_TYPE(x));
+            }
+        }
+        out_printf(o, "\n");
+    }
+    for (int j = 0; j < MAX_HEAL; j++) if (heal[j].ctl && heal_open(j)) {
+        hero_name(heal[j].req, a, sizeof a); hero_name(heal[j].bot, b, sizeof b);
+        out_printf(o, "job %d: %s -> %s, taken %d, %llu ms left\n", j, b, a, heal[j].taken,
+                   (unsigned long long)(heal[j].until - GetTickCount64()));
+    }
+}
+
+// botheal keys <KeyName>: the game's input mappings that use that key (InputSettings CDO)
+static void cmd_heal_keys(Out *o, const char *key) {
+    UClass *k = ue_find_class("InputSettings");
+    UObject *is = k ? UC_CDO(k) : NULL;
+    char nm[64], kn[64];
+    for (int axis = 0; is && axis < 2; axis++) {
+        int32_t off = ue_prop_offset(is, axis ? "AxisMappings" : "ActionMappings");
+        TArray *m = off >= 0 ? (TArray *)((char *)is + off) : NULL;
+        for (int i = 0; m && i < m->num; i++) {
+            uint8_t *e = (uint8_t *)m->data + (size_t)i * 0x28;
+            ue_name(*(FName *)(e + 0x10), kn, sizeof kn);
+            if (!_stricmp(kn, key)) out_printf(o, "%s %s\n", axis ? "axis" : "action", ue_name(*(FName *)e, nm, sizeof nm));
+        }
+    }
+}
+
+int bots_heal_cmd(const char *verb, char *rest, Out *o) {
+    if (strcmp(verb, "botheal")) return 0;
+    char *a = rest ? strtok(rest, " ") : NULL, *b = a ? strtok(NULL, " ") : NULL, *c = b ? strtok(NULL, " ") : NULL;
+    char why[200];
+    if (!a) cmd_heal_list(o);
+    else if (!strcmp(a, "hurt") && c) {   // botheal hurt <hero#> <percent of full max>: HealthComponent.SetHealth
+        UObject *h = nth_hero(atoi(b)), *hc = h ? pawn_fn_obj(h, "GetHealthComponent") : NULL;
+        UFunction *f = fn_of(hc, "SetHealth");
+        float hp, tmp, max, cur;
+        if (!f || !hero_health(h, &hp, &tmp, &max, &cur)) { out_printf(o, "no hero %s\n", b); return 1; }
+        uint8_t p[16] = {0};
+        *(float *)(p + parm_off(f, "Health")) = max * (float)atof(c) / 100.f;
+        ue_process_event(hc, f, p);
+        hero_health(h, &hp, &tmp, &max, &cur);
+        out_printf(o, "botheal: hero %s health now %.0f/%.0f\n", b, hp, max);
+    } else if (!strcmp(a, "ask")) {      // botheal ask [hero#]: as the hotkey (no hero#) or for that hero (host)
+        if (!b) { heal_ask_local(); out_printf(o, "botheal: asked (see log)\n"); }
+        else {
+            UObject *h = nth_hero(atoi(b)), *ctl = h ? ue_get_ptr(h, "Controller") : NULL;
+            out_printf(o, "botheal: %s\n", heal_request(h, ctl && ctl == ue_local_pc() ? ctl : NULL, why, sizeof why));
+        }
+    } else if (!strcmp(a, "keys") && b) cmd_heal_keys(o, b);
+    else if (!strcmp(a, "key")) {         // botheal key: press and hold the heal key for 300 ms
+        HWND w = NULL;
+        while ((w = FindWindowExW(NULL, w, L"UnrealWindow", NULL))) {
+            DWORD pid = 0;
+            GetWindowThreadProcessId(w, &pid);
+            if (pid == GetCurrentProcessId() && IsWindowVisible(w)) break;
+        }
+        if (!w || !heal_key) { out_printf(o, "no game window / no heal key\n"); return 1; }
+        PostMessageW(w, WM_KEYDOWN, heal_key, 1 | (MapVirtualKeyW(heal_key, 0) << 16));
+        key_test_wnd = w; key_test_up = GetTickCount64() + 300;
+        out_printf(o, "botheal: holding key 0x%02x for 300 ms\n", heal_key);
+    }
+    else if (!strcmp(a, "watch")) {
+        if (!orig_set_itemuse) {
+            if (memcmp((void *)ADDR_SET_ITEMUSE, SIG_SET_ITEMUSE, sizeof SIG_SET_ITEMUSE)) { out_printf(o, "signature mismatch\n"); return 1; }
+            if (MH_CreateHook((void *)ADDR_SET_ITEMUSE, (void *)set_itemuse_detour, (void **)&orig_set_itemuse) != MH_OK ||
+                MH_EnableHook((void *)ADDR_SET_ITEMUSE) != MH_OK) { orig_set_itemuse = NULL; out_printf(o, "hook failed\n"); return 1; }
+        }
+        if (!orig_clear_itemuse && !memcmp((void *)ADDR_CLEAR_ITEMUSE, SIG_CLEAR_ITEMUSE, sizeof SIG_CLEAR_ITEMUSE) &&
+            (MH_CreateHook((void *)ADDR_CLEAR_ITEMUSE, (void *)clear_itemuse_detour, (void **)&orig_clear_itemuse) != MH_OK ||
+             MH_EnableHook((void *)ADDR_CLEAR_ITEMUSE) != MH_OK)) orig_clear_itemuse = NULL;
+        out_printf(o, "botheal: logging SetItemUseItem\n");
+    } else if (!strcmp(a, "fix")) {
+        if (b) heal_requests = !strcmp(b, "on");
+        out_printf(o, "botheal: heal requests %s (hooks %d)\n", heal_requests ? "on" : "off", heal_hooked);
+    } else out_printf(o, "usage: botheal | hurt <hero#> <pct> | ask [hero#] | key | keys <KeyName> | watch | fix [on|off]\n");
+    return 1;
+}
+#endif
+
+static void heal_init(void) {
+    if (!ping_count) return;   // shares the tether / ClearAllTargets hooks
+    if (memcmp((void *)ADDR_ITEMUSE_SCORE, SIG_ITEMUSE_SCORE, sizeof SIG_ITEMUSE_SCORE) ||
+        memcmp((void *)ADDR_ITEMUSE_EVAL, SIG_ITEMUSE_EVAL, sizeof SIG_ITEMUSE_EVAL) ||
+        memcmp((void *)ADDR_COMMPING_IMPL, SIG_COMMPING, sizeof SIG_COMMPING)) {
+        LOG("bots: signature mismatch, heal requests off");
+        return;
+    }
+    if (MH_CreateHook((void *)ADDR_ITEMUSE_SCORE, (void *)item_score_detour, (void **)&orig_item_score) != MH_OK ||
+        MH_CreateHook((void *)ADDR_ITEMUSE_EVAL, (void *)item_eval_detour, (void **)&orig_item_eval) != MH_OK ||
+        MH_CreateHook((void *)ADDR_COMMPING_IMPL, (void *)commping_detour, (void **)&orig_commping) != MH_OK ||
+        MH_EnableHook((void *)ADDR_ITEMUSE_SCORE) != MH_OK || MH_EnableHook((void *)ADDR_ITEMUSE_EVAL) != MH_OK ||
+        MH_EnableHook((void *)ADDR_COMMPING_IMPL) != MH_OK) {
+        MH_DisableHook((void *)ADDR_ITEMUSE_SCORE); MH_DisableHook((void *)ADDR_ITEMUSE_EVAL);
+        MH_DisableHook((void *)ADDR_COMMPING_IMPL);
+        LOG("bots: hook failed, heal requests off");
+        return;
+    }
+    heal_hooked = 1;
+    LOG("bots: heal requests %s, key 0x%02x", heal_requests ? "on" : "off (bot_heal_requests=0)", heal_key);
+}
+
 static void ini_key(const char *k, const char *v, void *ctx) {
     (void)ctx;
     if (!strcmp(k, "bot_toolkit_doors")) toolkit_doors = atoi(v) != 0;
+    else if (!strcmp(k, "bot_heal_requests")) heal_requests = atoi(v) != 0;
+    else if (!strcmp(k, "bot_heal_key")) heal_key = cmds_parse_key(v);
 }
 
 // For the ~ Cheats tab: -1 = not available (hooks off), else the setting
 int bots_toolkit_doors(void) { return ping_count ? toolkit_doors : -1; }
 
 int bots_live(const char *key, const char *val) {
-    if (strcmp(key, "bot_toolkit_doors")) return 0;
-    toolkit_doors = !val || atoi(val) != 0;
+    if (!strcmp(key, "bot_toolkit_doors")) toolkit_doors = !val || atoi(val) != 0;
+    else if (!strcmp(key, "bot_heal_requests")) heal_requests = !val || atoi(val) != 0;
+    else if (!strcmp(key, "bot_heal_key")) heal_key = val ? cmds_parse_key(val) : 'H';
+    else return 0;
     return 1;
 }
 
@@ -883,5 +1544,6 @@ int bots_init(void) {
     }
     ping_count = (PingCountFn)ADDR_PING_COUNT;
     LOG("bots: pinged toolkit doors %s", toolkit_doors ? "on" : "off (bot_toolkit_doors=0)");
+    heal_init();
     return 0;
 }

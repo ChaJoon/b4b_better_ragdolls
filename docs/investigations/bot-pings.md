@@ -140,5 +140,136 @@ untether|clear|script`, `send <door#>`, `fix on|off`, `watch`, `call <hex> <Func
 - Other usables in the same query (`Usable.Healing`: trauma stations) have the same tether and blocked-ping limits;
   not changed (scope).
 - Should the fix also send a bot that is in combat? It does not check; the bot's combat behaviour may override it.
-- A `~` window toggle for `bot_toolkit_doors` (only the ini key so far).
+- A `~` window toggle for `bot_toolkit_doors`: added (Cheats tab).
 - Not run on native Windows; not run on other maps' stash doors (other `Door_Treasure*` variants share the class).
+
+## Heal requests (bots heal a player who asks)
+
+Static analysis plus live runs on lane 2 (Flatpak Steam, `multi.sh 1` and `2`, Evansburgh B "Tunnel of Blood", Easy;
+2026-10-12). Implementation: `native/src/bots.c` "heal requests" (host decides; key on every machine; ini
+`bot_heal_requests=0` = retail, `bot_heal_key=` (default H)).
+
+Dan's wish: a key that means "bots, I'm low, heal me", instead of hoping a bot decides to.
+
+### Short answer
+
+Retail bots do heal teammates on their own, through their generic "item use" logic, but rarely when a player wants it:
+
+1. **Threshold**: a teammate counts only below **76%** of their full max health out of combat, **66%** with an
+   enemy set (`PlayerBot` `CombatCfg.HealthInfo`; max = `HealthComponent.HealthTuning.InitialMaxHealth.Value`, the
+   full max including card bonuses, not the trauma-reduced `CurrentMaxHealth`).
+2. **120 s item cooldown**: after **any** successful item use (a heal, a thrown grenade) `Bot_ItemUse_GA` applies
+   `Bot_ItemUseSuccess_Cooldown_GE` (120 s, tag `Bot.Actions.Item.Use.Cooldown.Success`); while it lasts the bot uses no
+   Aid item (medkit, bandage, pills, defib) at all. A failed use: `Bot_ItemUse_Cooldown_GE`, 2 s.
+3. **Never in a saferoom**: `InventoryCfg.ItemUseTypesSaferoomNotAllowed = 0x1FE` contains Aid_Heal.
+4. **One item use at a time**: in a fight a bot often picks a grenade on a common instead (and keeps retrying it).
+5. The tether update clears the item use with every other target when bot and teammate are outside the bot's tether.
+6. **No way to ask**: no comm-wheel action for it (Approve, Deny, Go here, Group up, Spray, Warning, Ready, Wait,
+   Thank), no ping (a ping's `Usable.Healing` query is for trauma stations / medical cabinets), no voice line that
+   triggers it.
+
+When several bots pass all of that they all go at once (seen: two medkits and pills on one player at 36%).
+
+### Retail mechanics
+
+- Bot_BT root selector (priority order): dead / death anim / rescue idle / hit reaction / High Priority Smart Actor /
+  team teleport / GoToLocation / **ItemUse** (blackboard `ItemUse` set, no `Bot.Actions.Item.Use.Cooldown`
+  tag: NavigateTo `ItemUseNavActor` or `ItemUseNavLoc`, radius 150, then TriggerAction `Bot_ItemUse_GA`) / Interact /
+  Combat / alert location / follow teammate / low-priority smart actor. Item use outranks interacting and fighting.
+- The item-use update `0x1415D5210` (BotController, every tick on the host; skipped while `ctl+0x494C` > 0, an item
+  use in progress) scores each carried item, equipment slots 3..11 (and the weapons), with `0x1415D6030`
+  (ScoreItemUse(ctl, FBotItemUseInfo*); info: +0x20 item, +0x28 enemy, +0x30 target/nav actor, +0x38 location,
+  +0x44 slot, +0x45 needs nav = ItemUseConfig.TargetRange == Close). The best score > 0 becomes the item use
+  (`UBotAIScriptingComponent::SetItemUseItem` `0x1415B7BE0`: blackboard ItemUse, ItemUseNavActor/NavLoc).
+- ScoreItemUse: the item row (`Item.ItemRow` +0x360, `ItemUseConfig` +0xE0: UseType +0x0, TargetType +0x50,
+  TargetRange +0xC8) must pass `ItemUseUseTypesAllowed` (0x1BB: not Buff, not Quest), `ItemUseTargetTypesAllowed`
+  (0x1F), the saferoom mask (if the bot tracks saferooms and its hero is in one), the horde-only mask (0x30); then one
+  target eval per allowed target type: self, each teammate (team list, not the bot), enemies, environment.
+- Target eval `0x1415D67D0` (ctl, info, target, bSelf, outLoc) for Aid_Heal (UseType bit 2): Aid (bit 1) items return 0
+  while the bot has `BotItemUseCooldownTag`; ratio = Health / InitialMaxHealth; threshold Self/Team OOC or InCombat
+  (`ctl+0x3B20..0x3B2C`, i.e. config +0xB20); ratio above it = 0; then the item's ApplyEffect component must accept the
+  target (vtable +0x4F8, e.g. temporary health already full with pills, trauma cap) and the target must not match
+  `AssistGrappledTagQuery`; score = (1 - ratio) * EquipmentSlotPriority[slot]. **No distance check.**
+- Live config (every hero bot, row `PlayerBot`): HealthInfo self 0.75 / 0.65, team 0.76 / 0.66; Emmett (NPC config)
+  0.65 / 0.50, 0.60 / 0.30. Items: Medkit, Bandage, PainKillers use 3 (Aid + Aid_Heal) target 3 (self + teammate),
+  range Close, support slot (4); Doc's `ActiveHealAbility_BP` use 3 target 2; Defib use 1 target 2 (revive).
+- `Bot_ItemUse_GA`: AttemptUse `0x1415FEB00` re-scores the use (0 = ClearItemUseItem), selects the slot, waits for
+  the item to apply; `UseTimeout` (log `UGameplayAction_BotItemUse::UseTimeout`) after about 5 s if it never applies.
+  Cooldowns on success / failure as above.
+- Revive is separate: `Assist*` scores in the awareness config (incapped 0.75, dead 0.95 with a defib); a downed player
+  is revived by the bots on their own (seen live).
+- The requester's own "I need healing" line can't be played from the agent: `DialogueComponent.SayLine` builds the
+  event `DX_<Voice>_<Response>` (`DX_Evangelo_Low_Health`), the real events are `Dx_B_<Voice>_Low_Health_NN`
+  (mesh-mods.md). The bot's own healing barks (`Healing_Other`) do play when it heals.
+
+### Live, retail
+
+| Case | Result |
+|---|---|
+| Host at 36% (60/165), everyone in the start saferoom, 60 s | Nothing (saferoom) |
+| Same, everyone moved outside | All three bots took the host as item-use target at once, healed to 165 + 41 temp in 2 s |
+| Host 83% with temp health, bots fighting commons | Bots keep (re)trying grenades on commons, nobody heals |
+| Client 50%, outside, bots in a fight | Not healed (grenade item uses, cooldowns) |
+| Host downed (health 0) | Bots revived it (112 health after) |
+
+### The feature (`native/src/bots.c`)
+
+- **Key** (`bot_heal_key`, default H; unbound in play: H only maps to the UI action `UICustomizeToggleUI`): through
+  `cmds_hotkey_down` like the flashlight / third-person keys, 1.5 s between presses. Host: the request runs at once.
+  Client: `PlayerWaypointsComponent::ServerSpawnCommWheelPing(PC, Transform, GroupUp)` at its hero with Scale3D
+  `(1, 1, 0.875)`. The host hooks `ServerSpawnCommWheelPing_Implementation` (`0x141E88840`, vtable +0x420; `_Validate`
+  is `return true`), recognises the mark (the Scale3D arrives intact) and runs the request for the RPC component's
+  owner, no comm ping. A host without this shows a "Group up" ping and line there. **No protocol bump.**
+- **Request** (host): the requester down → "You are down: bots revive downed players on their own."; not hurt →
+  "You are not hurt."; else the nearest living survivor bot (PlayerSlotManager team slots) carrying an item with
+  UseType Aid_Heal and TargetType Actor_Teammate, 60 m at most, gets a job (40 s at most):
+  - its item-use cooldown effects are removed (`GameplayEffectsComponent.Remove(effect, RemoveAllStacks)` for its
+    `Bot_ItemUse*Cooldown_GE` effects);
+  - hook on ScoreItemUse `0x1415D6030`: for that bot the saferoom mask loses Aid_Heal during the call;
+  - hook on the target eval `0x1415D67D0`: for that bot and the requester the team thresholds are 1.0 during the call
+    (any missing health), and a healing result gets +10 (the requester beats other teammates, grenades, ...). The
+    game's own checks still apply (the item must accept the target);
+  - tether hooks (shared with the doors): `IsActorInside(requester)` and `IsLocationInside(any)` are true for that bot,
+    and the tether update's ClearAllTargets is skipped (it also clears the item use). Without the location part the
+    group-up / teleport-back check (`0x1415E9000`: ClearAllTargets at `0x1415E957C`, `0x1415E964C`) kept pulling a bot
+    on its way back to the team.
+  - The bot "took it" when its `GetCurItemUseTargetActor` is the requester: chat notice to everyone
+    "<player> needs healing: <bot> is on the way."; healed (health or temporary health went up): "<bot> healed you."
+    to the requester. Not taken within 4 s, or taken and not healed within 8 s + 0.5 s per metre, or the bot went down:
+    the next candidate; none left: "No bot can heal you right now." ("No bot carries a healing item." when none has
+    one). 40 s: "No bot reached you in time."
+  - Jobs are keyed by object index (map change safe), at most 4 at once, one per requester and per bot.
+- `bot_heal_requests=0` (host, also the `~` Cheats tab checkbox "Bots heal you on request"): requests ignored, a client
+  gets "The host has heal requests off."; on any machine with it off the key does nothing.
+
+### Live results (fix on)
+
+| Case | Result |
+|---|---|
+| Host 85% in the start saferoom (`botheal ask`) | Doc took it at once (his ActiveHealAbility), full health 2 s later |
+| Host again right after (Doc on the 120 s cooldown) | Cooldown removed, Doc healed again in 1.8 s |
+| Client 60% in the saferoom (marked comm ping) | Dan (pills) took it 0.06 s after, healed (+51 temp) in 0.7 s; the client got both chat lines |
+| Client 60%, real H key (`botheal key` on the client) | Walker healed it in 2.3 s |
+| Host 85%, real H key | Hoffman healed in 0.7 s |
+| Host 80%, nearest bot 16 m away outside | Jim walked over, healed 6.7 s after the request |
+| Host 80%, bots 20 m away | Tala healed after 9.3 s |
+| Client 70%, bots 8 m away | Jim healed in 3.9 s |
+| Bots in a fight (item-use target a common) | Jim switched to the requester and healed |
+| Host full health | "You are not hurt." |
+| Host downed | "You are down: ..."; the bots revived it |
+| Host with pills' temporary health on top, 83% | No bot took it (the item's apply check refuses), "No bot can heal you right now." |
+| Requester teleported 1.6 m next to another player | Both bots reached 1.7 m and `UseTimeout`ed twice each, then "No bot can heal you right now." |
+| Host with `bot_heal_requests` off, client presses H | Client: "The host has heal requests off." |
+| `e2e.py --quick` (lane 2), final build | 14/14 |
+
+Screenshot: `~/.local/share/b4b-coop/bot-pings/shots/heal-client-request-notice.png` (client's chat lines, Jim's
+healing bark subtitle).
+
+### Open questions
+
+- `UseTimeout` at 1.5-2 m happens (seen when the requester stood next to another player, and with heroes teleported by
+  the test commands): the bot's use never applies; the fallback moves to the next bot. Why exactly (aim trace blocked
+  by the other hero? use range?) not found; `Bot_ItemUse_GA`'s OnSelectedItemChanged `0x1415FF140` is the place.
+- Each request uses an item even when a teammate (human) could heal; spamming the key empties the bots' medkits.
+- Bots heal on request inside saferooms, where retail never does (the medical cabinet is usually there).
+- Not run on native Windows; not run with 5+ players.

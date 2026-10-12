@@ -29,9 +29,9 @@ of the window, and also in your chat.
 | **Players** | Everyone in the game with ping and Steam ID; host: **Kick**, **Ban** per player, a message to everyone (**Say**), **Locked**, bots (game default/on/off), team size, **Ready everyone**, **Ready post-round vote**, **Restart mission**, the ban list with **Unban** / **Unban all** | `/players`, `/ping`, `/kick`, `/ban`, `/say`, `/lock`, `/unlock`, `/bots`, `/teamsize`, `/ready`, `/ready vote`, `/restart`, `/bans`, `/unban` |
 | **Camera** | Third person on/off, start the game in third person, its key, sliders for distance, side, height and FOV (Ctrl+click a slider to type a number), Swap shoulder, Reset camera, aim correction, free look on/off | `/thirdperson ...`; ini `thirdperson*` |
 | **Flashlight** | Your light (Toggle, On, Off; host: Automatic), its key, sticky mode; **Beam (your view)**: sliders for width, range and brightness, Reset beam | `/flashlight ...`; ini `flashlight_key`, `flashlight_sticky`, `flashlight_width`, `flashlight_range`, `flashlight_brightness` |
-| **Cheats** | Host: **Cheats on**, a player picker (`me`, everyone, a player) for the buttons marked `*`, then every cheat: god, heal, revive, infinite ammo, copper, cards, fly, noclip, walk, teleport, free camera, size, horde, kill all ridden, freeze, director phases, spawn, game speed, win, lose, and your own save's supply points / skull totems / burn cards / unlock all (everyone, while the host has cheats on) | every `/cheats` command |
+| **Cheats** | Host: **Cheats on**, a player picker (`me`, everyone, a player) for the buttons marked `*`, then every cheat: god, heal, revive, infinite ammo, copper, cards, fly, noclip, walk, teleport, free camera, size, horde, kill all ridden, freeze, director phases, spawn, game speed, win, lose, and your own save's supply points / skull totems / burn cards / unlock all (everyone, while the host has cheats on). Also (host, no cheats needed): **Bots open pinged toolkit doors**, **Bots heal you on request** | every `/cheats` command; ini `bot_toolkit_doors`, `bot_heal_requests` |
 | **Looks & add-ons** | Three modes and one search box for all of them (see [Looks & add-ons](#the--windows-looks--add-ons-tab) below). **Wear**: your look and your pick, **Reset my look**; lists to wear (click a name): **Survivors** (per survivor: whole survivor, outfits, heads, torsos, legs), **NPC bodies**, **Add-on outfits**, **Weapon looks** (**Use**, **Reset** per weapon type); a search shows every list's matches; **Everyone's look**; host: **Change the look of** a player or bot, their **Reset**. **Installed**: your add-ons in load order with on/off, kind (outfit, weapon look, replacement, gameplay) and state, **Wear** / **Use**, **Update** (newer in the shop), **Up**/**Down**, conflicts; click one for its details (author, content, looks it adds, conflicts, **Remove**); **Check for updates**; folder and "Load add-ons" (`addons`). **Get more**: the add-on shop (**Get the add-on list**, filter, **Add**, then **Wear** / **Use** on the row; **Update**, **Undo**). **Host rules** (collapsed, under every mode): **Model swaps allowed**, who may join with add-ons (`addons_policy`); greyed on a client | `/model ...`, `/models on\|off`, `/addons ...`; ini `addons`, `addons_policy`, `shop` |
-| **Settings** | The window's text size and key, the flashlight and third-person keys; **Game start**: ask co-op or online every time, always b4bcoop co-op, always online (see [Co-op or online](#co-op-or-online-at-the-game-start)) | ini `overlay_scale`, `overlay_key`, `flashlight_key`, `thirdperson_key`, `launch` |
+| **Settings** | The window's text size and key, the flashlight, third-person and heal-request keys; **Game start**: ask co-op or online every time, always b4bcoop co-op, always online (see [Co-op or online](#co-op-or-online-at-the-game-start)) | ini `overlay_scale`, `overlay_key`, `flashlight_key`, `thirdperson_key`, `bot_heal_key`, `launch` |
 | **Updates** | Your version; **Check for updates** (the latest release: version, protocol, short notes); **Download and install on next start**; the host's version after a "same version" refusal (**Check** it); **Go back to** the previous version. See [Updates](#updates) | ini `updates` (no chat command) |
 | **Help** | Your version, a box to run any chat command (without the `/`) | `/help` |
 
@@ -106,6 +106,19 @@ like `/kick 1` use. The host also sees each player's ping and Steam ID (`#1 Alex
 - Your manual choice sticks: walking into a dark or bright area no longer switches it for you, until the next map.
 - `/flashlight auto` (host only) hands your light back to the game's automatic switching right away. On a client
   it replies `auto: host only (a client's override lasts until the next map)`.
+
+**Ask the bots to heal you**: press **H** (see `bot_heal_key`; there is no chat command).
+- The nearest bot carrying something that heals a teammate (medkit, bandage, pills, Doc's healing ability, ...) comes
+  to you and uses it on you, at any missing health, also inside a saferoom and in a fight. Everyone gets a chat line
+  (`Alex needs healing: Holly is on the way.`), you get `Holly healed you.` when it's done.
+- Otherwise you're told why: `You are not hurt.`, `No bot carries a healing item.`, `No bot can heal you right
+  now.` (e.g. all bots too far or busy, or your temporary health is already full), `No bot reached you in time.`
+- Down (incapacitated)? The bots revive you on their own; the key only says `You are down: ...`.
+- The host decides, for everyone, with **Bots heal you on request** in the `~` window's Cheats tab
+  (`bot_heal_requests`; no cheats needed). In someone else's game the host needs a b4bcoop version that has this;
+  an older host shows a "Group up" marker at your feet instead.
+- Without it, bots heal a teammate only below about 75% health (65% in a fight), never in a saferoom, and after
+  using any item (a heal or a grenade) not again for two minutes.
 
 **`/thirdperson`**: no word = toggle. Also `on`, `off`, `status`, and the camera settings below.
 - A third-person camera behind your own hero. **Aiming** (right mouse) switches to first person while you hold it,
@@ -540,7 +553,7 @@ Rules:
 - No `b4bcoop.ini` at all = all defaults.
 - **Applied while the game runs:** `thirdperson`, `thirdperson_key`, `thirdperson_distance`, `thirdperson_side`,
   `thirdperson_height`, `thirdperson_fov`, `thirdperson_aimfix`, `thirdperson_freelook`,
-  `flashlight_key`, `flashlight_sticky`,
+  `flashlight_key`, `flashlight_sticky`, `bot_heal_key`, `bot_heal_requests`, `bot_toolkit_doors`,
   `flashlight_width`, `flashlight_range`, `flashlight_brightness`,
   `allow_joins`, `allow_steamids`, `presence`, `teamsize` (from the next map), `overlay`, `overlay_key`,
   `overlay_scale`, `addons_policy`, `updates`, `launch` (read at the next game start). Only the lines you changed count: an edit doesn't undo what you set with a chat command this
@@ -563,6 +576,7 @@ Rules:
 | `flashlight_brightness` | `100` | `0`-`500` | Your flashlight's brightness, percent of the game's (your screen only) |
 | `thirdperson` | `0` | `0`, `1` | `1`: start in third person (`/thirdperson`) |
 | `thirdperson_key` | `N` | a letter, a digit, a key code, or `off` | The third-person toggle key |
+| `bot_heal_key` | `H` | a letter, a digit, a key code, or `off` | Ask the bots to heal you (see **Ask the bots to heal you** under Commands for everyone) |
 | `thirdperson_distance` | `180` | `50`-`600` | Third-person camera distance (`/thirdperson distance`) |
 | `thirdperson_side` | `40` | `-150`-`150` | Over-the-shoulder offset, negative = left (`/thirdperson side`) |
 | `thirdperson_height` | `0` | `-100`-`150` | Camera height offset (`/thirdperson height`) |
@@ -689,6 +703,7 @@ join=steam:7656119XXXXXXXXXX
 |---|---|---|
 | `steam_p2p` | `1` | `0`: no joins through Steam at all (then only `host_ip=1` joins work) |
 | `bot_toolkit_doors` | `1` | Host (`~` Cheats tab, works without cheats): when anyone pings a locked supply-stash door (the ones that need a toolkit), the nearest bot carrying a toolkit (up to 40 m away) goes and opens it, also when the ping hit a teammate in front of the door. `0`: bots answer such pings only as in the original game (only from close by, and only a clean ping on the door) |
+| `bot_heal_requests` | `1` | Host (`~` Cheats tab, works without cheats): a player's heal key sends the nearest bot with a healing item to heal them. `0`: the game's own healing only; a request gets `The host has heal requests off.`, and your own key does nothing |
 | `outfits_screen` | `1` | `0`: add-on outfits are not offered in the game's customization screen (only `/model`); restart to apply |
 | `presence_addr` | your LAN address | With `host_ip=1`: the address friends' **Join Game** connects to, e.g. `presence_addr=203.0.113.5:7777` (your public IP) |
 | `netguard_eos` | `1` | `0`: don't switch off the Epic Online Services network layer (troubleshooting only) |
