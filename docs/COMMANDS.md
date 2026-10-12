@@ -694,7 +694,7 @@ join=steam:7656119XXXXXXXXXX
 | `netguard_allow` | none | With `netguard=block`: host names to let through anyway, comma-separated, `*.example.com` for a whole domain (troubleshooting only) |
 | `addons` | `1` | `0`: load no add-ons at all (troubleshooting) |
 | `addons_dir` | `<game>\b4bcoop-addons` | Another add-ons folder, a full Windows path, e.g. `addons_dir=D:\b4b-addons` |
-| `addons_policy` | `cosmetic` | Host: which add-ons joiners may have: `cosmetic`, `any`, `none`, `match` (see Add-ons; joiners check themselves, `match` shows them your gameplay add-ons' ids) |
+| `addons_policy` | `any` | Host: which add-ons joiners may have: `cosmetic`, `any`, `none`, `match` (see Add-ons; joiners check themselves, `match` shows them your gameplay add-ons' ids) |
 | `updates` | `1` | `0`: hide the `~` window's Updates tab (see [Updates](#updates)) |
 | `shop` | `1` | `0`: hide **Get more** (the add-on shop, see [Get more](#get-more-add-on-shop)) and **Update** in the `~` window's Looks & add-ons tab |
 
