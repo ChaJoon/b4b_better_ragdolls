@@ -555,7 +555,8 @@ def chat_players(S, n):
 
 def overlay_smoke(S, insts):
     """The ~ window (dev `overlay` command): open, frames drawn over the game, the Players tab's list button runs the
-    /players chat command (reply in the window's log), close; the game keeps answering."""
+    /players chat command (reply in the window's log), the Looks & add-ons tab (Wear) runs /model the same way, close;
+    the game keeps answering."""
     details = []
     for n in insts:
         agent(n, "overlay", "open")
@@ -566,10 +567,16 @@ def overlay_smoke(S, insts):
         agent(n, "overlay", "press", "List in the log (/players)")
         lg = wait_for(lambda: (lambda t: t if re.search(r"^#\d+ .*\(you\)", t, re.M) else None)(agent(n, "overlay", "log")), 10, 1)
         screenshot(n, f"overlay-{n}.png")
+        agent(n, "overlay", "tab", "Looks & add-ons")   # Models, Add-ons and Browse in one tab; Wear first
+        time.sleep(1)
+        agent(n, "overlay", "press", "Status (/model)##status")
+        lk = wait_for(lambda: (lambda t: t if re.search(r"^your model: ", t, re.M) else None)(agent(n, "overlay", "log")), 10, 1)
+        screenshot(n, f"overlay-looks-{n}.png")
         agent(n, "overlay", "close")
         st2 = agent(n, "overlay", "status")
-        if not lg or "open=0" not in st2:
-            return False, f"instance {n}: log {'ok' if lg else 'missing /players reply'}, {st2.strip()[:120]}"
+        if not lg or not lk or "open=0" not in st2:
+            return False, (f"instance {n}: log {'ok' if lg else 'missing /players reply'}, looks tab "
+                           f"{'ok' if lk else 'missing /model reply'}, {st2.strip()[:120]}")
         details.append(f"#{n} " + re.search(r"frames built=\d+ drawn=\d+", st2).group(0))
     return True, "; ".join(details)
 

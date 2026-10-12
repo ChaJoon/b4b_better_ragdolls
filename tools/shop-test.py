@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-"""Live test of the add-on shop, the `~` window's Browse tab (#36, docs/investigations/shop.md "Tests"), on test
-instance 1 with a local test catalog.
+"""Live test of the add-on shop: Get more and Installed in the `~` window's "Looks & add-ons" tab (#36, was the Browse
+tab; docs/investigations/shop.md "Tests"), on test instance 1 with a local test catalog.
 
 The source folder (--src, default ~/.local/share/b4b-coop/shop-test/src; never committed: test paks) holds shop.json
 (tools/shop-catalog.py format, with "{base}" in url_template/thumb_template), paks/ and thumbs/. Expected ids:
@@ -8,19 +8,21 @@ casual_joe (an added outfit), ak47 (an added weapon look), holly_green (a replac
 paks/holly_magenta.pak), future (min_b4bcoop 9.0.0). The catalog is built and signed with a throwaway key and served
 on 127.0.0.1; the instance runs the dev build under test with shop_catalog= / shop_pubkey= and its own empty add-ons
 folder (addons_dir= in the test prefix). Steps:
-  1. no add-ons folder at start; a list with a bad signature is refused; the good list shows 4 add-ons + thumbnails
+  1. no add-ons folder at start; the old tab names open the merged tab; a list with a bad signature is refused; the
+     good list shows 4 add-ons + thumbnails
   2. refused Add: needs a newer b4bcoop; damaged download (SHA-256); truncated download; nothing is left behind
-  3. Add casual_joe (the tab's button) in Fort Hope, with the customization screen opened (and closed) before: mounted
-     at once, in /model list outfits, its row on the customization screen opened again, /model casual_joe worn
+  3. Add casual_joe (Get more's button) in Fort Hope, with the customization screen opened (and closed) before: mounted
+     at once, in /model list outfits, its row on the customization screen opened again, worn with the row's Wear
   4. Add holly_green: added, applies after a restart (it replaces Holly's party portrait, which Fort Hope has loaded)
-  5. in a mission: Add ak47: mounted at once, weapon look usable; Remove ak47: switched off, removed after restart
+  5. in a mission: Add ak47: mounted at once, weapon look usable; Remove ak47 (Installed, its details):
+     switched off, removed after restart
   6. restart: ak47 deleted and gone from addonlist.txt, holly_green and casual_joe mounted at start
-  7. newer casual_joe (a v1.1 repack, made here) and holly_green in the list: casual_joe's Update is loaded at once
-     (nothing of it is loaded) and worn; holly_green's waits for the restart (its portrait is in use); restart -> both
-     new files in place
-  8. casual_joe renamed to my_joe.pak + a copy: logged and noticed as the same add-on twice; the Browse tab shows
-     casual_joe "installed as my_joe.pak" and refuses to add it again; /addons on for an add-on that was off at the
-     start (ak_off.pak, the ak47 look) loads it at once
+  7. newer casual_joe (a v1.1 repack, made here) and holly_green in the list: casual_joe's Update (Installed's button) is
+     loaded at once (nothing of it is loaded) and worn; holly_green's waits for the restart (its portrait is in use);
+     restart -> both new files in place
+  8. casual_joe renamed to my_joe.pak + a copy: logged and noticed as the same add-on twice; Get more shows
+     casual_joe "installed as my_joe.pak" and refuses to add it again; Remove + Undo of a hand-installed add-on
+     (Installed); /addons on for an add-on that was off at the start (ak_off.pak, the ak47 look) loads it at once
   9. multi.sh 3 (host addons_policy=cosmetic with casual_joe, client 2 without add-ons, client 3 without): client 2
      Adds casual_joe in the host's Fort Hope: loaded at once, worn; the host (with the add-on) shows the outfit on
      client 2's hero, client 3 (without) the survivor with the replicated row
@@ -120,6 +122,21 @@ def status():
     return e2e.agent(1, "shop", "status")
 
 
+TAB = "Looks & add-ons"   # the ~ window's tab (Wear, Installed, Get more; was Models, Add-ons, Browse)
+
+
+def show(mode, n=1):
+    """the ~ window open on the merged tab, in that mode (Wear, Installed, Get more; old tab names work too)"""
+    e2e.agent(n, "overlay", "open"); e2e.agent(n, "overlay", "tab", mode)
+    time.sleep(0.5)
+
+
+def press(label, n=1):
+    """press a control of the shown tab by its label; waits until a frame took it (one request at a time)"""
+    e2e.agent(n, "overlay", "press", label)
+    return e2e.wait_for(lambda: (lambda s: s if "last test: pending" not in s else None)(e2e.agent(n, "overlay", "status")), 5, 0.2) or ""
+
+
 def row(s, aid):
     m = re.search(rf"^  {re.escape(aid)} \[([\w-]+)\] dl=(\S+) pending=(\d) thumb=(\S+) local=(\S*) msg=(.*)$", s, re.M)
     return m.groups() if m else None
@@ -185,8 +202,8 @@ def run_real(S):
     if not start(S, [f"addons_dir={winpath(ADDONS)}"]): return
     s = status()
     check("no override: default list, shop key", f"list={REAL_CATALOG} key=shop" in s, s.splitlines()[1] if "\n" in s else s[:120])
-    e2e.agent(1, "overlay", "open"); e2e.agent(1, "overlay", "tab", "Browse")
-    e2e.agent(1, "overlay", "press", "Get the add-on list")
+    show("Get more")
+    press("Get the add-on list")
     s = wait_shop(lambda s: ("phase=ready" in s or "phase=error" in s) and "busy=0" in s, 90)
     msg = re.search(r"msg=(.*)", s).group(1)[:140] if "msg=" in s else s[:140]
     check(f"real list fetched and verified ({want} add-on(s))", "phase=ready" in s and f"items={want} " in s and (f"{want} add-on(s) in the list" in s if want else "its list is empty" in s), msg)
@@ -210,13 +227,18 @@ def run(a, S):
     if not start(S, extra): return
     g = S.logs[1]
     check("no add-ons folder at start", bool(g.grep(r"addons: no add-ons folder", False)))
-    e2e.agent(1, "overlay", "open"); e2e.agent(1, "overlay", "tab", "Browse")
+    tabs = []
+    for old in ("Models", "Add-ons", "Browse"):   # the merged tab's old names still open it (dev aliases)
+        show(old)
+        tabs.append(re.search(r"tab=(.*?) panels=", e2e.agent(1, "overlay", "status")).group(1))
+    check("old tab names (Models, Add-ons, Browse) open the merged tab", tabs == [TAB] * 3, str(tabs))
+    show("Get more")
     shop.mode = "badsig"
-    e2e.agent(1, "overlay", "press", "Get the add-on list")
+    press("Get the add-on list")
     s = wait_shop(lambda s: "phase=error" in s or "phase=ready" in s, 60)
     check("list with a bad signature refused", "phase=error" in s and "signature" in s, re.search(r"msg=(.*)", s).group(1)[:120] if "msg=" in s else s[:120])
     shop.mode = "ok"
-    e2e.agent(1, "overlay", "press", "Get the add-on list")
+    press("Get the add-on list")
     s = wait_shop(lambda s: "phase=ready" in s and "busy=0" in s and "items=4" in s, 90)
     check("list shown (4 add-ons)", "items=4" in s, re.search(r"msg=(.*)", s).group(1)[:120] if "msg=" in s else s[:120])
     time.sleep(2)
@@ -224,7 +246,7 @@ def run(a, S):
     th = {i: (row(s, i) or [None] * 6)[3] for i in ("casual_joe", "ak47", "holly_green")}
     check("thumbnails decoded and uploaded (PNG + JPEG)", all(v == "uploaded" for v in th.values()), str(th))
     check("netguard scope around the requests", bool(g.grep(r"netguard: updater scope closed", False)))
-    shot("1-browse-list.png")
+    shot("1-getmore-list.png")
 
     # 2. refused downloads
     r = e2e.agent(1, "shop", "add", "future")
@@ -247,16 +269,18 @@ def run(a, S):
     e2e.agent(1, "mdl", "cs", "close")
     time.sleep(2)
     check("customization screen opened and closed before the Add", "screen open" in cs and before.strip() and "casual_joe" not in before, cs.strip()[:80])
-    e2e.agent(1, "overlay", "open"); e2e.agent(1, "overlay", "tab", "Browse")
+    show("Get more")
     g.mark()
-    e2e.agent(1, "overlay", "press", "Add##casual_joe")
+    press("Add##casual_joe")
     s = wait_item("casual_joe")
     rw = row(s, "casual_joe") or ("?",) * 6
     check("Add casual_joe: downloaded, verified, ready now", rw[1] == "done" and "ready now" in rw[5], rw[5][:140])
     check("casual_joe mounted at runtime", bool(g.grep(r"addons: casual_joe\.pak -> mounted \(read order \d+, at runtime\)")))
     check("addonlist.txt has casual_joe.pak=1", "casual_joe.pak=1" in addonlist())
     lst = e2e.agent(1, "model", "list", "outfits")
-    check("/model list outfits (the Models tab's list) has casual_joe right after Add", "casual_joe" in lst, lst.strip().splitlines()[-1][:100] if lst.strip() else "")
+    check("/model list outfits (Wear's list) has casual_joe right after Add", "casual_joe" in lst, lst.strip().splitlines()[-1][:100] if lst.strip() else "")
+    time.sleep(1)
+    shot("3-getmore-after-add.png")   # the row: on + Wear
     rows = e2e.wait_for(lambda: g.grep(r"models: \d+ customization-screen row\(s\) added"), 5, 0.5)
     check("customization-screen rows added at once", bool(rows), rows[0][:120] if rows else "")
     e2e.agent(1, "overlay", "close")
@@ -269,14 +293,16 @@ def run(a, S):
     e2e.agent(1, "mdl", "cs", "close")
     time.sleep(2)
     e2e.agent(1, "thirdperson", "on")
-    out = e2e.agent(1, "model", "casual_joe")
+    show("Get more")
+    st = press("Wear##casual_joe")   # the row offers Wear once the add-on is ready
     worn = e2e.wait_for(lambda: g.grep(r"models: hero slot \d+ wears outfit casual_joe\b"), 30, 1)
-    check("/model casual_joe right after Add", bool(worn), out.strip().splitlines()[0][:100] if out.strip() else "")
+    check("Wear on the Get more row right after Add", bool(worn) and "pressed 'Wear##casual_joe'" in st, (re.search(r"last test: (.*)", st) or [""])[0][:100])
+    e2e.agent(1, "overlay", "close")
     time.sleep(3)
     shot("3-casual_joe-worn.png")
-    e2e.agent(1, "overlay", "open"); e2e.agent(1, "overlay", "tab", "Browse")
+    show("Installed")
     time.sleep(1)
-    shot("3-browse-after-add.png")
+    shot("3-installed-after-add.png")
 
     # 4. a replacement of an asset the game has loaded (Holly's party portrait, in memory in Fort Hope): after a restart
     pl = e2e.agent(1, "paks", "loaded", PORTRAIT)
@@ -307,13 +333,14 @@ def run(a, S):
         time.sleep(20)
         check("game alive 20 s after the mission mount", e2e.MAP_B in S.world(1) and e2e.has_hero(1))
         shot("5-mission-ak47.png")
-        e2e.agent(1, "overlay", "open"); e2e.agent(1, "overlay", "tab", "Browse")
-        e2e.agent(1, "overlay", "press", "Remove##ak47"); e2e.agent(1, "overlay", "press", "Remove##ak47")   # confirm click
-        time.sleep(2)
+        show("Installed")
+        press("##sel:ak47.pak")   # its details (under the row) hold Remove
+        st = press("Remove##ak47.pak")   # a driven press counts as the confirming second click
+        time.sleep(1)
         s = status()
         rw = row(s, "ak47") or ("?",) * 6
-        check("Remove ak47: pending, switched off", rw[0] == "remove-pending" and "ak47.pak=0" in addonlist(), f"{rw[0]} / {rw[5][:80]}")
-        shot("5-browse-remove-pending.png")
+        check("Remove ak47 (Installed): pending, switched off", rw[0] == "remove-pending" and "ak47.pak=0" in addonlist(), f"{rw[0]} / {rw[5][:80]}")
+        shot("5-installed-remove-pending.png")
 
     # 6. restart
     S.stop()
@@ -337,10 +364,13 @@ def run(a, S):
     check("newer holly_green and casual_joe offered as updates", all((row(s, i) or ["?"])[0] == "update-available" for i in ("holly_green", "casual_joe")),
           ", ".join(f"{i} {(row(s, i) or ['?'])[0]}" for i in ("holly_green", "casual_joe")))
     g.mark()
-    e2e.agent(1, "shop", "add", "casual_joe")
+    show("Installed")
+    time.sleep(1)
+    shot("7-installed-update.png")   # casual_joe and holly_green rows: Update
+    press("Update##casual_joe")   # Installed's row button
     s = wait_item("casual_joe")
     rw = row(s, "casual_joe") or ("?",) * 6
-    check("Update casual_joe (not loaded): ready now", rw[0] == "update-pending" and "Updated and ready now" in rw[5] and
+    check("Update casual_joe (Installed's button, not loaded): ready now", rw[0] == "update-pending" and "Updated and ready now" in rw[5] and
           bool(g.grep(r"addons: update of casual_joe\.pak \(.*casual_joe\.pak\.new\) -> mounted \(read order \d+, at runtime")), rw[5][:120])
     info = e2e.agent(1, "slash", "addons", "info", "casual_joe")
     check("the add-on is the new version now", "Casual Joe v1.1 1.1" in info, info.strip().splitlines()[0][:100] if info.strip() else "")
@@ -355,9 +385,9 @@ def run(a, S):
     rw = row(s, "holly_green") or ("?",) * 6
     check("Update holly_green (portrait in use): waits for the restart", rw[0] == "update-pending" and "not now" in rw[5] and "using now" in rw[5] and
           os.path.exists(os.path.join(ADDONS, ".shop", "holly_green.pak.new")) and not g.grep(r"update of holly_green\.pak .* -> mounted"), rw[5][:160])
-    e2e.agent(1, "overlay", "open"); e2e.agent(1, "overlay", "tab", "Browse")
+    show("Get more")
     time.sleep(2)
-    shot("7-browse-updates.png")
+    shot("7-getmore-updates.png")
     S.stop()
     time.sleep(3)
     if not start(S, extra): return
@@ -381,12 +411,26 @@ def run(a, S):
     e2e.agent(1, "shop", "fetch")
     s = wait_shop(lambda s: "phase=ready" in s and "busy=0" in s and "items=4" in s, 90)
     rw = row(s, "casual_joe") or ("?",) * 6
-    check("Browse: casual_joe shown as installed (as my_joe.pak)", rw[0] == "installed-as" and "installed as my_joe.pak: same content" in rw[5], f"{rw[0]} / {rw[5][:100]}")
+    check("Get more: casual_joe shown as installed (as my_joe.pak)", rw[0] == "installed-as" and "installed as my_joe.pak: same content" in rw[5], f"{rw[0]} / {rw[5][:100]}")
     r = e2e.agent(1, "shop", "add", "casual_joe")
-    check("Browse: no second copy added", "already installed as my_joe.pak" in r and not os.path.exists(os.path.join(ADDONS, "casual_joe.pak")), r.splitlines()[0] if r else "")
-    e2e.agent(1, "overlay", "open"); e2e.agent(1, "overlay", "tab", "Browse")
+    check("Get more: no second copy added", "already installed as my_joe.pak" in r and not os.path.exists(os.path.join(ADDONS, "casual_joe.pak")), r.splitlines()[0] if r else "")
+    show("Get more")
     time.sleep(2)
-    shot("8-browse-installed-as.png")
+    shot("8-getmore-installed-as.png")
+    # Remove works for any add-on (not only the shop's), Undo takes it back
+    pend = os.path.join(ADDONS, ".shop", "pending.txt")
+    show("Installed")
+    press("##sel:my_joe_copy.pak")
+    press("Remove##my_joe_copy.pak")
+    time.sleep(1)
+    p1 = open(pend).read() if os.path.exists(pend) else ""
+    ok1 = "remove my_joe_copy.pak" in p1 and "my_joe_copy.pak=0" in addonlist()
+    shot("8-installed-remove-hand-installed.png")
+    press("Undo##my_joe_copy.pak")
+    time.sleep(1)
+    p2 = open(pend).read() if os.path.exists(pend) else ""
+    check("Installed: Remove of a hand-installed add-on (pending, off), then Undo (kept, on)",
+          ok1 and "my_joe_copy" not in p2 and "my_joe_copy.pak=1" in addonlist(), f"{p1.splitlines()[-1:]} / {p2.splitlines()[-1:]}")
     g.mark()
     r = e2e.agent(1, "slash", "addons", "on", "ak_off")
     check("/addons on (an add-on off at start): loaded at once", "on, ready now" in r and bool(g.grep(r"addons: ak_off\.pak -> mounted \(read order \d+, at runtime\)")),
@@ -429,18 +473,23 @@ def run_client(a, shop_lines):
         if not check("multi.sh 3: host + 2 clients in the host's Fort Hope", up): return
         h, c, v = S.logs[1], S.logs[2], S.logs[3]
         check("client 2 checked its add-ons against the host's policy (cosmetic)", bool(c.grep(r"addons: host \S+ asks us to check our add-ons against its policy cosmetic", False)))
-        e2e.agent(2, "shop", "fetch")
+        for i in (2, 3): e2e.agent(i, "popup", "close")   # the "asked to check" refusal's popup from the first join
+        show("Get more", 2)   # client 2 through its ~ window: Get the add-on list, Add, then the row's Wear
+        press("Get the add-on list", 2)
         wait_shop2 = lambda pred, t: e2e.wait_for(lambda: (lambda s: s if pred(s) else None)(e2e.agent(2, "shop", "status")), t, 1) or e2e.agent(2, "shop", "status")
         wait_shop2(lambda s: "phase=ready" in s and "busy=0" in s and "items=4" in s, 90)
         for g in (h, c, v): g.mark()
-        e2e.agent(2, "shop", "add", "casual_joe")
+        press("Add##casual_joe", 2)
         s = wait_shop2(lambda s: "busy=0" in s and (row(s, "casual_joe") or ["", "x"])[1] in ("done", "error"), 300)
         rw = row(s, "casual_joe") or ("?",) * 6
         check("client: Add casual_joe in the host's Fort Hope: ready now", rw[1] == "done" and "ready now" in rw[5] and
               bool(c.grep(r"addons: casual_joe\.pak -> mounted \(read order \d+, at runtime\)")), rw[5][:140])
-        e2e.agent(2, "model", "casual_joe")
+        time.sleep(1)
+        e2e.screenshot(2, "9-client-getmore-added.png")
+        press("Wear##casual_joe", 2)
+        e2e.agent(2, "overlay", "close")
         rx = r"models: hero slot \d+ wears outfit casual_joe\b"
-        check("client: casual_joe worn at once", bool(e2e.wait_for(lambda: c.grep(rx), 30, 1)))
+        check("client: casual_joe worn at once (the row's Wear)", bool(e2e.wait_for(lambda: c.grep(rx), 30, 1)))
         check("host (with the add-on): the client's hero wears casual_joe", bool(e2e.wait_for(lambda: h.grep(rx), 30, 1)))
         hh = e2e.wait_for(lambda: next((f for f in faces(1) if not f[2] and "/b4bcoop/outfits/casual_joe/" in f[1].lower()), None), 15, 1)
         check("host shows the outfit's mesh on the client's hero", bool(hh), hh[1] if hh else str(faces(1))[:160])
@@ -449,7 +498,6 @@ def run_client(a, shop_lines):
         dump = e2e.agent(3, "mdl", "dump")
         check("client 3 (no add-on): the row arrives, the survivor's own meshes are shown", "b4bcoop.outfit.casual_joe" in dump and
               not any("/b4bcoop/" in f[1].lower() for f in vf) and not v.grep(rx), str([f[1].rsplit('/', 1)[-1] for f in vf])[:160])
-        for i in (2, 3): e2e.agent(i, "popup", "close")   # the "asked to check" refusal's popup from the first join
         if hh:
             e2e.agent(1, "face", "look", hh[0], 260, 0)
             time.sleep(3)
