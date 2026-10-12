@@ -8,6 +8,8 @@ Guide: docs/meshes.md; how it works: docs/investigations/mesh-mods.md §6 (b4b-c
         [--slot SRCMAT=SLOT]... [--drop REGEX]
         [--weights source|transfer] [--twist template|none] [--textures DIR] [--facing -y] [--atlas SET=m1,m2]...
         [--drop_mat MATERIAL]... [--face auto|off] [--mouth auto|on|off] [--face_eyes x,y,z;x,y,z] [--hair_bones a,b,c;d,e [--hair_swing 1]] [--hair_pin on|off] [--cloth auto|MAT,...]
+        [--sim_bones a,b] (bones the physics asset simulates: kept out of the template weights the model gets)
+        [--skirt cloth|legs] (legs: skirts/dresses/coat tails skinned to the pelvis and thighs, not cloth)
         [--slotset SLOT=SET]... [--tex MAT=<prefix|dir>]... [--probe 1]
   blender -b --python blender/b4bfit.py -- weapon --template T.glb --source gun.fbx --out DIR
         [--forward +x] [--up +z] [--scale fit|<factor>] [--anchor trigger|grip|none] [--part REGEX=BONE]...
@@ -708,6 +710,38 @@ class Template:
     def hide_meshes(self):
         for o in self.meshes: o.hide_set(True); o.hide_render = True
 
+    def unweight_bones(self, names):
+        """Give the template mesh's weights on these bones to the rest of each vertex's bones (all of it to the
+        bone's parent where nothing else moves the vertex). For bones the survivor's physics asset simulates
+        (Karlee's `backpack`: her jacket's back and hood swing on it): weights copied from the template (unrigged
+        models, twist splits) put the model's back, hips and skirt on that swinging body, which flailed the body
+        about when crouching or turning. Returns the vertex count changed."""
+        low = {b.name.lower(): b.name for b in self.arm.data.bones}
+        names = {low[n.lower()] for n in names if n.lower() in low}
+        if not names: return 0
+        parent = {n: (self.arm.data.bones[n].parent.name if self.arm.data.bones[n].parent else "pelvis")
+                  for n in names}
+        for n in list(parent):                      # a simulated chain: up to the first bone that isn't simulated
+            while parent[n] in names: parent[n] = parent[parent[n]] if parent[n] in parent else "pelvis"
+        changed = 0
+        for m in self.meshes:
+            W = mesh_weights(m)
+            hit = False
+            for i, w in enumerate(W):
+                gone = sum(x for b, x in w.items() if b in names)
+                if gone <= 0: continue
+                rest = {b: x for b, x in w.items() if b not in names}
+                s = sum(rest.values())
+                if s >= 0.05:
+                    W[i] = {b: x * (s + gone) / s for b, x in rest.items()}
+                else:
+                    top = max((b for b in w if b in names), key=lambda b: w[b])
+                    rest[parent[top]] = rest.get(parent[top], 0.0) + gone
+                    W[i] = rest
+                changed += 1; hit = True
+            if hit: set_weights(m, W)
+        return changed
+
 
 def facing_frame(pos, lat_a, lat_b, up_a, up_b):
     """Orthonormal frame (lateral, forward, up) from joint positions; lateral = a->b."""
@@ -937,6 +971,15 @@ def rebind_template(tpl, P, chains, chain_of, o):
 
 def fit_character(o):
     tpl = Template(o["template"])
+    # --sim_bones: bones the survivor's physics asset simulates (b4bmodel reads them). Nothing of the model goes on
+    # them through the template's weights; hair chains the model's hair is put on (--hair_bones) keep theirs
+    sim = {b for b in o.get("sim_bones", "").split(",") if b} - \
+        {b for c in o.get("hair_bones", "").split(";") for b in c.split(",") if b}
+    if sim:
+        n = tpl.unweight_bones(sim)
+        if n:
+            log(f"weights: the survivor's simulated bones {', '.join(sorted(sim))} left out of the template's "
+                f"weights ({n} template vertices): the model doesn't swing on them")
     # --rigged: an unrigged model as the 3P fit rigged it (save_rigged), used for its first-person arms
     src_objs = import_any(o.get("rigged") or o["source"])
     src_objs = [x for x in src_objs if x.name in bpy.data.objects]
@@ -959,6 +1002,7 @@ def fit_character(o):
                 log("dropping", x.name, "(only dropped materials)"); bpy.data.objects.remove(x); src_objs.remove(x)
     mark_cloth_bones(src_objs, o.get("cloth", ""))
     if o.get("mode", "3p") == "3p": dangle_module().mark_hair_bones(src_objs, log)
+    if o.get("mode", "3p") == "3p" and o.get("skirt") == "legs": dangle_module().mark_skirt_bones(src_objs, log)
     keyed = [x.name for x in src_objs if x.type == "MESH" and x.data.shape_keys]
     face_on = o.get("mode", "3p") == "3p" and o.get("face", "auto") != "off"
     face_src = None
@@ -1217,6 +1261,7 @@ def fit_character(o):
                 mw = x.matrix_world.copy(); x.parent = None; x.matrix_world = mw
         smeshes = meshes
         o["weights"] = "transfer"
+        dangle_module().drop_template_gear(tpl, log)   # Holly's bag bone: no part of the model goes on it
         face = AXES[o.get("facing", "-y")]
         tfwd = Vector((1, 0, 0))                    # B4B heroes face +X
         R = face.rotation_difference(tfwd).to_matrix().to_4x4()
@@ -1239,6 +1284,24 @@ def fit_character(o):
         apply_transforms(meshes)
         log(f"unrigged: scale {k:.3f}")
         unit_hint((hi.z - lo.z) / 1.13, k)             # the head joint sits about 1/1.13 of the stature up
+        # front to back the bounding box's middle is off when arms or something held reach forward (Ada Wong: hands
+        # 28 cm in front, the whole body sat 10 cm behind the survivor's skeleton: every joint turned it about an
+        # axis in front of her). The legs (knees to mid-thigh) are centred on the template's legs instead
+        if mode == "3p":
+            def legs_mid(objs, z0, z1):
+                xs = [p.x for x in objs for p in (x.matrix_world @ v.co for v in x.data.vertices) if z0 <= p.z <= z1]
+                if len(xs) < 50: return None
+                xs.sort()
+                return (xs[len(xs) // 50] + xs[-1 - len(xs) // 50]) / 2      # 2 % trimmed: stray strands, straps
+            band = lambda: (ground + 0.25 * th, ground + 0.42 * th)
+            mx, tx = legs_mid(meshes, *band()), legs_mid(tpl.meshes, *band())
+            if mx is not None and tx is not None and abs(tx - mx) > 0.01:
+                T = Matrix.Translation(Vector((tx - mx, 0, 0)))
+                for x in meshes:
+                    if x.parent is None or x.parent not in meshes: x.matrix_world = T @ x.matrix_world
+                apply_transforms(meshes)
+                log(f"unrigged: centred front to back on the legs: moved {(tx - mx) * 100:+.1f} cm (its bounds' "
+                    f"middle was off: arms or something held reaching forward or back)")
         # arms in another pose than the template's A-pose (T-pose, hanging down): pose the template's arms like the
         # model's, take the weights from the posed template, then un-pose the model into the template's bind pose
         fitted = unpose_arms(tpl, meshes, chain=mode == "fp")
@@ -1252,8 +1315,14 @@ def fit_character(o):
         # the template (skeleton + meshes) takes the model's proportions too: later steps (twist weights, the face)
         # compare against it, and its joints become the mesh's bind skeleton (manifest extras bind_bones_m)
         rebind_template(tpl, own_bind, chains, chain_of, o)
+    # --skirt legs: skirts follow the hips and thighs (before the twist split, which shares the thighs' part like the
+    # legs'; an unrigged model's after its weights come from the template)
+    skirt = mode == "3p" and o.get("skirt") == "legs" and not o.get("probe")
+    if skirt and o.get("weights") != "transfer":
+        dangle_module().skirt_legs(tpl, smeshes, log)
     if o.get("weights") == "transfer":
         transfer_weights(tpl, smeshes, all_groups=True)
+        if skirt: dangle_module().skirt_legs(tpl, smeshes, log)
     elif o.get("twist", "template") == "template":
         transfer_weights(tpl, smeshes, all_groups=False)
     if face_on and not o.get("probe"):
@@ -1470,6 +1539,10 @@ def secondary_motion(o, tpl, meshes):
             ok_slots = {x.lower() for x in o["cloth_slots"].split(",") if x}
             cloth_ok = lambda mat: slot_of.get(mat, "").lower() in ok_slots if mat in slot_of else True
         mats, objs = dm.cloth_materials(meshes, tpl, o["cloth"], log, cloth_ok)
+        if o.get("skirt") == "legs":                # skirts, dresses, coat tails follow the legs instead (skirt_legs)
+            low = sorted(n for n, k in mats.items() if k == "lower")
+            if low: log(f"cloth: {low} not simulated (--skirt legs: they follow the pelvis and thighs)")
+            mats = {n: k for n, k in mats.items() if k != "lower"}
         pieces, sims = dm.cloth_regions(tpl, meshes, mats, log, objs)
         if sims:
             meshes = [m for m in meshes if len(m.data.polygons)] + pieces

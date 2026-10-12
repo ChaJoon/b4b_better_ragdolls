@@ -107,7 +107,8 @@ PLAY
 JOIN A FRIEND: in the Steam friends list, right-click your friend while they are in Back 4 Blood >
 Join Game, or accept their Steam invite. Works with your game closed or running.
 Only the host's Steam friends can join. Press ~ in game for the b4bcoop window (players, join/leave,
-camera, flashlight, keys, cheats, updates); the same things work as chat commands (/help in the game's chat).
+camera, flashlight, keys, cheats, looks and add-ons, updates); the same things work as chat commands (/help in the
+game's chat).
 The window, all chat commands and options, with examples: b4bcoop-COMMANDS.txt (next to this file).
 
 PLAY ONLINE (the mod stays installed): press Play, pick "Online". b4bcoop moves its game file (X3DAudio1_7.dll) into
@@ -137,8 +138,9 @@ the game. Nothing is downloaded or changed until you click; the download must ca
 and your b4bcoop.ini, add-ons and bans stay as they are. "Go back to ..." in the same tab returns to the version you
 had. Or by hand: extract the new zip over the old files. Details: b4bcoop-COMMANDS.txt, "Updates".
 
-ADD-ONS (textures, models): put the add-on's .pak in a b4bcoop-addons folder next to Back4Blood.exe and
-restart the game; /addons lists them. Only you see your add-ons, and nobody learns which ones you have. By
+ADD-ONS (textures, models): press ~, tab Looks & add-ons: Get more lists free ones (Add, then Wear), Installed
+manages yours. Or put an add-on's .pak in a b4bcoop-addons folder next to Back4Blood.exe and restart the
+game; /addons lists them. Only you see your add-ons, and nobody learns which ones you have. By
 default hosts let in players with any add-ons; a host can allow cosmetic ones only, or none (addons_policy=;
 your game checks yours before joining). Details: b4bcoop-COMMANDS.txt, "Add-ons".
 

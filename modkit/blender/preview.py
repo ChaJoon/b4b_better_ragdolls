@@ -1,10 +1,13 @@
 """Headless preview render of a model file (fbx, glb/gltf, obj, blend): front, side and back views side by side,
 Cycles on the CPU (works without a GPU). For checking a model before and after the pipeline steps.
 
-  blender -b --python blender/preview.py -- <model> <out.png> [--size 512] [--pose test]
+  blender -b --python blender/preview.py -- <model> <out.png> [--size 512] [--pose test|crouch|turn|walk|aim]
       [--views front,side,back,top,front3q] [--zoom 1.0] [--focus <object name substring>] [--textures <json>]
   --sim <work>/fit3p/manifest.json: the cloth simulation meshes (skirts, coats, capes) drawn as red wire.
   --pose test bends arms, legs, spine and head of a B4B skeleton (skmgltf export or b4bfit output) to check weights.
+  --pose crouch|turn|walk|aim: game-like poses (hips and knees folded; hips turned under an upper body that keeps
+  aiming; a stride; arms up with the head turned): where the game bends a survivor most. Render the template the same
+  way to compare.
   --textures: {"<material / slot name>": "<base colour png>"}, e.g. <work>/preview_textures.json written by
   `b4bmod survivor` (the fitted model with the textures made for the game; its "_pbr" entry gives the game's PBR
   textures, so roughness (and metallic on clothing) render as in game: wet or mirror-like materials show). Views follow the model's own facing when
@@ -19,7 +22,7 @@ Cycles on the CPU (works without a GPU). For checking a model before and after t
   FP mesh the same way to compare: the game's FP view is tight, arms off the FP skeleton's joints don't show.
 """
 import bpy, math, os, sys
-from mathutils import Vector
+from mathutils import Matrix, Vector
 
 argv = sys.argv[sys.argv.index("--") + 1:]
 src, out = argv[0], argv[1]
@@ -55,6 +58,40 @@ if opts["pose"] == "test":
                 pb.rotation_mode = "XYZ"
                 pb.rotation_euler = (_m.radians(x), _m.radians(y), _m.radians(z))
     bpy.context.view_layer.update()
+# --pose crouch|turn|walk|aim: game-like poses of a B4B skeleton, each joint turned about the body's own axes (lat =
+# towards the left side, up, fwd = where the hero faces) in degrees, parents first. For checking weights where the
+# game bends most: crouching (hips and knees folded), turning in place (hips turned under an upper body that keeps
+# aiming), a walking stride, aiming with the head turned.
+GAME_POSES = {
+    "crouch": [("pelvis", "lat", 15), ("thigh_l", "lat", -95), ("thigh_r", "lat", -85), ("calf_l", "lat", 120),
+               ("calf_r", "lat", 125), ("foot_l", "lat", -30), ("foot_r", "lat", -35), ("spine_01", "lat", 15),
+               ("spine_02", "lat", 15), ("spine_03", "lat", 5), ("head", "lat", -20)],
+    "turn": [("pelvis", "up", 45), ("thigh_l", "up", -15), ("thigh_r", "up", -15), ("thigh_l", "lat", -20),
+             ("calf_l", "lat", 25), ("spine_01", "up", -15), ("spine_02", "up", -15), ("spine_03", "up", -15),
+             ("neck_01", "up", 10), ("head", "up", 25)],
+    "walk": [("thigh_l", "lat", -40), ("calf_l", "lat", 30), ("thigh_r", "lat", 25), ("calf_r", "lat", 55),
+             ("foot_r", "lat", -20), ("pelvis", "up", 8), ("spine_02", "up", -8), ("upperarm_l", "lat", 25),
+             ("upperarm_r", "lat", -25), ("lowerarm_r", "lat", -30)],
+    "aim": [("upperarm_r", "lat", -40), ("upperarm_r", "fwd", 25), ("lowerarm_r", "lat", -60), ("upperarm_l", "lat", -55),
+            ("upperarm_l", "fwd", -35), ("lowerarm_l", "lat", -30), ("spine_01", "up", -10), ("spine_02", "up", -15),
+            ("spine_03", "lat", -10), ("head", "up", 35), ("head", "lat", 15)],
+}
+if opts["pose"] in GAME_POSES:
+    for a in [o for o in bpy.data.objects if o.type == "ARMATURE"]:
+        bh = lambda n: a.data.bones[n].head_local
+        if not all(n in a.data.bones for n in ("upperarm_l", "upperarm_r", "head", "pelvis")): continue
+        lat = (bh("upperarm_l") - bh("upperarm_r")).normalized()
+        up = bh("head") - bh("pelvis"); up = (up - lat * up.dot(lat)).normalized()
+        axes = {"lat": lat, "up": up, "fwd": lat.cross(up).normalized()}
+        depth = lambda n: len(a.data.bones[n].parent_recursive)
+        steps = [s for s in GAME_POSES[opts["pose"]] if s[0] in a.pose.bones]
+        for name, ax, deg in sorted(steps, key=lambda s: depth(s[0])):
+            bpy.context.view_layer.update()
+            pb = a.pose.bones[name]
+            h = pb.head.copy()                    # armature space, posed
+            R = Matrix.Rotation(math.radians(deg), 4, axes[ax])
+            pb.matrix = Matrix.Translation(h) @ R @ Matrix.Translation(-h) @ pb.matrix
+        bpy.context.view_layer.update()
 
 
 def face_pose(fj, pose_name, blink_deg):

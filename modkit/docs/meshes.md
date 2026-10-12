@@ -275,6 +275,18 @@ b4bfit: cloth: ['Coat'] -> 6672 cloth faces (lower), simulation mesh open panel 
   <work>/fit3p/manifest.json` draws the simulation meshes as red wire over the model.
 - Both are shown to everyone who has the add-on (each machine simulates its own copy). Far away (the last two
   LODs) the garment is skinned, not simulated.
+- **`--skirt legs`**: a skirt or dress that looks wrong as cloth in the game (tears, floats away from the hips) or
+  stays rigid on the hips while the legs go through it: it is skinned to the hips and thighs instead, with no cloth.
+  At the waist it stays on the pelvis; lower down each half follows the thigh of its side, the front and back centre
+  are shared by both thighs (they stretch smoothly when one leg lifts), and the back keeps more of the pelvis so it
+  drapes over the seat when crouching (the front rests on the thighs: a slight plume). Which vertices: those on the
+  model's own skirt/dress/coat bones (`skirt`, `dress`, `kilt`, `gown`, `tutu`, Fortnite `dyn_coat_*` ... in the bone
+  name) and faces of materials named like a skirt, dress or coat, below the waist; the log says
+  `skirt: N vertices ... follow the pelvis and thighs (no cloth)`. Capes stay cloth. Best for skirts above the knee;
+  a long skirt or robe follows the thighs down to its hem (the calves can come through it when kneeling).
+- Unrigged models take their weights from the survivor's mesh; the survivor's gear bones (Holly Elite 00's bag on
+  `backpack`, gas masks) are left out of that (`weights: the survivor's gear bones (backpack) left out ...`): the
+  animations move them on their own, and a model's lower back or skirt on them swung out behind it.
 
 ## Add an outfit
 The survivor pipeline above **replaces** the template: everyone with your add-on sees your model instead of Mom's
@@ -367,6 +379,8 @@ What the survivor pipeline prints, and what to do about it.
 | The lip line opens in the wrong place (upper lip moves with the jaw) | give the model a mouth-open shape key or lip bones, or `--face off` |
 | `unrigged: left arm is 50 deg from the template's pose` | an unrigged model not in an A-pose: it is un-posed automatically. If the arms come out bent or stuck to the body, rig the model (Mixamo auto-rigger, Blender Rigify) and try again |
 | `unrigged: left arm fitted onto the model's: clavicle ..., hand ... (N hand vertices); hand surface distance 4.6 -> 1.7 cm` | the survivor's arm turned segment by segment onto your model's arm, the hand onto your model's hand (found over the mesh from the wrist), before the weights are copied: hands get hand weights, not the forearm's or the thigh's. `no fit onto the model's surface ... turned by its tip only`: the arm shapes are too different (blocky, stylised): only the whole arm is turned |
+| `unrigged: centred front to back on the legs: moved +13.0 cm` | an unrigged model is stood on the survivor's skeleton by its bounds; arms or something held reaching forward put the bounds' middle in front of the body, and the body sat behind the skeleton (every joint then turned it about an axis in front of it: grotesque bends when crouching or turning). Now its legs are put on the survivor's legs |
+| Unrigged model: crouching, turning or walking bends the body grotesquely; a skirt or dress hangs like a curtain between the knees when crouching, or dark flaps stick out at the hips | an unrigged model takes its weights from the outfit you replace, from its nearest surface: loose clothes there (jacket tails, a hood, a backpack) give your model's hips and skirt their weights. Pick a **tight-fitting outfit** of the same survivor as `--outfit` (Karlee Elite 03 for a tight dress; check a few with `b4bmod mesh export` and `preview.py`), and check the result with `blender -b --python blender/preview.py -- <work>/fit3p/lod0.glb out.png --pose crouch` (also `turn`, `walk`, `aim`; render the outfit's own mesh the same way to compare). Bones the survivor's physics asset swings (Karlee's `backpack`) never reach your model (`weights: the survivor's simulated bones backpack left out ...`). Nothing should move by itself: `--cloth off --hair-physics off --hair-pin off` |
 | `unrigged: rigged model for the first-person arms -> .../rigged3p.blend` | an unrigged model's first-person arms are made from the third-person fit (your model on the survivor's skeleton), like a rigged model's: every joint lands on the FP skeleton's, so the hands show in the first-person view |
 | `materials -> slots (auto ...)` table | where each material went. Wrong? `--slot <material>=<slot>` or `=drop` |
 | Materials named `Material #25`, `Material #26` ... (a model from a game rip with generic material names) | placed by what they look like and where they sit ([How materials are placed](#how-materials-are-placed)); the table says why (`skin colours`, `clothes on the hands ...`, `object TheHat named like gear`) |
@@ -462,7 +476,7 @@ What the survivor pipeline prints, and what to do about it.
 ## Add a weapon look
 The weapon pipeline above **replaces** the weapon for everyone who has your add-on. Add `--as <name>` and it **adds** a
 look instead: the game's AR02 stays as it is, and a player who wants your model on their AR02 types `/model <name>`
-(or presses Use in the `~` window's Models tab).
+(or presses Use in the `~` window's Looks & add-ons tab, Wear).
 ```
 b4bmod weapon ak.fbx --fp-mesh AR02 ^
     --slot AkMaterial=AR02_Reciever_M --slot Ammunition=AR02_Mag_M ^

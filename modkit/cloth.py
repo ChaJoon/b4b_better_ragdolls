@@ -30,14 +30,14 @@ def _obj_prop(s, name):
     return s.pkg.obj_path(upkg.R(s.data, p["off"]).i32())
 
 
-def hair_chains(skm_file, src):
-    """Chains (root first) of the template's hair bones that its physics asset simulates (PhysType_Simulated bodies
-    under `head`; bones in between without a body swing along)."""
+def simulated_bones(skm_file, src):
+    """(bones whose physics-asset body is PhysType_Simulated (lower case), the physics asset's path or None). The set
+    is None when the physics asset isn't extracted under src."""
     s = skm.SkeletalMesh(skm_file)
     pa = _obj_prop(s, "PhysicsAsset")
-    if not pa: return [], None
+    if not pa: return set(), None
     f = upkg.game_path_to_file(pa.split(".")[0], src)
-    if not f or not os.path.exists(f): return [], pa
+    if not f or not os.path.exists(f): return None, pa
     p = upkg.Package(f)
     sim = set()
     for e in p.exports:
@@ -46,6 +46,15 @@ def hair_chains(skm_file, src):
         bn, pt = uprops.find(t, "BoneName"), uprops.find(t, "PhysicsType")
         if bn and pt and p.names[pt.value[0]] == "PhysType_Simulated":
             sim.add(p.names[bn.value[0]].lower())
+    return sim, pa
+
+
+def hair_chains(skm_file, src):
+    """Chains (root first) of the template's hair bones that its physics asset simulates (PhysType_Simulated bodies
+    under `head`; bones in between without a body swing along)."""
+    s = skm.SkeletalMesh(skm_file)
+    sim, pa = simulated_bones(skm_file, src)
+    if not sim: return [], pa
     bones = [s.name(b[:2]).lower() for b in s.m["refskel"]["bones"]]
     parent = [b[2] for b in s.m["refskel"]["bones"]]
     kids = {}

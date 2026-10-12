@@ -1,20 +1,22 @@
-# Add-on shop: the `~` window's Browse tab (#36)
+# Add-on shop: Get more in the `~` window's Looks & add-ons tab (#36; the Browse tab until 2026-10-12)
 
-Status 2026-09-27, build 14216215, Proton (lane 2, Flatpak Steam). Code: `native/src/shop.c` (tab, downloads, pending
-changes), `native/src/updcore.c` (catalog JSON + signature, streaming SHA-256; unit tests `native/test/run.sh`),
-`native/src/addons.c` (`addons_add_runtime`), `native/src/paks.c` (runtime mount), `native/src/imgdecode.c`
-(thumbnails), `native/src/overlay.cpp` (`ov_texture`/`ov_image`), `tools/shop-catalog.py` (build + sign the catalog),
-`tools/shop-test.py` (live test). Player page: docs/COMMANDS.md "Browse (add-on shop)".
+Status 2026-09-27, build 14216215, Proton (lane 2, Flatpak Steam). Code: `native/src/shop.c` (Get more, downloads,
+pending changes, Installed's Update/Remove/Undo), `native/src/looks.c` (the tab), `native/src/updcore.c` (catalog JSON +
+signature, streaming SHA-256; unit tests `native/test/run.sh`), `native/src/addons.c` (`addons_add_runtime`),
+`native/src/paks.c` (runtime mount), `native/src/imgdecode.c` (thumbnails), `native/src/overlay.cpp`
+(`ov_texture`/`ov_image`), `tools/shop-catalog.py` (build + sign the catalog), `tools/shop-test.py` (live test).
+Player page: docs/COMMANDS.md "Get more (add-on shop)". Below, "the Browse tab" in dated results = today's Get more.
 
 ## TL;DR
-- A "Workshop"-like Browse tab: **Get the add-on list** (a click; nothing automatic) downloads `catalog.json` + its
+- A "Workshop"-like list (Get more): **Get the add-on list** (a click; nothing automatic) downloads `catalog.json` + its
   ed25519 signature (the shop key, not the release key: §2), shows the add-ons with thumbnail, license, author, kind, size, what
   they add/replace, search and a filter. **Add** downloads the pak, checks size + SHA-256 against the signed list,
   puts it into `b4bcoop-addons\<id>.pak`, appends it to `addonlist.txt` and mounts it **right away** when that is
-  safe. **Remove** switches it off and deletes it at the next start. **Update** (newer file in the list) is swapped in
-  at the next start, and loaded at once when nothing of the old version is in memory. `shop=0` hides the tab.
+  safe; the row then offers **Wear** / **Use**. **Remove** (Installed, any add-on) switches it off and deletes it at
+  the next start. **Update** (newer file in the list; Get more and Installed) is swapped in at the next start, and
+  loaded at once when nothing of the old version is in memory. `shop=0` hides Get more and Update.
 - **Live mounting works** (§1, §1a) for cosmetic add-ons: added outfits and weapon looks are usable right after Add
-  (Models tab, `/model`, the customization screen), in Fort Hope, in a running mission and as a client in someone's
+  (the row's Wear / Use, Wear, `/model`, the customization screen), in Fort Hope, in a running mission and as a client in someone's
   session (within the host's `addons_policy`); replacements too when the game has nothing of what they replace in
   memory; updates when nothing of the old version is loaded. The agent decides from the files, not from the catalog.
   Mounted paks are never unmounted.
@@ -76,7 +78,7 @@ L4D survivors), and the rare **replacement**. Now (`addons.c` "loading an add-on
 | Files read only at start (shader libraries, `.locres`, `.bnk/.wem`, `.ini`, anything not a package) | next start | read once at start / at mount time of their own pak |
 | Remove, switching off, load order | next start | mounted paks are never unmounted |
 
-Visibility right after a live mount: the Models tab and `/model list outfits` read the refreshed list; the
+Visibility right after a live mount: Wear (`~` window) and `/model list outfits` read the refreshed list; the
 customization-screen rows are added at the next frame (`rows_acc = 0`, before: within 5 s); the screen asks the table
 each time it opens (`GetCustomizations`), so a screen opened before the Add lists the new outfit when opened again
 (live: "9 b4bcoop.outfit.casual_joe "CASUAL JOE" locked=0", Holly's count 6/10). Outfit names in two add-ons now
@@ -164,7 +166,7 @@ is inside netguard's updater scope; no API call, so no 60/hour limit).
   addonlist line is dropped), renames `.new` over the old pak, deletes `pending.txt`. Only `<shop id>.pak` names are
   accepted. Undo before the restart rewrites `pending.txt` (and switches the add-on back on).
 - Installed state: the file `<id>.pak` in the folder; its SHA-256 (computed after the list arrives) against the list
-  tells "installed" from "update available". The row shows the Add-ons tab's state (`on`, `on after restart`, ...).
+  tells "installed" from "update available". The row shows the add-on's state as Installed does (`on`, `on after restart`, ...).
 - The same add-on under another file name (2026-10-05; players had `batman.pak` before the shop listed `batman-any`):
   no `<id>.pak`, but another present add-on has the entry's `content_id` (= the agent's pak index SHA1, the same value
   `tools/shop-catalog.py` writes) or adds an outfit/weapon look the entry's `adds` names (`outfit batman (any)`) →
@@ -244,6 +246,12 @@ is inside netguard's updater scope; no API call, so no 60/hour limit).
     add-ons).`, not mounted, `casual_joe.pak=1` in its addonlist.txt.
   - Loader check: `paks` read `async loading now: 0` in an idle Fort Hope and 1 in 2 of 40 one-second samples during a
     mission load.
+
+- One tab (2026-10-12, overlay.md "Looks & add-ons"): Browse became Get more in the Looks & add-ons tab; Remove moved to
+  Installed and works for any add-on file (`pending.txt` keyed by file name, `shop_early` accepts plain `.pak` names
+  for `remove`, shop ids only for `update`); Update also in Installed ("Check for updates" gets the list). Lane 2,
+  Flatpak Proton, `B4B_GPU=4090`: `tools/shop-test.py` **58/58** (/tmp/b4b-shop-20261012-021647; Get more's Wear right
+  after Add, Remove/Update through Installed, Remove + Undo of a hand-installed pak, client 2 through its own window).
 
 ## 6. Open
 - Still a restart (§1a): gameplay add-ons; replacements/updates of assets in memory (e.g. an outfit someone wears, a

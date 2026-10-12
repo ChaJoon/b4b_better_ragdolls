@@ -3,7 +3,8 @@
 The model-mods counterpart of tools/e2e.py (dev tool; the models themselves are never committed).
 
     tools/charsuite.py [--manifest FILE] [--only a,b] [--twice] [--no-preview] [--no-game] [--no-build]
-                       [--vanilla] [--mission N] [--motion] [--install] [--no-lock] [--out DIR] [--build-dir DIR]
+                       [--vanilla] [--mission N] [--motion] [--poses] [--crouch] [--install] [--no-lock] [--out DIR]
+                       [--build-dir DIR]
 
 Manifest (JSON, outside the repo; default ~/.local/share/b4b-coop/characters/suite.json or $B4B_CHARSUITE; format and
 a CC0 example: tools/charsuite-example.json):
@@ -36,6 +37,10 @@ Steps:
     --mission N (default 2, 0 = off): then Evansburgh (mission Easy, `ready` ends the character select) with the first
     N entries marked "mission": true (else the first N) worn again: host FP holding a weapon, host 3P, client view;
     --motion adds the face while talking (host's hero says a line, client view) and the outfit running (on a bot).
+    --poses adds the host crouching, jogging, turning in place and aiming (client view + host 3P), where bad weights
+    or stray cloth show.
+    --crouch (Fort Hope): the host's hero crouches (its crouch key, from the game's input settings, held through dev
+    `cheatprobe press`): the client's view of it from the front and the host's own 3P view from behind (skirts, coats).
 Output: summary table + contact sheet (contact.png, one row per character) + logs, previews, screenshots, the game logs
 and agent transcript in /tmp/b4b-charsuite-<time>/ (lane 2: /tmp/b4b-charsuite-l2-<time>/). Exit 1 on any failure.
 Set B4B_GPU (e.g. 4090) as for multi.sh to keep the instances off the display GPU.
@@ -349,6 +354,75 @@ def motion(S, r, ic):
     e2e.agent(H, "model", "#" + bots[0], "reset")
 
 
+VK_CTRL, VK_D = 17, 0x44    # the game's crouch (LeftControl) and move-right keys (DefaultInput.ini)
+
+
+def poses(S, r, ic):
+    """--poses (mission): the host's hero, in the outfit, where the game bends a survivor most (weights, stray cloth):
+    crouching, jogging sideways, turning in place, aiming. Seen from the client (the host 3 m in front of it, facing
+    it) and from the host's own third-person camera (the host's free look is off for this: the turn turns the hero)."""
+    if ic is None:
+        log("  poses: client's hero not found on the host"); return
+    def z():
+        me = mine(H)
+        return me["at"][2] if me else None
+    e2e.agent(H, "thirdperson", "on")
+    look(ic, 300, 0); time.sleep(2)
+    z0 = z()
+    e2e.agent(H, "cheatprobe", "press", VK_CTRL, 6); time.sleep(1.5)
+    zc = z()
+    shot(r, C, "p_crouch", "crouching (client view)")
+    shot(r, H, "p_crouch_3p", "crouching (host 3P)")
+    time.sleep(5)
+    if z0 is not None and zc is not None and z0 - zc > 5 and (z() or z0) < z0 - 5:   # crouch is a toggle: stand up
+        e2e.agent(H, "cheatprobe", "press", VK_CTRL, 0.2); time.sleep(1.5)
+    log(f"  poses: crouch {('%.0f cm lower' % (z0 - zc)) if z0 is not None and zc is not None else '?'}")
+    look(ic, 300, 0); time.sleep(2)
+    e2e.agent(H, "cheatprobe", "press", VK_D, 1.4); time.sleep(0.5)
+    shot(r, C, "p_walk", "jogging sideways (client view)")
+    shot(r, H, "p_walk_3p", "jogging (host 3P)")
+    time.sleep(2)
+    look(ic, 300, 0); time.sleep(2)
+    e2e.agent(H, "thirdperson", "look", 0, 150, 2.5); time.sleep(0.6)
+    shot(r, C, "p_turn", "turning in place (client view)")
+    shot(r, H, "p_turn_3p", "turning in place (host 3P)")
+    time.sleep(2.5)
+    look(ic, 300, 0); time.sleep(2)
+    e2e.agent(H, "cheatprobe", "input", "rmb", 5); time.sleep(1.5)
+    shot(r, C, "p_aim", "aiming (client view)")
+    time.sleep(4)
+    e2e.agent(H, "thirdperson", "off")
+
+
+# UE key names -> Windows virtual-key codes (the crouch key of the game's input settings; letters and digits as is)
+VK = {"LeftControl": 0xA2, "RightControl": 0xA3, "LeftShift": 0xA0, "RightShift": 0xA1, "LeftAlt": 0xA4,
+      "SpaceBar": 0x20, "Tab": 0x09, "CapsLock": 0x14}
+
+
+def crouch_vk():
+    """The host's keyboard key for crouching (InputSettings action mapping Hero...Crouch..., dev `cheatprobe bind`)."""
+    for act, key in re.findall(r"(Hero\S*Crouch\S*)=(\S+)", e2e.agent(H, "cheatprobe", "bind")):
+        if key in VK: return VK[key]
+        if len(key) == 1 and key.isalnum(): return ord(key.upper())
+    return None
+
+
+def crouch(r, ic):
+    """--crouch: the host's hero crouches; the client's camera sees it from the front (host faces it at 260 cm), then
+    the host's own 3P camera from behind. The key is held (posted to the host's window), so it stands up after."""
+    vk = crouch_vk()
+    if vk is None:
+        log("  crouch: no crouch key in the host's input settings"); return
+    look(ic, 260, 0); time.sleep(2)            # as the body shot: closer, the client's level camera cuts off the legs
+    e2e.agent(H, "cheatprobe", "press", hex(vk), "12")
+    time.sleep(1.5); shot(r, C, "crouch_front", "crouching (client view)")
+    e2e.agent(H, "thirdperson", "on"); time.sleep(1.5)
+    shot(r, H, "crouch_3p", "crouching (host 3P)")
+    e2e.agent(H, "thirdperson", "off")
+    e2e.agent(H, "cheatprobe", "press", hex(vk), "0.1")       # let go (a new press replaces the held one)
+    time.sleep(2)
+
+
 def check_logs(S, r, insts, baseline, tag):
     new = []
     for n in insts:
@@ -374,7 +448,8 @@ def game(rows, a):
     install_addons(worn)
     if a.vanilla: os.environ["B4B_INI_EXTRA3"] = "addons=0"
     # the host lets every add-on in, so a mis-classed add-on is reported (below) instead of blocking the whole session
-    os.environ["B4B_INI_EXTRA1"] = "addons_policy=any"
+    # --poses: the turn must turn the hero, not orbit the third-person camera (free look while standing still)
+    os.environ["B4B_INI_EXTRA1"] = "addons_policy=any" + (";thirdperson_freelook=0" if a.poses else "")
     S = e2e.Session("chars", n, timeout=480)
     try:
         c0 = time.time()
@@ -411,6 +486,7 @@ def game(rows, a):
                     e2e.agent(H, "thirdperson", "on"); time.sleep(2)
                     shot(r, H, "host_3p", "host 3P")
                     e2e.agent(H, "thirdperson", "off")
+                    if a.crouch: crouch(r, ic)
                 if a.vanilla:
                     iv = face_to(V)
                     if iv is not None:
@@ -452,6 +528,8 @@ def game(rows, a):
                     e2e.agent(H, "thirdperson", "off")
                     if a.motion:
                         motion(S, r, ic)
+                    if a.poses:
+                        poses(S, r, ic)
                 if not check_logs(S, r, insts, baseline, "mission"): r.mission = False
     finally:
         S.stop()
@@ -461,7 +539,9 @@ def game(rows, a):
 COLS = [("prev3p", "preview 3P"), ("prevface", "preview face"), ("prevfp", "preview FP"), ("host_3p", "host 3P"),
         ("client_face", "client face"), ("client_body", "client body"), ("vanilla_face", "no add-ons"),
         ("m_host_fp", "mission FP"), ("m_host_3p", "mission 3P"), ("m_client", "mission client"),
-        ("m_talk", "talking"), ("m_run", "running")]
+        ("m_talk", "talking"), ("m_run", "running"), ("p_crouch", "crouch"), ("p_crouch_3p", "crouch 3P"),
+        ("p_walk", "jog sideways"), ("p_walk_3p", "jog 3P"), ("p_turn", "turn"), ("p_turn_3p", "turn 3P"), ("p_aim", "aim"),
+        ("crouch_front", "crouching"), ("crouch_3p", "crouching 3P")]
 
 
 def contact(rows):
@@ -513,6 +593,9 @@ def main():
     ap.add_argument("--vanilla", action="store_true", help="a 3rd instance without add-ons (must see vanilla)")
     ap.add_argument("--mission", type=int, default=2, help="characters worn in Evansburgh (0 = no mission step)")
     ap.add_argument("--motion", action="store_true", help="mission: face while talking, the outfit running (on a bot)")
+    ap.add_argument("--poses", action="store_true", help="mission: the host crouching, jogging, turning, aiming "
+                    "(client view + host 3P)")
+    ap.add_argument("--crouch", action="store_true", help="Fort Hope: the host crouches (client view + host 3P)")
     ap.add_argument("--install", action="store_true", help="launch/install.sh (this checkout's dev build) first")
     ap.add_argument("--no-lock", action="store_true", help="don't take launch/gamelock.sh (caller holds it)")
     ap.add_argument("--out", help="artifacts (default /tmp/b4b-charsuite-<time>)")

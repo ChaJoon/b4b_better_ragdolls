@@ -1170,7 +1170,83 @@ the same way is the reference (charsuite now adds it to the previews: column "pr
   (`/tmp/b4b-e2e-l2-final`). New charsuite `--motion`: talking face (client view while the host's
   hero says a line) and the outfit on a bot running across the host's view.
 
-## 21. Wet-looking outfits: roughness from packed specular maps (outfit-fixes, 2026-10-12)
+## 21. Unrigged models that bend wrong in game: placement, simulated bones, weight source (ada-fix, 2026-10-12)
+Ada Wong (RE4 remake, unrigged glTF, `--as adawong` on Karlee Elite 00) passed the suite but in game "her whole body
+morphs grotesquely" when crouching or turning, with dark flaps at the hips. Three causes, found with new game-like
+poses in `preview.py --pose crouch|turn|walk|aim` (each joint turned about the body's own axes; render the template the
+same way to compare):
+- **Placement.** An unrigged model is stood up by its bounding box, centred on the pelvis. Ada's hands reach 28 cm
+  forward in her rest pose, so the box's middle sat in front of her body and the whole body ended up 10-13 cm behind
+  the skeleton (calf vertices 12 cm behind the calf bone, face 12 cm behind Karlee's): every joint turned her about an
+  axis in front of her, and the face rig found nothing ("lips 0.2 cm from the head joint"; v1 had guessed the face
+  bones at half scale). Fix (`b4bfit`, 3P unrigged): the legs' band (25-42 % of the stature, 2 % trimmed front-back
+  middle) is put on the template's same band (`unrigged: centred front to back on the legs: moved +13.0 cm`). Ada's face
+  is now found (eyes from the eye mesh, mouth and chin from the profile; 15300 vertices on face bones, eyelids blink).
+- **Simulated bones.** Weights come from the template's nearest surface. Karlee's physics asset simulates `backpack`
+  (her jacket's back and hood, up to 73 % per vertex): Ada's back, hips, dress and holster got up to 70 % of it and
+  swung with that body. Now b4bmodel reads the template's `PhysType_Simulated` bodies (`cloth.simulated_bones`) and
+  passes `--sim_bones`; b4bfit gives those bones' template weights to the other bones of each vertex (or the parent)
+  before anything is copied (`weights: the survivor's simulated bones backpack left out ...`); hair chains the
+  model's hair is put on (`--hair_bones`) keep theirs.
+- **Weight source.** Karlee Elite 00's jacket tails cover her hips and thighs: a tight dress copied pelvis weights
+  there and hung like a curtain between the knees when crouching (dark tears where the leggings under it poked
+  through). Karlee Elite 03 (tight suit, same skeleton and physics asset, no weights on `backpack`) gives body-like
+  weights: the dress bends with the thighs. Guide: pick a tight-fitting outfit for unrigged models in tight clothes.
+- Ada v2: `--outfit TU07/Karlee/Elite_03`, `--cloth off --hair-physics off --hair-pin off` (Dan: nothing on her should
+  swing; the hair pin had put up to 84 % of her bob on spine_03, which stretches it when the head turns). Stills: crouch,
+  turn, walk and aim clean; at full crouch a few leggings vertices poke through the dress at the back of the thigh.
+- Live (lane 2, Flatpak Steam, `B4B_STEAM=flatpak B4B_GPU=4090`, new `charsuite.py --mission 1 --poses`): Ada worn in
+  Fort Hope and Evansburgh, host crouching (22 cm lower), jogging, turning in place and aiming seen from the client and
+  the host's 3P camera: no stretching, no flaps, nothing swinging; PASS, 0 new log errors. The leg centring also
+  moves the unrigged Pink/Yellow Rangers 4-6 cm (their knees bend cleaner in `--pose crouch`); their paks are v1.
+
+## 22. Skirts that follow the legs instead of cloth (`--skirt legs`, skirt-fixes, 2026-10-12)
+Dan's report: Ariana Grande's and both Olivia Rodrigo skirts deform and separate; Doja Cat's skirt, which simply bends
+with her thighs when crouching, is the look to copy. The Pink Ranger's rear "does something strange" when she moves or
+crouches (a stiff block behind the hips).
+- **Why Doja Cat works**: her rig (Fortnite `F_MED_TangyRadishFlame`) hangs its skirt bones under the thighs
+  (`base_front_skirt_r` <- `thigh_r`) and weights most of the skirt to `thigh_*`, glutes and pelvis directly. Measured
+  on her outer surface: pelvis at the waist, ~50 % thigh 4 cm below the hip joints, fully on the thigh of its side
+  10-15 cm below (back slower: pelvis 0.4 at -9 cm), a hard left/right split at the front and back centre. b4bfit's
+  `own_bones` sends unmapped bones to their mapped ancestor, so her skirt bones became thigh weights. No cloth: her
+  `Body` material has no `dyn_skirt*` faces (GARMENT_BONES is anchored `^dyn_(main_)?skirt`, hers are `dyn_*_skirt_*`).
+- **Why the others fail**: Ariana (`dyn_skirt_*_base` <- `pelvis`), SOUR Olivia (`dyn_skirt_*_base` <- `pelvis`),
+  Lover Girl Olivia (`MSTR_skirt_*` <- `pelvis`) hang their skirt bones under the pelvis, so the skirt became rigid on
+  the pelvis (thighs through it when crouching or walking). Ariana and SOUR also have >= 150 faces on `dyn_skirt_*`, so
+  `--cloth auto` made them cloth (closed tubes, hem 0.21/0.26 of the leg): that is what tore and floated in game. Lover
+  Girl was not cloth (rigid only).
+- **Pink Ranger**: an unrigged FBX, weights copied from Holly Elite 00's mesh. Holly carries a bag on her `backpack`
+  bone (child of spine_03, 8700 template vertices); the model's lower back and the back of its skirt flap took
+  `backpack` 0.7-1.0, and the animations move that bone on its own. Not a physics body (3P_Holly_PA simulates only
+  hair_00..02), so the ada-fix branch's simulated-bone filter doesn't catch it.
+- **Fix** (modkit/blender/b4bdangle.py §3, §4): `--skirt legs` (b4bmodel -> b4bfit): `mark_skirt_bones` stores each
+  source vertex's share on bones named skirt/skit_/dress/kilt/gown/tutu or `dyn_coat|robe|poncho` (attribute
+  `b4bskirt`); `skirt_legs` (3P, after the rename/rebind, before the twist split; unrigged: after the template copy)
+  blends each such vertex (and faces of materials named like a skirt/dress/coat, below spine_01 + 2 cm, not arm-skinned)
+  towards `leg_weights`: pelvis 1 - s, thigh_l s * left, thigh_r s * (1 - left); left = smoothstep over +-0.6 x half
+  the hip width (front/back centre shared); s at the front from hip joint + 4 cm (0) to -10 cm (1), at the back up to
+  0.65 from the hip joint to -22 cm (first try: back like the front at 0.8 max: the seat came through the back of Lover
+  Girl's dress when crouching), blended front/back over +-6 cm. Lower garments are then dropped from the cloth (capes
+  stay). `drop_template_gear` (unrigged only, always): template vertices on `backpack`/`gasmask` get the weights of
+  the nearest non-gear template vertices before any copying.
+- **Offline checks** (posed previews with the ada-fix branch's `preview.py --pose crouch|walk` + a hip close-up;
+  local, not committed): old builds crouching: thighs through the front of Ariana's, both Olivias', Charlotte's
+  skirts, Golden Zoey's front flap rigid; new: front rests on the thighs (slight plume), back drapes, front stretches
+  between the legs mid-stride, no tears. The Pink Ranger's `backpack` weights are gone (max 0 on the rebuilt mesh); the
+  bone's own animation can't be shown offline.
+- **Sweep** of the 94 fnx + 14 fortnite outfits by source rig (garment bones and their mapped root) and published
+  build (cloth or not): rebuilt with `--skirt legs` also Charlotte (pleated skirt on pelvis bones, rigid), Golden Zoey
+  (front flap rigid), Mariah Carey (closed-tube cloth dress like Ariana's). Same rig type but left alone: robes and
+  coat tails (Kylo Ren closed cloth tunic, Mace Windu / Anakin rigid robes, Korra, the Mandalorians, Darth Vader's
+  cape: open cloth panels; Rey, Aang, He-Man, Scorpion, Shuri, Stormtrooper Samurai flaps), and skirts already on
+  thigh bones like Doja Cat's (Mother of Thorns Doja, Tour Ready Sabrina, Golden Mira).
+- **Live** (lane 1, Proton, `B4B_GPU=5090`, `charsuite.py --no-build --install --crouch --mission 0` on the rebuilt
+  paks; new `--crouch`: the host holds its crouch key (InputSettings `HeroCrouchKeyboard` = LeftControl, dev
+  `cheatprobe press`) while the client's camera and the host's 3P camera take shots): all 7 worn by host and client,
+  0 new log errors; crouching, every skirt rests on the thighs in front and drapes at the back, nothing torn or
+  floating; the Pink Ranger's rear stays on her hips. Screenshots local (`/tmp/b4b-charsuite-skirts-live1`, `-live2`).
+
+## 23. Wet-looking outfits: roughness from packed specular maps (outfit-fixes, 2026-10-12)
 Reported after play: several game-rip outfits (Ahsoka, Alan Wake, Anakin, Rey, Becky Lynch, Kirk Hammett, Doja Cat's
 skin) looked glossy and wet in game. The game's PBR texture is R AO, G roughness, B metallic (retail hero roughness
 averages 0.5-0.9: Holly E00 Body 0.82, Walker E00 Body 0.81; skin slots 0.6-0.7; skin masters (`Master_Hero_Head_M`)

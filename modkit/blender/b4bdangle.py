@@ -12,6 +12,10 @@ The game gives heroes two kinds of it, and a custom mesh can use both without ne
      closed tube for skirts and closed coats, an open panel (around the back, the front left open) for open-front
      coats and capes; its top row is fixed (the waist, or the hips for a cape). modkit/cloth.py writes it
      into a clothing asset of the outfit (adding one if the outfit has none) and maps the render vertices onto it.
+  3. --skirt legs instead of cloth: `skirt_legs` skins skirts, dresses and coat tails to the pelvis and thighs (each
+     half follows its thigh, front and back shared), the way some game rigs hang their skirt bones under the thighs.
+  4. Unrigged models: `drop_template_gear` keeps the survivor's gear bones (Holly's `backpack`) out of the weights they
+     copy from its mesh.
 How it works: docs/investigations/mesh-mods.md §14 (b4b-coop repository).
 """
 import bmesh, math, os, re
@@ -1093,3 +1097,158 @@ def cloth_regions(tpl, meshes, mats, log=print, objs=None):
         all_pieces += pieces
         sims.append(sim)
     return all_pieces, sims
+
+
+# ---- 3. skirts that follow the legs (--skirt legs) -----------------------------------------------------------------
+# Instead of cloth: the skirt is skinned to the hips and thighs the way some game rigs do it (Fortnite's Doja Cat
+# hangs her skirt bones under thigh_l/thigh_r): at the waist on the pelvis, from just below the hip joints on the thigh
+# of its side, the front and back centre shared by both thighs. A leg lifting carries its half of the skirt along and
+# the front and back stretch smoothly between the legs; crouching, the front rests on the thighs (a slight plume) and
+# the back drapes over the seat. Rigs that hang their skirt bones under the pelvis (most Fortnite skirts: dyn_skirt_*,
+# MSTR_skirt_*) otherwise leave it rigid on the hips: the thighs go through it, and as cloth it tore and floated.
+LEG_GARMENT_BONES = re.compile(r"skirt|skit_|dress|kilt|gown|tutu|^dyn_(main_)?(coat|robe|poncho)", re.I)
+SKIRT_ATTR = "b4bskirt"
+SKIRT_TOP = 0.04         # m above the hip joints: the front starts leaving the pelvis for the thighs ...
+SKIRT_FULL = 0.10        # m below them: ... and is on the thighs from here down
+SKIRT_BACK_FULL = 0.22   # m below them: the back's share on the thighs grows down to here ...
+SKIRT_BACK = 0.65        # ... up to this (the rest stays with the pelvis: it drapes over the seat when crouching; more
+                         # on the thighs and the seat came through it)
+SKIRT_SPLIT = 0.6        # x half the hip width: the band around the front/back centre shared by both thighs
+
+
+def mark_skirt_bones(objs, log=print):
+    """Each source vertex's weight share on the rig's own skirt/dress/coat bones (LEG_GARMENT_BONES), kept as the
+    vertex attribute SKIRT_ATTR through the fit, which renames those bones to the pelvis or a thigh. Returns the number
+    of vertices mostly on them."""
+    n = 0
+    for m in objs:
+        if m.type != "MESH": continue
+        hit = {g.index for g in m.vertex_groups if LEG_GARMENT_BONES.search(g.name)}
+        if not hit: continue
+        a = m.data.attributes.get(SKIRT_ATTR) or m.data.attributes.new(SKIRT_ATTR, "FLOAT", "POINT")
+        for v in m.data.vertices:
+            tot = sum(g.weight for g in v.groups)
+            x = sum(g.weight for g in v.groups if g.group in hit) / tot if tot else 0.0
+            a.data[v.index].value = x
+            n += x >= 0.5
+    if n: log(f"skirt: {n} vertices on the model's own skirt bones")
+    return n
+
+
+def skirt_share(m, tpl, cap):
+    """{vertex: 0..1} how much of each vertex is skirt: its share on the source's skirt bones (mark_skirt_bones), or 1
+    for faces of a material named like a skirt, dress or coat (not an accessory), both only below the waist (cap) and
+    not on faces skinned to the arms (a coat's sleeves)."""
+    out = {}
+    a = m.data.attributes.get(SKIRT_ATTR)
+    mw = m.matrix_world
+    if a is not None:
+        for v in m.data.vertices:
+            x = a.data[v.index].value
+            if x > 0: out[v.index] = x
+    names = [re.sub(r"\.\d{3}$", "", x.name) if x else "" for x in m.data.materials]
+    labels = material_labels([m])
+    named = {i for i, n in enumerate(names) if n and (SKIRT_RX.search(labels.get(n, n)) or
+                                                       COAT_RX.search(labels.get(n, n)))
+             and not ACCESSORY_RX.search(n) and not CAPE_RX.search(labels.get(n, n))}
+    if named and not ACCESSORY_RX.search(m.name):
+        W = weights_of(m)
+        arm = [sum(x for b, x in w.items() if ARM_RX.match(b)) / (sum(w.values()) or 1.0) for w in W]
+        for p in m.data.polygons:
+            if p.material_index in named and sum(arm[v] for v in p.vertices) / len(p.vertices) < 0.5:
+                for v in p.vertices: out[v] = 1.0
+    # only below the waist (fading in over 3 cm): above it the garment is a top and keeps its weights
+    for i in list(out):
+        out[i] *= smooth(cap, cap - 0.03, (mw @ m.data.vertices[i].co).z)
+        if out[i] <= 1e-3: del out[i]
+    return out
+
+
+def leg_weights(p, tpl):
+    """{pelvis, thigh_l, thigh_r: w} for a skirt point p (world, bind pose)."""
+    hl, hr = tpl.pos["thigh_l"], tpl.pos["thigh_r"]
+    mid = (hl + hr) / 2
+    lat = hl - hr; lat.z = 0.0
+    half = max(0.03, lat.length / 2)
+    lat.normalize()
+    fr = smooth(mid.z + SKIRT_TOP, mid.z - SKIRT_FULL, p.z)
+    bk = SKIRT_BACK * smooth(mid.z, mid.z - SKIRT_BACK_FULL, p.z)
+    front = smooth(mid.x - 0.06, mid.x + 0.06, p.x)              # B4B heroes face +X
+    s = bk + (fr - bk) * front
+    left = smooth(-SKIRT_SPLIT * half, SKIRT_SPLIT * half, (p - mid).dot(lat))
+    return {"pelvis": 1.0 - s, "thigh_l": s * left, "thigh_r": s * (1.0 - left)}
+
+
+def skirt_legs(tpl, meshes, log=print):
+    """--skirt legs: skirts, dresses and coat tails below the waist follow the pelvis and thighs (leg_weights) instead
+    of being cloth or rigid on the hips; each vertex by how much of it is skirt (skirt_share). Returns the number of
+    vertices changed."""
+    if any(b not in tpl.pos for b in ("pelvis", "thigh_l", "thigh_r")):
+        log("skirt: the skeleton has no pelvis/thighs: --skirt legs does nothing"); return 0
+    cap = tpl.pos["spine_01"].z + 0.02 if "spine_01" in tpl.pos else tpl.pos["pelvis"].z + 0.1
+    n, objs = 0, []
+    for m in meshes:
+        share = skirt_share(m, tpl, cap)
+        if not share: continue
+        W = weights_of(m)
+        mw = m.matrix_world
+        for i, g in share.items():
+            w = W[i]
+            tot = sum(w.values()) or 1.0
+            new = {b: x / tot * (1.0 - g) for b, x in w.items()}
+            for b, x in leg_weights(mw @ m.data.vertices[i].co, tpl).items():
+                new[b] = new.get(b, 0.0) + x * g
+            W[i] = {b: x for b, x in new.items() if x > 1e-4}
+            n += 1
+        set_weights(m, W)
+        objs.append(m.name)
+    if n:
+        log(f"skirt: {n} vertices of {', '.join(objs)} follow the pelvis and thighs (no cloth): on the pelvis at the "
+            f"waist, on the thigh of their side below the hips, front and back shared by both")
+    else:
+        log("skirt: --skirt legs: no skirt found (no skirt/dress bones on the rig, no material named like a skirt, "
+            "dress or coat)")
+    return n
+
+
+# ---- 4. the survivor's gear bones in weights copied from the template -----------------------------------------------
+# Unrigged models take their weights from the survivor's mesh (nearest points). Survivors carry gear on their own bones
+# (Holly Elite 00's bag on `backpack`, under spine_03, 8700 of her vertices; gas masks), which the animations move apart
+# from the body: a model's lower back, hips and skirt copied onto `backpack` swung out behind her as a stiff block when
+# she crouched or ran. Those template vertices get the body's weights under them instead (before any copying).
+GEAR_BONE_RX = re.compile(r"^(backpack|gasmask)(_|$)", re.I)
+
+
+def drop_template_gear(tpl, log=print):
+    """Template mesh weights on gear bones (GEAR_BONE_RX) -> the weights of the nearest template vertices that aren't
+    gear (the body under the bag), each vertex by its gear share. Returns the vertex count changed."""
+    meshes = [(tm, weights_of(tm)) for tm in tpl.meshes]
+    gear = lambda w: sum(x for b, x in w.items() if GEAR_BONE_RX.match(b)) / (sum(w.values()) or 1.0)
+    body = []
+    for tm, W in meshes:
+        mw = tm.matrix_world
+        body += [(mw @ v.co, w) for v, w in zip(tm.data.vertices, W) if w and gear(w) < 0.05]
+    if not body: return 0
+    kd = KDTree(len(body))
+    for i, (p, _) in enumerate(body): kd.insert(p, i)
+    kd.balance()
+    n, bones = 0, set()
+    for tm, W in meshes:
+        mw, hit = tm.matrix_world, False
+        for v, w in zip(tm.data.vertices, W):
+            g = gear(w) if w else 0.0
+            if g <= 0: continue
+            tot = sum(w.values())
+            new = {b: x / tot for b, x in w.items() if not GEAR_BONE_RX.match(b)}
+            near, f = {}, 0.0
+            for _, i, d in kd.find_n(mw @ v.co, 4):
+                k = 1.0 / max(d, 1e-4); f += k
+                for b, x in body[i][1].items(): near[b] = near.get(b, 0.0) + x * k
+            for b, x in near.items(): new[b] = new.get(b, 0.0) + g * x / f
+            bones.update(b for b in w if GEAR_BONE_RX.match(b))
+            W[v.index] = new; n += 1; hit = True
+        if hit: set_weights(tm, W)
+    if n:
+        log(f"weights: the survivor's gear bones ({', '.join(sorted(bones))}) left out of the weights copied from it "
+            f"({n} template vertices take the body's under them): the model doesn't swing on them")
+    return n

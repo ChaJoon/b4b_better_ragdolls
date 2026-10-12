@@ -331,7 +331,7 @@ static void build_outfits(void) {
         LOG("models: add-on outfit %s (\"%s\", %s): %s%s%s", o->name, o->title, o->addon, o->p3, o->pf[0] ? " + " : "", o->pf);
     }
 }
-// An add-on loaded at runtime (Browse tab, Add-ons tab): append its outfits; one whose add-on was updated (another
+// An add-on loaded at runtime (the ~ window's Get more / Installed, /addons on): append its outfits; one whose add-on was updated (another
 // file now, addons_update_runtime) gets the new meshes and title (its old meshes were not loaded: addons.c checked).
 // The customization screen's rows follow at the next frame.
 void models_outfits_refresh(void) {
@@ -1163,7 +1163,7 @@ void models_tick(float dt) {
 #define REFUSED_NOTICE "The host turned model swaps off"
 #define WREFUSED_NOTICE "The host turned weapon looks off"
 static int host_off = -1;          // client: the host's /models state as its notices told it (-1 unknown)
-static char refusal[160];          // client: the host's last refusal of our look, until our next /model (Models tab)
+static char refusal[160];          // client: the host's last refusal of our look, until our next /model (shown in Wear)
 void models_host_notice(const char *text) {
     if (me.on && !strncmp(text, REFUSED_NOTICE, sizeof REFUSED_NOTICE - 1)) { me.gave_up = 1; LOG("models: refused by the host"); }
     if (n_subst && !no_subst && !strncmp(text, REFUSED_NOTICE, sizeof REFUSED_NOTICE - 1)) { no_subst = 1; reinit_due = 1; }
@@ -1531,7 +1531,7 @@ void models_slash(const char *verb, char *rest, Out *o) {
     tick_acc = 1;   // apply on the next tick
 }
 
-// ---- ~ overlay: the Models tab (#26). Every action is the chat command (ov_run -> models_slash), read-only state here.
+// ---- ~ overlay: Wear and the model swaps part of Host rules in the "Looks & add-ons" tab (looks.c, #26). Every action is the chat command (ov_run -> models_slash), read-only state here.
 static void look_str(UObject *slot, char *buf, size_t n) {
     CustSet *s = slot_set(slot);
     int hi = slot_hero(slot);
@@ -1605,12 +1605,14 @@ static void sort_names(const char **nm, int *sel, int n) {
         }
 }
 
-static void panel_survivors(const CustSet *cur, const char *search) {
+// The lists below return how many names they show. hdr: a search across every list (looks.c): a section heading,
+// drawn only when something matches, and no "nothing" lines.
+static int panel_survivors(const CustSet *cur, const char *search, const char *hdr) {
     static const int order[4] = {SLOT_OUTFIT, SLOT_HEAD, SLOT_TORSO, SLOT_LEGS};
     static const char *group[4] = {"Outfits", "Heads", "Torsos", "Legs"};
     static const char *nm[MAX_ENTRIES];
     static int sel[MAX_ENTRIES];
-    if (!n_heroes) { ov_text_dim("No survivor data loaded yet (it loads with Fort Hope)."); return; }
+    if (!n_heroes) { if (!hdr) ov_text_dim("No survivor data loaded yet (it loads with Fort Hope)."); return 0; }
     if (search[0]) {   // flat: survivors and pieces whose name has the text
         int n = 0, more = 0;
         for (int h = 0; h < n_heroes; h++) if (heroes[h].count && contains(heroes[h].slug, search) && n < 200) { nm[n] = heroes[h].slug; sel[n++] = 0; }
@@ -1620,11 +1622,13 @@ static void panel_survivors(const CustSet *cur, const char *search) {
             nm[n] = cat[i].name; sel[n++] = shows(cur, &cat[i]);
         }
         sort_names(nm, sel, n);
-        if (!n) ov_text_dim("Nothing matches.");
+        if (!n) { if (!hdr) ov_text_dim("Nothing matches."); return 0; }
+        if (hdr) ov_heading(hdr);
         name_grid("found", nm, sel, n);
         if (more) ov_text_dim("%d more: type more of the name.", more);
-        return;
+        return n + more;
     }
+    int shown = 0;
     for (int h = 0; h < n_heroes; h++) {
         if (!heroes[h].count) continue;
         char lab[64];
@@ -1649,35 +1653,44 @@ static void panel_survivors(const CustSet *cur, const char *search) {
             }
         }
         ov_pop_id();
+        shown++;
     }
+    return shown;
 }
 
-static void panel_npcs(const CustSet *cur, const char *search) {
+static int panel_npcs(const CustSet *cur, const char *search, const char *hdr) {
     static const char *grp[3] = {"Fort Hope and other NPCs", "Other survivors", "Cultists"};
     static const char *nm[128];
     static int sel[128];
     if (n_npcs < 0) build_npcs();
-    if (!n_npcs) { ov_text_dim("No NPC bodies found (the asset registry wasn't ready: try again in a map)."); return; }
-    ov_text_dim("Seen by players with b4bcoop; others see your survivor. NPC bodies have no first-person arms.");
+    if (!n_npcs) { if (!hdr) ov_text_dim("No NPC bodies found (the asset registry wasn't ready: try again in a map)."); return 0; }
+    if (!hdr) ov_text_dim("Seen by players with b4bcoop; others see your survivor. NPC bodies have no first-person arms.");
+    int total = 0;
     for (int g = 0; g < 3; g++) {
         int n = 0;
         for (int i = 0; i < n_npcs; i++) {
             const Npc *x = &npcs[i];
             int gi = strstr(x->path, "/Characters/Cultists/") ? 2 : strstr(x->path, "/BaseHero/Meshes/3P_Survivor") ? 1 : 0;
-            if (gi != g || x->bad || !contains(x->name, search)) continue;
+            if (gi != g || x->bad || !contains(x->name, search) || n >= 128) continue;
             nm[n] = x->name; sel[n++] = shows_made_up(cur, NPC_PREFIX, x->name);
         }
         if (!n) continue;
+        if (hdr && !total) ov_heading(hdr);
+        total += n;
         ov_text_dim("%s", grp[g]);
         ov_push_id(g);
         name_grid("npc", nm, sel, n);
         ov_pop_id();
     }
+    if (!total && !hdr) ov_text_dim("Nothing matches.");
+    return total;
 }
 
-static void panel_outfits(const CustSet *cur, const char *search) {
-    if (!n_outfs) { ov_text_dim("No add-on outfits (mod maker's kit: b4bmod survivor --as <name>; installed add-ons: Add-ons tab)."); return; }
-    ov_text_dim("Seen by players who have the same add-on; others see your survivor.");
+static int panel_outfits(const CustSet *cur, const char *search, const char *hdr) {
+    if (!n_outfs) {
+        if (!hdr) ov_text_dim("No add-on outfits yet: Get more (above) lists free ones; mod makers: b4bmod survivor --as <name>.");
+        return 0;
+    }
     int ord[MAX_OUTFS], n = 0;
     for (int i = 0; i < n_outfs; i++) {
         if (!contains(outfs[i].name, search) && !contains(outfs[i].title, search) && !contains(outfs[i].addon, search)) continue;
@@ -1689,7 +1702,9 @@ static void panel_outfits(const CustSet *cur, const char *search) {
         }
         ord[j] = i;
     }
-    if (!n) { ov_text_dim("Nothing matches."); return; }
+    if (!n) { if (!hdr) ov_text_dim("Nothing matches."); return 0; }
+    if (hdr) ov_heading(hdr);
+    else ov_text_dim("Seen by players who have the same add-on; others see your survivor.");
     for (int q = 0; q < n; q++) {
         const Outf *x = &outfs[ord[q]];
         if (!q || strcmp(outfs[ord[q - 1]].addon, x->addon)) ov_text_dim("Add-on: %s", x->addon);
@@ -1701,9 +1716,13 @@ static void panel_outfits(const CustSet *cur, const char *search) {
         ov_text_dim("%s%s, made on %s", x->bad ? "NOT USABLE: " : "", x->title, x->hero);
         ov_pop_id();
     }
+    return n;
 }
 
-static void models_panel(void) {
+// ~ window, "Looks & add-ons" tab, Wear (looks.c draws the tab): your look, what to wear (the game's survivors and NPC
+// bodies, add-on outfits and weapon looks), everyone's look. *kind: the list shown without a search (0 survivors,
+// 1 NPC bodies, 2 add-on outfits, 3 weapon looks); a search shows every list's matches.
+void models_wear_panel(const char *search, int *kind) {
     static ULONGLONG t_cat;
     if (!n_cat && GetTickCount64() - t_cat > 3000) { t_cat = GetTickCount64(); build_catalogue(); }   // loads with Fort Hope
     if (n_outfs < 0) build_outfits();
@@ -1716,23 +1735,21 @@ static void models_panel(void) {
     if (p_target >= 0 && (!host_ok || p_target >= np || pa[p_target] != target_ps || pa[p_target] == mine)) p_target = -1;
     char look[200];
 
-    ov_heading("Your look");
-    if (!myslot) ov_text_dim("No survivor yet (character select, loading).");
-    else { look_str(myslot, look, sizeof look); ov_text("Now: %s", look); }
-    ov_text_dim("Your pick: %s%s", me.on ? me.label : "none (your own look)", me.on && me.gave_up && !refusal[0] ? " (not applied: the host did not accept it)" : "");
+    if (!myslot) ov_text_dim("Your look: no survivor yet (character select, loading).");
+    else { look_str(myslot, look, sizeof look); ov_text("Your look: %s", look); }
     if (refusal[0]) ov_text_warn("%s", refusal);
     if (client && host_off == 1 && !refusal[0])
         ov_text_warn("The host turned model swaps off: only your own survivor's outfits are accepted.");
     if (ov_button("Reset my look##me")) ov_run("model reset");
     ov_tooltip("/model reset: your survivor and your weapons back to your own look (from your profile).");
     ov_same_line();
-    if (ov_button("Status in the log (/model)")) ov_run("model");
-    ov_text_dim("Nothing is saved: your profile and outfits stay as they are. Everyone sees survivor outfits; NPC bodies and "
-                "add-on looks only players with b4bcoop (and the add-on).");
-
-    ov_heading("Pick a look");
-    // host: whose look the lists change (/model <player> <name>)
-    {
+    if (ov_button("Status (/model)##status")) ov_run("model");
+    ov_tooltip("Nothing is saved: your profile and outfits stay as they are. Everyone sees survivor outfits; NPC bodies "
+               "and add-on looks only players with b4bcoop (and the add-on).");
+    ov_same_line();
+    ov_text_dim("your pick: %s%s", me.on ? me.label : "none", me.on && me.gave_up && !refusal[0] ? " (not applied: the host did not accept it)" : "");
+    // host, with other players or bots here: whose look the lists change (/model <player> <name>)
+    if (host_ok && np > 1) {
         static const char *items[17];
         static char names[17][72];
         static int idx[17];
@@ -1747,15 +1764,12 @@ static void models_panel(void) {
             if (i == p_target) cur = n;
             idx[n++] = i;
         }
-        ov_begin_disabled(!host_ok, why_host);
         ov_width(14);
         if (ov_combo("Change the look of##target", &cur, items, n)) {
             p_target = idx[cur];
             target_ps = p_target >= 0 ? pa[p_target] : NULL;
         }
         ov_tooltip("Host: pick a player or a bot, then click a look (/model <player> <name>); everyone is told.");
-        ov_end_disabled();
-        if (!host_ok) { ov_same_line(); ov_text_dim("(host only)"); }
     }
     UObject *tslot = p_target >= 0 ? ps_slot(pa[p_target]) : myslot;
     const CustSet *tcur = slot_set(tslot);
@@ -1771,70 +1785,92 @@ static void models_panel(void) {
         if (ov_button(lab)) ov_run("model #%d reset", p_target);
     }
     int blocked = !client && locked;
-    const char *why_blocked = "Model swaps are off (Host, below: allow them again).";
+    const char *why_blocked = "Model swaps are off (Host rules, below: allow them again).";
     if (blocked) ov_text_warn("%s", why_blocked);
-    static int kind;
-    static char search[48];
-    if (ov_radio("Survivors##k", kind == 0)) kind = 0;
-    ov_same_line();
-    if (ov_radio("NPC bodies##k", kind == 1)) kind = 1;
-    ov_same_line();
-    char kl[48];
-    snprintf(kl, sizeof kl, "Add-on outfits (%d)##k", n_outfs > 0 ? n_outfs : 0);
-    if (ov_radio(kl, kind == 2)) kind = 2;
-    ov_width(12);
-    ov_input_text("##search", search, sizeof search, "search");
-    ov_same_line();
-    if (ov_button("Clear##search")) search[0] = 0;
-    ov_same_line();
-    ov_text_dim("Click a name to wear it (/model <name>).%s", kind == 0 ? " Pieces add up; an outfit replaces them." : "");
-    ov_begin_disabled(blocked, why_blocked);
-    if (kind == 0) panel_survivors(tcur, search);
-    else if (kind == 1) panel_npcs(tcur, search);
-    else panel_outfits(tcur, search);
-    ov_end_disabled();
 
-    wlooks_panel(blocked, why_blocked);
-    if (p_target >= 0) ov_text_dim("Weapon looks are per player: these are yours.");
-
-    ov_heading("Everyone's look");
-    if (!np) ov_text_dim("Not in a game.");
-    else if (ov_table_begin("everyone", 4)) {
-        static const char *H[] = {"#", "Player", "Look", ""};
-        ov_table_header(H, 4);
-        for (int i = 0; i < np; i++) {
-            UObject *slot = ps_slot(pa[i]);
-            if (!slot) continue;
-            char nm[64], lab[40];
-            admin_display_name(pa[i], nm, sizeof nm);
-            ov_push_id(i);
-            ov_table_next(); ov_text("%d", i);
-            ov_table_next(); ov_text("%s%s%s", nm, pa[i] == mine ? " (you)" : "", ps_is_bot(pa[i], slot) ? " [bot]" : "");
-            ov_table_next();
-            look_str(slot, look, sizeof look);
-            ov_text("%s", look);
-            const Want *w = !client && pa[i] != mine ? want_on(pa[i], slot) : NULL;
-            if (w) ov_text_dim("host's pick: %s", w->label);
-            else if (pa[i] == mine && me.on) ov_text_dim("your pick: %s", me.label);
-            ov_table_next();
-            if (pa[i] == mine) { if (ov_button("Reset##row")) ov_run("model reset"); }
-            else {
-                ov_begin_disabled(!host_ok, why_host);
-                snprintf(lab, sizeof lab, "Change##%d", i);
-                if (ov_button(lab)) { p_target = i; target_ps = pa[i]; }
-                ov_tooltip("Pick a look for them above (/model <player> <name>).");
-                ov_same_line();
-                snprintf(lab, sizeof lab, "Reset##%d", i);
-                if (ov_button(lab)) ov_run("model #%d reset", i);
-                ov_tooltip("/model <player> reset");
-                ov_end_disabled();
-            }
-            ov_pop_id();
+    int nwl = wlooks_count();
+    if (search[0]) {
+        ov_text_dim("Everything that matches \"%s\": click a name to wear it (/model <name>).", search);
+        ov_begin_disabled(blocked, why_blocked);
+        int n = panel_survivors(tcur, search, "Survivors") + panel_npcs(tcur, search, "NPC bodies") +
+                panel_outfits(tcur, search, "Add-on outfits");
+        ov_end_disabled();
+        n += wlooks_panel(blocked, why_blocked, search, "Weapon looks");
+        if (!n) ov_text_dim("Nothing matches.");
+    } else {
+        char kl[48];   // two rows: the game's own looks, then your add-ons' (one row doesn't fit the window)
+        if (ov_radio("Survivors##k", *kind == 0)) *kind = 0;
+        ov_tooltip("Every survivor's outfits, heads, torsos and legs (also ones you haven't unlocked). Everyone sees them.");
+        ov_same_line();
+        if (ov_radio("NPC bodies##k", *kind == 1)) *kind = 1;
+        ov_tooltip("Fort Hope NPCs, other survivors, cultists. Players with b4bcoop see them; others see your survivor.");
+        snprintf(kl, sizeof kl, "Add-on outfits (%d)##k", n_outfs > 0 ? n_outfs : 0);
+        if (ov_radio(kl, *kind == 2)) *kind = 2;
+        ov_tooltip("Outfits your add-ons add. Players with the same add-on see them; others see your survivor.");
+        ov_same_line();
+        snprintf(kl, sizeof kl, "Weapon looks (%d)##k", nwl);
+        if (ov_radio(kl, *kind == 3)) *kind = 3;
+        ov_tooltip("Models your add-ons add for the game's weapons. Players with the same add-on see them.");
+        if (*kind < 3) ov_text_dim("Click a name to wear it (/model <name>).%s", *kind == 0 ? " Pieces add up; an outfit replaces them." : "");
+        ov_begin_disabled(blocked, why_blocked);
+        if (*kind == 0) panel_survivors(tcur, search, NULL);
+        else if (*kind == 1) panel_npcs(tcur, search, NULL);
+        else if (*kind == 2) panel_outfits(tcur, search, NULL);
+        ov_end_disabled();
+        if (*kind == 3) {
+            wlooks_panel(blocked, why_blocked, search, NULL);
+            if (p_target >= 0) ov_text_dim("Weapon looks are per player: these are yours.");
         }
-        ov_table_end();
     }
 
-    ov_heading("Host");
+    int rows = 0;
+    for (int i = 0; i < np; i++) rows += ps_slot(pa[i]) != NULL;
+    char eh[64];
+    snprintf(eh, sizeof eh, "Everyone's look (%d)###everyone", rows);
+    ov_separator();
+    if (ov_header(eh, 0)) {
+        if (!rows) ov_text_dim("Not in a game.");
+        else if (ov_table_begin("everyone", 4)) {
+            static const char *H[] = {"#", "Player", "Look", ""};
+            ov_table_header(H, 4);
+            for (int i = 0; i < np; i++) {
+                UObject *slot = ps_slot(pa[i]);
+                if (!slot) continue;
+                char nm[64], lab[40];
+                admin_display_name(pa[i], nm, sizeof nm);
+                ov_push_id(i);
+                ov_table_next(); ov_text("%d", i);
+                ov_table_next(); ov_text("%s%s%s", nm, pa[i] == mine ? " (you)" : "", ps_is_bot(pa[i], slot) ? " [bot]" : "");
+                ov_table_next();
+                look_str(slot, look, sizeof look);
+                ov_text("%s", look);
+                const Want *w = !client && pa[i] != mine ? want_on(pa[i], slot) : NULL;
+                if (w) ov_text_dim("host's pick: %s", w->label);
+                else if (pa[i] == mine && me.on) ov_text_dim("your pick: %s", me.label);
+                ov_table_next();
+                if (pa[i] == mine) { if (ov_button("Reset##row")) ov_run("model reset"); }
+                else {
+                    ov_begin_disabled(!host_ok, why_host);
+                    snprintf(lab, sizeof lab, "Change##%d", i);
+                    if (ov_button(lab)) { p_target = i; target_ps = pa[i]; }
+                    ov_tooltip("Pick a look for them above (/model <player> <name>).");
+                    ov_same_line();
+                    snprintf(lab, sizeof lab, "Reset##%d", i);
+                    if (ov_button(lab)) ov_run("model #%d reset", i);
+                    ov_tooltip("/model <player> reset");
+                    ov_end_disabled();
+                }
+                ov_pop_id();
+            }
+            ov_table_end();
+        }
+    }
+}
+
+// Host rules (looks.c, under every mode of the tab): model swaps allowed (/models on|off).
+void models_host_panel(void) {
+    int client = is_client();
+    ov_heading("Model swaps");
     ov_begin_perm(CMD_HOST);
     int on = client ? host_off != 1 : !locked;   // a client shows what the host's notices said
     if (ov_checkbox("Model swaps allowed##models", &on)) ov_run(on ? "models on" : "models off");
@@ -1844,7 +1880,7 @@ static void models_panel(void) {
                                                : "As the host last announced.");
     else {
         int none = !strcmp(addons_policy_name(), "none");
-        ov_text_dim("Players' add-on outfits and weapon looks: %s (add-on policy %s, Add-ons tab).", none ? "refused" : "allowed",
+        ov_text_dim("Players' add-on outfits and weapon looks: %s (add-on policy %s, below).", none ? "refused" : "allowed",
                     addons_policy_name());
         if (n_refused) ov_text_dim("Looks refused this session: %d.", n_refused);
     }
@@ -2175,7 +2211,6 @@ static void hook(uintptr_t at, const uint8_t *sig, size_t n, void *detour, void 
 }
 
 int models_init(void) {
-    overlay_add_panel("Models", 60, models_panel);
     wlooks_init();
     hook(ADDR_RUNREFRESH, SIG_RUNREFRESH, sizeof SIG_RUNREFRESH, (void *)runrefresh_detour, (void **)&orig_runrefresh, "campaign run save");
     hook(ADDR_APPLYSLOT, SIG_APPLYSLOT, sizeof SIG_APPLYSLOT, (void *)applyslot_detour, (void **)&orig_applyslot, "customization apply");

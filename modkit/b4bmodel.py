@@ -31,6 +31,10 @@ and installs); guide: docs/meshes.md. How it works: docs/investigations/mesh-mod
                                    garments must also hang like one (from above the crotch to well below it), parts
                                    named like accessories (necklace, belt, strap, boots) stay skinned, and only
                                    materials on slots that draw cloth (bUsedWithClothing: clothing, not skin) swing
+        [--skirt cloth|legs]   cloth (default): skirts as above; legs: skirts, dresses and coat tails are skinned to
+                               the pelvis and thighs instead (no cloth): each half follows its thigh, front and back
+                               stretch between the legs, crouching the front rests on the thighs. For rigs whose skirt
+                               bones hang under the pelvis (most Fortnite skirts) when cloth looks wrong in game
         [--hair texture|tint]   hair slot: texture (default) = your hair texture's own colours, masked by its alpha;
                                 tint = the game's hair shader, one colour root to tip (your texture's average)
         [--roughness MAT=MIN]...  lifts a material's roughness so its smoothest texel is MIN (MAT: a material name,
@@ -755,7 +759,7 @@ def textures_for(manifest, mesh_file, tt, static=False):
 NO_MATERIAL = "none"          # b4bfit's label for faces/objects without a material (--slot none=..., --tex none=...)
 
 
-def fit_args(o, keys=("bonemap", "drop", "weights", "twist", "facing", "face", "mouth", "face_eyes")):
+def fit_args(o, keys=("bonemap", "drop", "weights", "twist", "facing", "face", "mouth", "face_eyes", "skirt")):
     a = []
     for k in keys:
         if o.get(k): a += ["--" + k, o[k]]
@@ -990,6 +994,7 @@ def survivor(o):
     moddir = o.o["out"]
     tp = asset_file(o.get("outfit") or die("--outfit <3P outfit SKM> is required"), src)
     fp = asset_file(o["fp"], src) if o.get("fp") else None
+    if o.get("skirt", "cloth") not in ("cloth", "legs"): die(f"--skirt {o['skirt']}: cloth or legs")
     info = inspect(model, work, o.o["tex"])
     mats = [m for m in info["materials"] if m]
     log(f"model: {len(info['objects'])} objects, materials {mats}, "
@@ -1018,7 +1023,7 @@ def survivor(o):
     unrigged = not info["armatures"]
     run_blender(["character", "--template", template_glb(tp, work), "--source", os.path.abspath(model), "--out", rp,
                  "--mode", "3p", "--probe", "regions", "--proportions", o.get("proportions") or "own"] + fit_args(o.o) +
-                (["--rigged_out", rigged] if unrigged else []))
+                sim_args(tp, src) + (["--rigged_out", rigged] if unrigged else []))
     rig_args = ["--rigged", rigged] if unrigged and os.path.exists(rigged) else []
     regions = json.load(open(os.path.join(rp, "regions.json")))
     slot3, drop = auto_slots(mats, minfo, s3, user, regions, cloth_on=o.get("cloth", "auto") != "off")
@@ -1113,7 +1118,8 @@ def survivor(o):
     run_blender(["character", "--template", template_glb(tp, work), "--source", os.path.abspath(model), "--out", d3,
                  "--mode", "3p", "--lods", o.get("lods", "1,0.5,0.3,0.15,0.06"),
                  "--proportions", o.get("proportions") or "own"] + fit_args(o.o) + atlas_args + density_args(o.o) +
-                slotset3 + [x for m, s in slot3.items() for x in ("--slot", f"{m}={s}")] + dangle_args(o.o, tp, src))
+                slotset3 + [x for m, s in slot3.items() for x in ("--slot", f"{m}={s}")] + sim_args(tp, src) +
+                dangle_args(o.o, tp, src))
     man3 = json.load(open(os.path.join(d3, "manifest.json")))
     # the game's hair shader tints vertex-coloured strands (retail: mostly black); the colour-texture material doesn't
     # (the cultist's hair is white, the default)
@@ -1465,6 +1471,22 @@ def master_uses_clothing(master, src):
             pass
     n = master.split(".")[-1]
     return bool(re.search(r"outfit|cloth|hair|gear", n, re.I)) and not re.search(r"head|skin|eye", n, re.I)
+
+
+def sim_args(tp, src):
+    """--sim_bones for b4bfit: the bones the template's physics asset simulates (Karlee's backpack, Holly's hair ...).
+    The model gets no weights on them through the template's (cloth.simulated_bones; the physics asset is extracted
+    if it isn't yet)."""
+    import cloth
+    sim, pa = cloth.simulated_bones(tp, src)
+    if sim is None and find_b4bmod():
+        subprocess.run([sys.executable, find_b4bmod(), "extract", pa.split(".")[0], "-o", src], capture_output=True,
+                       text=True)
+        sim, pa = cloth.simulated_bones(tp, src)
+    if sim is None:
+        log(f"physics: {os.path.basename(tp)}'s physics asset {pa.split('.')[0]} could not be extracted: its "
+            f"simulated bones aren't known")
+    return ["--sim_bones", ",".join(sorted(sim))] if sim else []
 
 
 def dangle_args(o, tp, src):

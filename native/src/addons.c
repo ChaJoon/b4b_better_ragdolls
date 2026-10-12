@@ -15,8 +15,9 @@
 //   Each add-on is classified from its files (addonclass.c, #22): cosmetic or gameplay-affecting; the addoninfo's
 //   own `content=` line is only compared. Add-ons stay client-side (each player sees their own); what a joiner runs is
 //   checked by the joiner itself against the host's announced addons_policy, never sent (addons_mp.c).
-//   `~` window: the Add-ons tab (addons_panel, below): list, on/off (= /addons on|off), load order (Up/Down rewrite
-//   addonlist.txt: A[] keeps the mounted order, ord[] is the order in the file), details, host policy (addons_mp.c).
+//   `~` window: Installed in the "Looks & add-ons" tab (addons_installed_panel, below; looks.c draws the tab): list,
+//   on/off (= /addons on|off), load order (Up/Down rewrite addonlist.txt: A[] keeps the mounted order, ord[] is the
+//   order in the file), details, Wear / Use for the looks an add-on adds; Update / Remove from shop.c.
 #include <windows.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -496,7 +497,7 @@ static void read_list(void) {
         *v++ = 0;
         l = unquote(l); v = unquote(v);
         if (!*l || by_name(l)) continue;
-        if (shop_forget(l)) { list_dirty = 1; continue; }   // removed from the Browse tab, deleted at this start
+        if (shop_forget(l)) { list_dirty = 1; continue; }   // removed in the ~ window, deleted at this start
         Addon *a = add(l);
         if (a) a->on = !(!strcmp(v, "0") || !_stricmp(v, "off") || !_stricmp(v, "false"));
     }
@@ -596,7 +597,7 @@ int addons_scan(void) {
     if (!enabled_cfg) { LOG("addons: off (addons=0)"); return 0; }
     DWORD at = GetFileAttributesW(dirw);
     if (at == INVALID_FILE_ATTRIBUTES || !(at & FILE_ATTRIBUTE_DIRECTORY)) { LOG("addons: no add-ons folder (%s)", dir8); return 0; }
-    shop_early(dirw);   // the Browse tab's pending removals/updates (files replaced or deleted before anything is read)
+    shop_early(dirw);   // the ~ window's pending removals/updates (files replaced or deleted before anything is read)
     read_list();
     // *.pak in the folder: listed ones keep their place, new ones are appended sorted by name, switched on
     char *fresh[MAX_ADDONS]; int nfresh = 0;
@@ -689,7 +690,7 @@ const char *addons_title_of(const char *id8) {
     return NULL;
 }
 
-// The Browse tab (shop.c): an add-on in the folder other than `skip` (the shop's own <id>.pak) that is the same add-on
+// Get more (shop.c): an add-on in the folder other than `skip` (the shop's own <id>.pak) that is the same add-on
 // (content id = pak index SHA1) or adds one of the outfits / weapon looks a catalog entry lists in `adds`
 // ("outfit batman (mom); weapon look ak47 (AR02)"). Returns its file name, why = "same content" / "outfit batman".
 const char *addons_installed_like(const char *skip, const char *content_id, const char *adds, char *why, size_t wn) {
@@ -748,10 +749,10 @@ int addons_set_on(const char *name8, int on) {
     int ok = was == on || write_list();
     if (!ok) a->on = was;
     LeaveCriticalSection(&cs);
-    LOG("addons: %s %s (Browse tab) -> %s", on ? "on" : "off", a->name, ok ? "saved" : "write FAILED");
+    LOG("addons: %s %s (~ window) -> %s", on ? "on" : "off", a->name, ok ? "saved" : "write FAILED");
     return ok;
 }
-// ---- loading an add-on now (Browse tab Add/Update, Add-ons tab "on"; game thread) ----
+// ---- loading an add-on now (the ~ window: Get more Add/Update, Installed "on"; /addons on; game thread) ----
 // What can be mounted while the game runs, without a restart (docs/investigations/shop.md §1):
 //  - files at new paths: nothing loaded can refer to a path that didn't exist (added outfits, weapon looks);
 //  - files that replace existing ones (the game's, another add-on's, or the add-on's own older version) only when
@@ -906,7 +907,7 @@ int addons_load_now(const char *name8, int last, char *msg, size_t mn) {
     return 2;
 }
 
-// A pak just put into the folder (the Browse tab's Add): read it like at start, append it to addonlist.txt (switched
+// A pak just put into the folder (Get more's Add): read it like at start, append it to addonlist.txt (switched
 // on, last = wins) and load it now when that is safe (addons_load_now). Return values as addons_load_now, 0 = not added.
 int addons_add_runtime(const char *name8, char *msg, size_t mn) {
     if (!enabled_cfg) { snprintf(msg, mn, "add-ons are off (addons=0)"); return 0; }
@@ -930,12 +931,12 @@ int addons_add_runtime(const char *name8, char *msg, size_t mn) {
     EnterCriticalSection(&cs);
     int wrote = write_list();
     LeaveCriticalSection(&cs);
-    LOG("addons: added %s \"%s\" (Browse tab), %d file(s), id %s%s%s%s", a->name, a->title, a->nfiles, a->hash[0] ? a->hash : "-",
+    LOG("addons: added %s \"%s\" (~ window, Get more), %d file(s), id %s%s%s%s", a->name, a->title, a->nfiles, a->hash[0] ? a->hash : "-",
         a->valid ? "" : ", NOT LOADABLE: ", a->why, wrote ? "" : "; addonlist.txt write FAILED");
     return addons_load_now(name8, 0, msg, mn);
 }
 
-// The Browse tab's Update: the newer file `newpath` (.shop\<id>.pak.new, swapped in by the next start) of a loaded
+// Update (shop.c): the newer file `newpath` (.shop\<id>.pak.new, swapped in by the next start) of a loaded
 // add-on. Mounted now, above the old one, when it is cosmetic, touches no other add-on's files and none of the
 // assets it replaces (its older version's included) is in memory; the add-on's outfits / weapon looks then come
 // from the new file. Return values as addons_load_now.
@@ -1005,8 +1006,6 @@ void addons_mount(void) {
     }
 }
 
-static void addons_panel(void);   // the ~ window tab, at the end
-
 // init_thread: one chat notice for the player (shown once they are in a map).
 void addons_init(void) {
     int bad = 0, failed = 0;
@@ -1035,7 +1034,6 @@ void addons_init(void) {
     else if (nC) snprintf(msg, sizeof msg, "%d add-on conflicts. /addons for details", nC);
     else if (bad || failed) snprintf(msg, sizeof msg, "%d add-on(s) could not be loaded. /addons for details", bad + failed);
     if (msg[0]) { LOG("addons: notice: %s", msg); chat_local_later(msg); }
-    overlay_add_panel("Add-ons", 70, addons_panel);
 }
 
 // ---- chat /addons ----
@@ -1154,12 +1152,65 @@ void addons_slash(const char *verb, char *rest, Out *o) {
     out_printf(o, "usage: /addons [list]  /addons on|off <#>  /addons info <#>  /addons policy [any|cosmetic|none|match]\n");
 }
 
-// ---- ~ window: Add-ons tab (overlay.h; game thread). On/off runs /addons on|off (ov_run), the order buttons
-// addons_move(); both write addonlist.txt, which applies at the next start. Host section: addons_mp_panel(). ----
+// ---- ~ window, "Looks & add-ons" tab (looks.c; overlay.h; game thread): Installed, and the Wear / Use buttons of any
+// add-on row (Get more too). On/off runs /addons on|off (ov_run), the order buttons addons_move(); both write
+// addonlist.txt. Update / Remove / Undo: shop.c. Host rules (policy): addons_mp_panel(), drawn by looks.c. ----
+static void looks_count(const Addon *a, int *no, int *nw) {
+    *no = *nw = 0;
+    for (int i = 0; i < nOF; i++) *no += OF[i].addon == a;
+    for (int i = 0; i < nWP; i++) *nw += WP[i].addon == a;
+}
+// Wear (an outfit) / Use (a weapon look) for yourself, while the add-on is loaded; several looks: "Wear (n)" shows
+// them in Wear. 1 = something drawn.
+int addons_look_buttons(const char *file) {
+    Addon *a = by_name(file);
+    if (!a || !a->present || a->mounted <= 0) return 0;
+    int no, nw;
+    looks_count(a, &no, &nw);
+    if (!no && !nw) return 0;
+    char lab[96];
+    ov_begin_disabled(models_off(), "Model swaps are off (Host rules, below).");
+    if (no + nw == 1) {
+        const char *name = NULL;
+        for (int i = 0; i < nOF && !name; i++) if (OF[i].addon == a) name = OF[i].name;
+        for (int i = 0; i < nWP && !name; i++) if (WP[i].addon == a) name = WP[i].name;
+        snprintf(lab, sizeof lab, "%s##%s", no ? "Wear" : "Use", name);
+        if (ov_button(lab)) ov_run("model %s", name);
+        ov_tooltip(no ? "You wear it now (/model <name>): players with the same add-on see it on you, the others your survivor."
+                      : "Your weapon of that type shows it now (/model <name>); players without the add-on see the normal weapon.");
+    } else {
+        snprintf(lab, sizeof lab, "Wear (%d)##looks:%s", no + nw, a->name);
+        if (ov_button(lab)) looks_show(LOOKS_WEAR, a->title, -1);
+        ov_tooltip("Its outfits and weapon looks, in Wear.");
+    }
+    ov_end_disabled();
+    return 1;
+}
+static const char *kind_str(const Addon *a, char *b, size_t n) {
+    int no, nw;
+    looks_count(a, &no, &nw);
+    if (!a->valid) snprintf(b, n, "-");
+    else if (a->cls.gameplay) snprintf(b, n, "gameplay");
+    else if (no && nw) snprintf(b, n, "%d outfit%s, %d weapon look%s", no, no == 1 ? "" : "s", nw, nw == 1 ? "" : "s");
+    else if (no) { if (no == 1) snprintf(b, n, "outfit"); else snprintf(b, n, "%d outfits", no); }
+    else if (nw) {
+        const char *code = "";
+        for (int i = 0; i < nWP; i++) if (WP[i].addon == a) code = WP[i].code;
+        if (nw == 1) snprintf(b, n, "weapon look (%s)", code); else snprintf(b, n, "%d weapon looks", nw);
+    } else snprintf(b, n, "replacement");
+    return b;
+}
+static int row_match(const Addon *a, const char *s) {
+    if (!*s) return 1;
+    size_t n = strlen(s);
+    const char *f[6] = {a->title, a->name, a->author, a->category, a->desc, a->version};
+    for (int k = 0; k < 6; k++) for (const char *h = f[k]; *h; h++) if (!_strnicmp(h, s, n)) return 1;
+    for (int i = 0; i < nOF; i++) if (OF[i].addon == a) for (const char *h = OF[i].name; *h; h++) if (!_strnicmp(h, s, n)) return 1;
+    for (int i = 0; i < nWP; i++) if (WP[i].addon == a) for (const char *h = WP[i].name; *h; h++) if (!_strnicmp(h, s, n)) return 1;
+    return 0;
+}
 static void panel_details(Addon *a) {
-    char b[160];
-    ov_heading("Details");
-    ov_text("%s%s%s", a->title, a->version[0] ? "  v" : "", a->version);
+    char b[160], lab[MAX_PATH + 24];
     if (a->author[0] || a->category[0])
         ov_text_dim("%s%s%s%s", a->author[0] ? "by " : "", a->author, a->author[0] && a->category[0] ? ", " : "", a->category);
     if (a->desc[0]) ov_text_dim("%s", a->desc);
@@ -1169,7 +1220,7 @@ static void panel_details(Addon *a) {
     else {
         ov_text("Content: %s", addon_class_str(a, b, sizeof b));
         if (a->cls.gameplay) ov_text_dim("First gameplay file: %s. With it on, you can't join hosts with "
-                                         "addons_policy=cosmetic (the default) or none.", a->cls.reason);
+                                         "addons_policy=cosmetic or none.", a->cls.reason);
         int claim_g = !_strnicmp(a->claim, "gameplay", 8), claim_c = !_strnicmp(a->claim, "cosmetic", 8);
         if ((claim_g || claim_c) && claim_g != a->cls.gameplay)
             ov_text_dim("Its author labels it %s; the files decide.", a->claim);
@@ -1178,12 +1229,28 @@ static void panel_details(Addon *a) {
         if (ov_button("Copy##id")) ov_copy(a->hash);
         ov_tooltip("The content id (pak index SHA1). Only a host with addons_policy=match shows joiners its own (first 8 digits).");
     }
-    int no = 0;
-    for (int i = 0; i < nOF; i++) {
-        const Outfit *o = &OF[i];
-        if (o->addon != a) continue;
-        if (!no++) ov_text("Outfits it adds (wear one: Models tab or /model <name>):");
-        ov_text_dim("  %s: %s (%s)", o->name, o->title, o->hero);
+    int no, nw;
+    looks_count(a, &no, &nw);
+    if (no + nw) {
+        ov_text(a->mounted > 0 ? "Looks it adds (for yourself; /model <name>):" : "Looks it adds (once it is loaded):");
+        ov_begin_disabled(a->mounted <= 0 || models_off(), a->mounted <= 0 ? "Not loaded yet (see State)." : "Model swaps are off (Host rules, below).");
+        for (int i = 0; i < nOF; i++) {
+            const Outfit *o = &OF[i];
+            if (o->addon != a) continue;
+            snprintf(lab, sizeof lab, "Wear##d:%s", o->name);
+            if (ov_button(lab)) ov_run("model %s", o->name);
+            ov_same_line();
+            ov_text_dim("outfit %s: %s (made on %s)", o->name, o->title, o->hero);
+        }
+        for (int i = 0; i < nWP; i++) {
+            const Weapon *w = &WP[i];
+            if (w->addon != a) continue;
+            snprintf(lab, sizeof lab, "Use##d:%s", w->name);
+            if (ov_button(lab)) ov_run("model %s", w->name);
+            ov_same_line();
+            ov_text_dim("weapon look %s: %s (%s)", w->name, w->title, w->code);
+        }
+        ov_end_disabled();
     }
     for (int i = 0; i < nC; i++) {
         const Conflict *c = &C[i];
@@ -1196,85 +1263,112 @@ static void panel_details(Addon *a) {
         if (c->mixed) ov_text_warn("Mixes parts of one asset with \"%s\" (e.g. %s): may crash, switch one off.", other->title, c->mixed_example);
     }
     if (ov_button("Show in the log (/addons info)")) ov_run("addons info %s", a->name);
+    if (!shop_pending(a->name)) {
+        ov_same_line();
+        snprintf(lab, sizeof lab, "Remove##%s", a->name);
+        if (ov_button_confirm(lab, "Click again to remove")) { const char *e = shop_remove(a->name); if (e) overlay_note(e); }
+        ov_tooltip("Switched off now; its file is deleted when the game next starts (Undo until then).");
+    }
 }
 
-static void addons_panel(void) {
+static void load_checkbox(void) {
+    const char *v = cmds_ini_value("addons");
+    int load = !(v && atoi(v) == 0);
+    if (ov_checkbox("Load add-ons##addons", &load)) ov_setting("addons", load ? NULL : "0", 1);
+    ov_tooltip("Off = addons=0 in b4bcoop.ini: no add-on is loaded (troubleshooting). Applies after a restart.");
+}
+static void folder_section(void) {
+    if (!ov_header("Folder and troubleshooting###addonsfolder", 0)) return;
+    ov_text("%s", dir8);
+    ov_same_line();
+    if (ov_button("Copy##dir")) ov_copy(dir8);
+    ov_text_dim("By hand: put an add-on's .pak there (an add-on zip: extract it into the game folder), then restart the "
+                "game; delete the .pak to remove it. addonlist.txt there holds on/off and the load order.");
+    if (enabled_cfg) load_checkbox();
+    if (ov_button("List in the log (/addons)")) ov_run("addons");
+}
+
+// Installed: the add-ons in load order with on/off, kind and state, Wear / Use, Update, Up / Down; click one for its
+// details (under its row) with Remove.
+void addons_installed_panel(const char *search) {
     static ULONGLONG t_sync;
     static int sel = -1;   // index into A
     if (GetTickCount64() - t_sync > 1000) { t_sync = GetTickCount64(); list_sync(); }
     const char *v = cmds_ini_value("addons");
     int load = !(v && atoi(v) == 0);
-    if (ov_checkbox("Load add-ons##addons", &load)) ov_setting("addons", load ? NULL : "0", 1);
-    ov_tooltip("Off = addons=0 in b4bcoop.ini: no add-on is loaded (troubleshooting). Applies after a restart.");
+    if (!enabled_cfg) { ov_text_warn("Add-ons are off (addons=0 in b4bcoop.ini): none is loaded."); load_checkbox(); }
     if (load != enabled_cfg) ov_text_warn("Add-ons will be %s after you restart the game.", load ? "loaded" : "off");
     if (unavailable[0] && enabled_cfg) ov_text_warn("Add-ons are off: %s.", unavailable);
+    if (!enabled_cfg) { folder_section(); return; }
     int present = 0, nsw = 0;
     for (int i = 0; i < nA; i++) if (A[i].present) { present++; nsw += A[i].on != A[i].on_at_start; }
-    if (enabled_cfg && (nsw || order_changed()))
+    if (nsw || order_changed())
         ov_text_warn("%s differs from what is loaded now (%d switched%s): restart the game to apply.", LIST_NAME, nsw,
                      order_changed() ? ", load order changed" : "");
-    if (!enabled_cfg) ov_text_dim("Add-ons are off (addons=0).");
-    else if (!present) ov_text_dim("No add-ons. Put add-on .pak files in the folder below and restart the game.");
+    if (!present) ov_text_dim("No add-ons yet. Get more (above) lists free ones; or put add-on .pak files in the folder (below) and restart the game.");
     else {
-        ov_text_dim("Load order: top to bottom; when two add-ons change the same file, the one further down wins.");
-        if (ov_table_begin("addons", 5)) {
-            static const char *H[] = {"On", "#", "Add-on", "Kind", "Order"};
-            ov_table_header(H, 5);
-            int k = 0;
-            for (int q = 0; q < nA; q++) {
-                int i = ord[q];
-                Addon *a = &A[i];
-                if (!a->present) continue;
-                k++;
-                char lab[MAX_PATH + 24], kinds[64];
-                ov_push_id(i);
-                ov_table_next();
-                int on = a->on;
-                snprintf(lab, sizeof lab, "##on:%s", a->name);
-                if (ov_checkbox(lab, &on)) ov_run("addons %s %s", on ? "on" : "off", a->name);
-                ov_tooltip("Writes addonlist.txt (/addons on|off). On: loaded right away when that is safe, else at the next start. Off: at the next start.");
-                ov_table_next(); ov_text("%d", k);
-                ov_table_next();
-                snprintf(lab, sizeof lab, "%s%s%s##sel:%s", a->title, a->version[0] ? " " : "", a->version, a->name);
-                if (ov_selectable(lab, sel == i)) sel = sel == i ? -1 : i;
-                if (!a->valid) ov_text_warn("not loaded: %s", a->why);
-                else ov_text_dim("%s%s", state_of(a), pos_now(a) != a->pos0 ? ", moves after restart" : "");
-                ov_table_next();
-                if (!a->valid) ov_text_dim("-");
-                else if (a->cls.gameplay) ov_text_warn("gameplay");
-                else { ov_text("cosmetic"); if (a->cls.kinds) ov_text_dim("%s", addonclass_kinds(a->cls.kinds, kinds, sizeof kinds)); }
-                ov_table_next();
-                ov_begin_disabled(k == 1, "Already first.");
-                snprintf(lab, sizeof lab, "Up##%s", a->name);
-                if (ov_button(lab) && addons_move(a, -1) < 0) overlay_note("could not write addonlist.txt");
-                ov_end_disabled();
-                ov_same_line();
-                ov_begin_disabled(k == present, "Already last.");
-                snprintf(lab, sizeof lab, "Down##%s", a->name);
-                if (ov_button(lab) && addons_move(a, 1) < 0) overlay_note("could not write addonlist.txt");
-                ov_end_disabled();
-                ov_pop_id();
+        shop_check_button();
+        ov_text_dim("%d add-on(s) in load order: further down wins when two change the same file.", present);
+        if (sel >= 0 && (sel >= nA || !A[sel].present)) sel = -1;
+        int open = ov_table_begin("addons", 4), k = 0, shown = 0;
+        for (int q = 0; q < nA && open; q++) {
+            int i = ord[q];
+            Addon *a = &A[i];
+            if (!a->present) continue;
+            k++;
+            if (!row_match(a, search)) continue;
+            shown++;
+            char lab[MAX_PATH + 24], kind[64];
+            ov_push_id(i);
+            ov_table_next();
+            int on = a->on;
+            snprintf(lab, sizeof lab, "##on:%s", a->name);
+            if (ov_checkbox(lab, &on)) ov_run("addons %s %s", on ? "on" : "off", a->name);
+            ov_tooltip("On / off (/addons on|off, writes addonlist.txt). On: loaded right away when that is safe, else at the "
+                       "next start. Off: at the next start.");
+            ov_table_next();
+            snprintf(lab, sizeof lab, "%d. %s%s%s##sel:%s", k, a->title, a->version[0] ? " " : "", a->version, a->name);
+            if (ov_selectable(lab, sel == i)) sel = sel == i ? -1 : i;
+            ov_tooltip("Click for the details (author, content, looks it adds, conflicts, Remove).");
+            kind_str(a, kind, sizeof kind);
+            if (!a->valid) ov_text_warn("not loaded: %s", a->why);
+            else if (a->cls.gameplay) ov_text_warn("gameplay, %s%s", state_of(a), pos_now(a) != a->pos0 ? ", moves after restart" : "");
+            else ov_text_dim("%s, %s%s", kind, state_of(a), pos_now(a) != a->pos0 ? ", moves after restart" : "");
+            shop_item_note(a->name);
+            ov_table_next();
+            addons_look_buttons(a->name);
+            shop_installed_actions(a->name);
+            ov_table_next();
+            ov_begin_disabled(k == 1, "Already first.");
+            snprintf(lab, sizeof lab, "Up##%s", a->name);
+            if (ov_button(lab) && addons_move(a, -1) < 0) overlay_note("could not write addonlist.txt");
+            ov_tooltip("Earlier in the load order (applies at the next start).");
+            ov_end_disabled();
+            ov_same_line();
+            ov_begin_disabled(k == present, "Already last.");
+            snprintf(lab, sizeof lab, "Down##%s", a->name);
+            if (ov_button(lab) && addons_move(a, 1) < 0) overlay_note("could not write addonlist.txt");
+            ov_tooltip("Later in the load order: wins conflicts (applies at the next start).");
+            ov_end_disabled();
+            ov_pop_id();
+            if (sel == i) {   // the details open under the row: this table ends, a new one (same columns) follows
+                ov_table_end();
+                panel_details(a);
+                ov_separator();
+                open = ov_table_begin("addons", 4);
             }
-            ov_table_end();
         }
-        int shown = 0;
+        if (open) ov_table_end();
+        if (!shown) ov_text_dim("No add-on matches the search.");
+        int conflicts = 0;
         for (int i = 0; i < nC; i++) {
             const Conflict *c = &C[i];
-            if (!shown++) ov_heading("Conflicts (as loaded now)");
+            if (!conflicts++) ov_heading("Conflicts (as loaded now)");
             if (c->same) ov_text_warn("\"%s\" is installed twice (%s and %s): switch one off.", A[c->winner].title, A[c->loser].name, A[c->winner].name);
             else if (c->names[0]) ov_text_warn("%s and %s both add %s (%s's is used): switch one off.", A[c->loser].name, A[c->winner].name, c->names, A[c->winner].name);
             if (c->nfiles && !c->same) ov_text("\"%s\" overrides \"%s\" (%d file(s))", A[c->winner].title, A[c->loser].title, c->nfiles);
             if (c->mixed) ov_text_warn("\"%s\" and \"%s\" mix parts of one asset: may crash, switch one off.", A[c->loser].title, A[c->winner].title);
         }
-        if (sel >= 0 && sel < nA && A[sel].present) panel_details(&A[sel]);
-        else ov_text_dim("Click an add-on for its details.");
     }
-    ov_heading("Folder");
-    ov_text("%s", dir8);
-    ov_same_line();
-    if (ov_button("Copy##dir")) ov_copy(dir8);
-    ov_text_dim("Install: put the add-on's .pak there (an add-on zip: extract it into the game folder), then restart the "
-                "game. Remove: delete the .pak. addonlist.txt there holds on/off and the load order.");
-    if (ov_button("List in the log (/addons)")) ov_run("addons");
-    addons_mp_panel();
+    folder_section();
 }
