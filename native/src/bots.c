@@ -2,7 +2,7 @@
 // off. Why retail bots often ignore such a ping and what the host changes: the "the fix" section below and
 // docs/investigations/bot-pings.md.
 // Heal requests: a player presses bot_heal_key and the nearest bot with a healing item heals them (host decides; a
-// client's request travels as a marked retail comm-wheel ping); ini bot_heal_requests=0 = off. "heal requests" below.
+// client's request travels as a marked retail comm-wheel ping); ini bot_heal_requests=1 = on (off by default). "heal requests" below.
 //
 // Dev `botheal`: heroes (health, the bots' max, heal items with use/target types, thresholds, item-use target) and
 // open jobs; `botheal hurt <hero#> <pct>` (HealthComponent.SetHealth, host), `ask [hero#]` (as the key / for that hero),
@@ -892,8 +892,8 @@ static void spawnping_detour(UObject *comp, UObject *pc, const void *xform, uint
 // bump). Feedback: a chat notice to everyone when a bot takes the job ("<player> needs healing: <bot> is on the way"),
 // to the requester when nothing happens and why; the bot's own healing barks play as in retail. (The requester's own
 // "Low_Health" voice line can't be played: DialogueComponent.SayLine looks for the Wwise event DX_<Voice>_<Response>,
-// the real events are Dx_B_<Voice>_<Response>_NN; mesh-mods.md.) ini bot_heal_requests=0 = off (host: requests
-// ignored; any machine: no key).
+// the real events are Dx_B_<Voice>_<Response>_NN; mesh-mods.md.) ini bot_heal_requests=1 = on (host: requests
+// ignored, the host's own key says so; a client's key always asks: its host decides).
 #define ADDR_ITEMUSE_SCORE VA(0x1415D6030ull)   // float ScoreItemUse(ABotController*, FBotItemUseInfo*)
 static const uint8_t SIG_ITEMUSE_SCORE[] = {0x40,0x55,0x53,0x41,0x57,0x48,0x8d,0xac,0x24,0x50,0xfc,0xff,0xff,0x48,0x81,0xec,
                                             0xb0,0x04,0x00,0x00,0x48,0x8b,0xda,0x4c};
@@ -930,7 +930,7 @@ typedef void (*CommPingFn)(UObject *comp, UObject *pc, const float *xform, uint8
 static ItemScoreFn orig_item_score;
 static ItemEvalFn orig_item_eval;
 static CommPingFn orig_commping;
-static int heal_requests = 1;          // ini bot_heal_requests=0 turns it off
+static int heal_requests = 0;          // ini bot_heal_requests=1 turns it on (host; a client's key always asks)
 static int heal_key = 'H';             // ini bot_heal_key (VK), 0 = no key
 static int heal_hooked;
 
@@ -1268,7 +1268,11 @@ static void heal_ask_local(void) {
     UObject *pc = ue_local_pc(), *pawn = pc ? ue_get_ptr(pc, "Pawn") : NULL;
     char why[160];
     if (!pawn) return;
-    if (!admin_is_client()) { LOG("bots: heal request (host): %s", heal_request(pawn, pc, why, sizeof why)); return; }
+    if (!admin_is_client()) {
+        if (!heal_requests) { chat_local("Heal requests are off: ~ window, Cheats tab, Bots heal you on request."); return; }
+        LOG("bots: heal request (host): %s", heal_request(pawn, pc, why, sizeof why));
+        return;
+    }
     UObject *pw = ue_get_ptr(pc, "PlayerWaypoints");
     UFunction *f = fn_of(pw, "ServerSpawnCommWheelPing");
     static uint8_t p[256];
@@ -1303,7 +1307,7 @@ void bots_tick(float dt) {
 #ifndef B4B_RELEASE
     heal_key_test_tick();
 #endif
-    if (heal_key && heal_requests) {
+    if (heal_key && (heal_requests || admin_is_client())) {   // a client asks; its host decides
         int down = cmds_hotkey_down(heal_key);
         if (down && !was_down && GetTickCount64() - last > 1500) { last = GetTickCount64(); heal_ask_local(); }
         was_down = down;
@@ -1513,7 +1517,7 @@ int bots_toolkit_doors(void) { return ping_count ? toolkit_doors : -1; }
 
 int bots_live(const char *key, const char *val) {
     if (!strcmp(key, "bot_toolkit_doors")) toolkit_doors = !val || atoi(val) != 0;
-    else if (!strcmp(key, "bot_heal_requests")) heal_requests = !val || atoi(val) != 0;
+    else if (!strcmp(key, "bot_heal_requests")) heal_requests = val && atoi(val) != 0;
     else if (!strcmp(key, "bot_heal_key")) heal_key = val ? cmds_parse_key(val) : 'H';
     else return 0;
     return 1;

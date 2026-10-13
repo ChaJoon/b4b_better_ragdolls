@@ -114,7 +114,7 @@ like `/kick 1` use. The host also sees each player's ping and Steam ID (`#1 Alex
 - Otherwise you're told why: `You are not hurt.`, `No bot carries a healing item.`, `No bot can heal you right
   now.` (e.g. all bots too far or busy, or your temporary health is already full), `No bot reached you in time.`
 - Down (incapacitated)? The bots revive you on their own; the key only says `You are down: ...`.
-- The host decides, for everyone, with **Bots heal you on request** in the `~` window's Cheats tab
+- Off by default. The host decides, for everyone, with **Bots heal you on request** in the `~` window's Cheats tab
   (`bot_heal_requests`; no cheats needed). In someone else's game the host needs a b4bcoop version that has this;
   an older host shows a "Group up" marker at your feet instead.
 - Without it, bots heal a teammate only below about 75% health (65% in a fight), never in a saferoom, and after
@@ -703,7 +703,7 @@ join=steam:7656119XXXXXXXXXX
 |---|---|---|
 | `steam_p2p` | `1` | `0`: no joins through Steam at all (then only `host_ip=1` joins work) |
 | `bot_toolkit_doors` | `1` | Host (`~` Cheats tab, works without cheats): when anyone pings a locked supply-stash door (the ones that need a toolkit), the nearest bot carrying a toolkit (up to 40 m away) goes and opens it, also when the ping hit a teammate in front of the door. `0`: bots answer such pings only as in the original game (only from close by, and only a clean ping on the door) |
-| `bot_heal_requests` | `1` | Host (`~` Cheats tab, works without cheats): a player's heal key sends the nearest bot with a healing item to heal them. `0`: the game's own healing only; a request gets `The host has heal requests off.`, and your own key does nothing |
+| `bot_heal_requests` | `0` | Host (`~` Cheats tab, works without cheats): `1` = a player's heal key sends the nearest bot with a healing item to heal them. `0`: the game's own healing only; a client's request gets `The host has heal requests off.`, the host's own key says how to turn it on |
 | `outfits_screen` | `1` | `0`: add-on outfits are not offered in the game's customization screen (only `/model`); restart to apply |
 | `presence_addr` | your LAN address | With `host_ip=1`: the address friends' **Join Game** connects to, e.g. `presence_addr=203.0.113.5:7777` (your public IP) |
 | `netguard_eos` | `1` | `0`: don't switch off the Epic Online Services network layer (troubleshooting only) |

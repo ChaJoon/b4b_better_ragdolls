@@ -147,7 +147,7 @@ untether|clear|script`, `send <door#>`, `fix on|off`, `watch`, `call <hex> <Func
 
 Static analysis plus live runs on lane 2 (Flatpak Steam, `multi.sh 1` and `2`, Evansburgh B "Tunnel of Blood", Easy;
 2026-10-12). Implementation: `native/src/bots.c` "heal requests" (host decides; key on every machine; ini
-`bot_heal_requests=0` = retail, `bot_heal_key=` (default H)).
+`bot_heal_requests=1` = on, off by default (= retail), `bot_heal_key=` (default H)).
 
 Dan's wish: a key that means "bots, I'm low, heal me", instead of hoping a bot decides to.
 
@@ -239,8 +239,9 @@ When several bots pass all of that they all go at once (seen: two medkits and pi
     the next candidate; none left: "No bot can heal you right now." ("No bot carries a healing item." when none has
     one). 40 s: "No bot reached you in time."
   - Jobs are keyed by object index (map change safe), at most 4 at once, one per requester and per bot.
-- `bot_heal_requests=0` (host, also the `~` Cheats tab checkbox "Bots heal you on request"): requests ignored, a client
-  gets "The host has heal requests off."; on any machine with it off the key does nothing.
+- `bot_heal_requests` is off by default (2026-10-13, Dan; host, also the `~` Cheats tab checkbox "Bots heal you on
+  request"): requests ignored, a client gets "The host has heal requests off.", the host's own key tells it where to turn
+  it on. A client's key always sends the request (its own setting doesn't matter: the host decides).
 
 ### Live results (fix on)
 
