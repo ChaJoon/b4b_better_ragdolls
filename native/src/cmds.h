@@ -268,6 +268,8 @@ const char *shop_name(int i);                 // its name (NULL: no such entry)
 int shop_phase(char *msg, size_t n);          // 0 idle, 1 getting the list, 2 ready, 3 failed; msg: its last status line
 int shop_busy(void);                          // a list fetch or a download runs
 void shop_show_thumbs(void);                  // the tab shows the list: its thumbnails are fetched (once) and shown
+#define SHOP_PREVIEW_SIDE 320
+int shop_preview(int i, int *w, int *h);      // entry i's large picture for a tooltip (one texture; its w x h top left)
 const char *shop_fetch(void);                 // Refresh: get the list again; NULL or why not
 const char *shop_add(int i);                  // Add, or Update when installed: NULL (downloading) or why not
 const char *shop_remove(const char *file);    // Remove (any add-on): off now, deleted at the next start; NULL or why not

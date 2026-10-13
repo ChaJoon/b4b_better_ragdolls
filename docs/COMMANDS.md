@@ -43,7 +43,7 @@ turns the window off.
 
 Every add-on in one table: the free ones in the add-on shop (see [Add-ons from the shop](#add-ons-from-the-shop)) and
 the ones in your add-ons folder (also ones you put there by hand). The shop's list is fetched by itself the first time
-you are in Fort Hope after starting the game; **Refresh** gets it again. Columns: the picture, the name and file size
+you are in Fort Hope after starting the game; **Refresh** gets it again. Columns: the picture (hover it for a large one), the name and file size
 (hover for the author, description and license), whether it is installed (version, or "v1.1 available"), and what you
 can do:
 

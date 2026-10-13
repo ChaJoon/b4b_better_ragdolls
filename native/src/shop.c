@@ -40,8 +40,10 @@
 // published; shop.md §2). raw.githubusercontent.com is inside netguard's updater scope. It is verified with the shop
 // key only (signkeys.h), never the release key.
 #define DEFAULT_CATALOG "https://raw.githubusercontent.com/actuallydan/back4blood-shop/main/catalog.json"
-#define THUMB_SIDE 96        // thumbnails are scaled down to fit 96x96 (36 KB each on the GPU)
-#define MAX_THUMBS 128       // per session (ov_texture has OV_MAX_TEX)
+#define THUMB_SIDE 128       // thumbnails are scaled down to fit 128x128 (64 KB each on the GPU)
+#define MAX_THUMBS 256       // per session (ov_texture has OV_MAX_TEX)
+#define PREVIEW_SIDE SHOP_PREVIEW_SIDE   // the large picture of the hovered thumbnail: one texture, its pixels replaced
+#define UPLOADS_PER_FRAME 2  // decoded thumbnails handed to the GPU per frame (each upload waits for the GPU once)
 #define SHOP_DIR L".shop"
 static const uint8_t SHOP_PUBKEY[32] = {B4B_SHOP_PUBKEY_BYTES};
 
@@ -153,7 +155,8 @@ static volatile LONG64 dl_got;
 static int dl_item = -1;            // the running download
 static char retry_id[40];           // a verified download whose loading waits for the game's loader (addons_* 3)
 static ULONGLONG retry_until;
-typedef struct { uint8_t sha[32]; int tex; uint8_t *rgba; int w, h; } Thumb;   // by thumbnail SHA-256, whole session
+// by thumbnail SHA-256, whole session; src: the verified file, kept for the large picture (shop_preview)
+typedef struct { uint8_t sha[32]; int tex; uint8_t *rgba; int w, h; uint8_t *src; size_t nsrc; } Thumb;
 static Thumb thumbs[MAX_THUMBS];
 static int nthumbs;
 
@@ -302,17 +305,16 @@ static DWORD WINAPI thumb_worker(void *arg) {
         uint8_t *rgba = memcmp(d, t->j[i].sha, 32) ? NULL : img_thumb(img, in, THUMB_SIDE, &w, &h);
         if (memcmp(d, t->j[i].sha, 32)) LOG("shop: thumbnail of %s does not match the list's SHA-256: not shown", t->j[i].id);
         else if (!rgba) LOG("shop: thumbnail of %s is not a PNG/JPEG picture", t->j[i].id);
-        free(img);
-        if (!rgba) continue;
+        if (!rgba) { free(img); continue; }
         EnterCriticalSection(&cs);
         if (nthumbs < MAX_THUMBS && !thumb_of(t->j[i].sha)) {
             Thumb *n = &thumbs[nthumbs];
-            memcpy(n->sha, t->j[i].sha, 32); n->rgba = rgba; n->w = w; n->h = h; n->tex = 0;
+            memcpy(n->sha, t->j[i].sha, 32); n->rgba = rgba; n->w = w; n->h = h; n->tex = 0; n->src = img; n->nsrc = in;
             nthumbs++;
-            rgba = NULL;
+            rgba = NULL; img = NULL;
         }
         LeaveCriticalSection(&cs);
-        free(rgba);
+        free(rgba); free(img);
     }
     netguard_updater_scope(0, NULL);
     free(t);
@@ -641,14 +643,46 @@ int shop_row(int i, ShopRow *r) {
 void shop_show_thumbs(void) {
     if (!enabled || !cat.n) return;
     want_thumbs();
+    int up = 0;   // a few per frame: a whole list arriving at once would stall a frame
     EnterCriticalSection(&cs);
-    for (int t = 0; t < nthumbs; t++)
+    for (int t = 0; t < nthumbs && up < UPLOADS_PER_FRAME; t++)
         if (thumbs[t].rgba && !thumbs[t].tex) {
             thumbs[t].tex = ov_texture(thumbs[t].rgba, thumbs[t].w, thumbs[t].h);
             free(thumbs[t].rgba); thumbs[t].rgba = NULL;
             if (!thumbs[t].tex) thumbs[t].tex = -1;
+            up++;
         }
     LeaveCriticalSection(&cs);
+}
+// The large picture of entry i (its thumbnail hovered): decoded from the kept file to fit PREVIEW_SIDE, into the top
+// left of the one preview texture (*pw, *ph: its size there). 0 = none.
+int shop_preview(int i, int *pw, int *ph) {
+    static int tex, sw, sh;
+    static uint8_t shown[32], *px;
+    *pw = sw; *ph = sh;
+    if (!enabled || i < 0 || i >= cat.n || !cat.items[i].thumb[0]) return 0;
+    const uint8_t *sha = cat.items[i].thumb_sha256;
+    if (tex > 0 && !memcmp(shown, sha, 32)) return tex;
+    *pw = *ph = 0;
+    EnterCriticalSection(&cs);
+    Thumb *t = thumb_of(sha);
+    uint8_t *src = t ? t->src : NULL;
+    size_t n = t ? t->nsrc : 0;
+    LeaveCriticalSection(&cs);   // src stays: thumbnails are never freed
+    if (!src) return 0;
+    int w = 0, h = 0;
+    uint8_t *rgba = img_thumb(src, n, PREVIEW_SIDE, &w, &h);
+    if (!rgba) return 0;
+    if (!px && !(px = malloc(PREVIEW_SIDE * PREVIEW_SIDE * 4))) { free(rgba); return 0; }
+    memset(px, 0, PREVIEW_SIDE * PREVIEW_SIDE * 4);
+    for (int y = 0; y < h; y++) memcpy(px + (size_t)y * PREVIEW_SIDE * 4, rgba + (size_t)y * w * 4, (size_t)w * 4);
+    free(rgba);
+    if (tex <= 0) tex = ov_texture(px, PREVIEW_SIDE, PREVIEW_SIDE);
+    else if (!ov_texture_set(tex, px, PREVIEW_SIDE, PREVIEW_SIDE)) return 0;
+    if (tex <= 0) { tex = -1; return 0; }
+    memcpy(shown, sha, 32);
+    *pw = sw = w; *ph = sh = h;
+    return tex;
 }
 const char *shop_fetch(void) { return fetch(); }
 const char *shop_add(int i) { return add(i); }

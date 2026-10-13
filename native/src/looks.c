@@ -18,7 +18,8 @@
 
 #define TAB "Add-ons"
 #define MAX_ROWS (MAX_ADDONS + 256)   // + SHOP_MAX_ITEMS (updcore.h)
-#define THUMB 2.6f                    // thumbnail box, font heights
+#define THUMB 6.0f                    // thumbnail box, font heights (78 px at text size 1, 98 px at 1.25)
+#define PREVIEW 20.f                  // the hovered thumbnail's large picture, font heights
 
 static char search[64];
 static int filter;        // 0 all, 1 installed, 2 available
@@ -85,8 +86,8 @@ static void top_bar(void) {
     ov_width(6.5f);
     ov_combo("##filter", &filter, F, 3);
     ov_tooltip("Installed: the add-ons in your add-ons folder. Available: the shop's others.");
-    ov_same_line_fit(NULL, 6.5f);
-    ov_width(6.5f);
+    ov_same_line_fit(NULL, 8);
+    ov_width(8);
     ov_combo("##sort", &sort_by, S, 2);
     ov_tooltip("Sort by name or by when you installed it (the file's time). Installed add-ons always come first.");
     const char *dir = sort_by ? (sort_rev ? "Oldest" : "Newest") : (sort_rev ? "Z-A" : "A-Z");
@@ -113,8 +114,7 @@ static void cell_name(const Row *r, const AddonInfo *ai, const ShopRow *sr) {
     char sz[32], tip[900];
     size_str(r->a >= 0 ? ai->size : sr->size, sz, sizeof sz);
     ov_text("%s", r->name);
-    ov_same_line_fit(sz, 0);
-    ov_text_dim("%s", sz);
+    ov_text_dim_line("%s", sz);
     const char *author = r->c >= 0 ? sr->author : ai->author, *desc = r->c >= 0 ? sr->desc : ai->desc;
     int k = snprintf(tip, sizeof tip, "%s%s%s", author && *author ? "by " : "", author ? author : "", author && *author ? "\n" : "");
     if (desc && *desc) k += snprintf(tip + k, sizeof tip - k, "%s\n", desc);
@@ -133,7 +133,7 @@ static void cell_state(const Row *r, const AddonInfo *ai, const ShopRow *sr) {
         else if (!*ai->why && !ai->on) ov_text_dim("off");
         else if (*ai->why) { ov_text_warn("can't load"); ov_tooltip(ai->why); }
         else if (ai->mounted <= 0) ov_text("loads at restart");
-        else ov_text("installed%s%s", *ver ? " v" : "", ver);
+        else ov_text("%s%s", *ver ? "v" : "installed", ver);
         if (r->c >= 0 && sr->state == SHOP_NEWER) ov_text_warn("v%s available", sr->version);
     } else if (r->c >= 0) {
         if (sr->state == SHOP_DOWNLOADING) ov_text_dim("downloading");
@@ -141,7 +141,7 @@ static void cell_state(const Row *r, const AddonInfo *ai, const ShopRow *sr) {
             ov_text("as %s", sr->like);
             ov_tooltip("Already in your add-ons folder under another file name (it adds the same look), so it isn't added twice.");
         } else if (installed_state(sr->state)) ov_text("loads at restart");
-        else if (*sr->too_old) { ov_text_dim("needs a newer b4bcoop"); ov_tooltip(sr->too_old); }
+        else if (*sr->too_old) { ov_text_dim("needs newer b4bcoop"); ov_tooltip(sr->too_old); }
     }
     if (r->c >= 0 && sr->msg[0] && sr->state != SHOP_DOWNLOADING) {
         if (sr->msg_err) ov_text_warn("%s", sr->msg);
@@ -200,28 +200,41 @@ static void cell_actions(const Row *r, const AddonInfo *ai, const ShopRow *sr) {
 #undef NEXT
 }
 
-static void table(int n) {
-    static const float W[] = {-THUMB, 1.0f, 0.6f, 0.75f};
+static int visible(const Row *r, const AddonInfo *ai, const ShopRow *sr) {
+    if (filter == 1 && !r->inst) return 0;
+    if (filter == 2 && r->inst) return 0;
+    return !search[0] || has(r->name, search) || has(ai->file, search) || has(ai->author, search) || has(ai->desc, search) ||
+           has(sr->id, search) || has(sr->author, search) || has(sr->desc, search);
+}
+static void fill(const Row *r, AddonInfo *ai, ShopRow *sr) {
+    if (r->a < 0 || !addons_info(r->a, ai)) memset(ai, 0, sizeof *ai);
+    if (r->c < 0 || !shop_row(r->c, sr)) memset(sr, 0, sizeof *sr);
+}
+// The table fills the tab down to what follows it (below: its height last frame) and scrolls by itself.
+static void table(int n, float below) {
+    static const float W[] = {-THUMB, 1.0f, 0.45f, 0.62f};
     static const char *H[] = {"", "Add-on", "Installed", ""};
+    AddonInfo ai; ShopRow sr;
     int shown = 0;
-    if (!ov_table_begin("addons", 4)) return;
+    for (int k = 0; k < n && !shown; k++) { fill(&rows[k], &ai, &sr); shown = visible(&rows[k], &ai, &sr); }
+    if (!shown) { ov_text_dim(n ? "Nothing matches." : "No add-ons yet."); return; }
+    if (!ov_table_begin_scroll("addons", 4, below, 3 * (THUMB + 1))) return;
     ov_table_columns(H, W, 4, 1);
     for (int k = 0; k < n; k++) {
         const Row *r = &rows[k];
-        AddonInfo ai; ShopRow sr;
-        if (r->a >= 0) addons_info(r->a, &ai); else memset(&ai, 0, sizeof ai);
-        if (r->c < 0 || !shop_row(r->c, &sr)) memset(&sr, 0, sizeof sr);
-        if (filter == 1 && !r->inst) continue;
-        if (filter == 2 && r->inst) continue;
-        if (search[0] && !has(r->name, search) && !has(ai.file, search) && !has(ai.author, search) && !has(ai.desc, search) &&
-            !has(sr.id, search) && !has(sr.author, search) && !has(sr.desc, search)) continue;
-        shown++;
+        fill(r, &ai, &sr);
+        if (!visible(r, &ai, &sr)) continue;
         ov_push_id(k);
         ov_table_next();
         if (sr.tex) {
             float tw = THUMB, th = THUMB;
             if (sr.tw >= sr.th) th = THUMB * sr.th / sr.tw; else tw = THUMB * sr.tw / sr.th;
             ov_image(sr.tex, tw, th);
+            int pw, ph, pt = ov_hovered() ? shop_preview(r->c, &pw, &ph) : 0;
+            if (pt && pw > 0 && ph > 0) {   // its longer side PREVIEW font heights
+                float k = PREVIEW / (float)(pw > ph ? pw : ph);
+                ov_tooltip_image(pt, k * pw, k * ph, pw / (float)SHOP_PREVIEW_SIDE, ph / (float)SHOP_PREVIEW_SIDE);
+            }
         }
         ov_table_next();
         cell_name(r, &ai, &sr);
@@ -232,11 +245,11 @@ static void table(int n) {
         ov_pop_id();
     }
     ov_table_end();
-    if (!shown) ov_text_dim(n ? "Nothing matches." : "No add-ons yet.");
 }
 
 static void panel(void) {
     static ULONGLONG t_refresh;
+    static float below;   // the height of everything under the table, measured last frame
     if (GetTickCount64() - t_refresh > 1000) { t_refresh = GetTickCount64(); addons_refresh(); }
     int on = addons_tab_header();
     if (on) {
@@ -244,19 +257,22 @@ static void panel(void) {
         qsort(rows, (size_t)n, sizeof rows[0], cmp_rows);
         top_bar();
         shop_show_thumbs();
-        table(n);
+        table(n, below);
     }
+    float y0 = ov_cursor_y();
     addons_tab_footer();
     ov_heading("Host rules");
     models_host_panel();
     ov_same_line_fit(NULL, 25);
     addons_mp_panel();
+    below = ov_cursor_y() - y0;
 }
 
 static void alias(int f) { filter = f; search[0] = 0; }
 
 void looks_init(void) {
     overlay_add_panel(TAB, 60, panel);
+    overlay_panel_size(TAB, 52, 1.f, 3);   // wide, as tall as the screen allows, a short log: the list is the point
     static const struct { const char *name; int filter; } A[] = {
         {"Models", 0}, {"Browse", 0}, {"Get more", 0}, {"Wear", 0}, {"Looks", 0}, {"Looks & add-ons", 0}, {"Installed", 1}};
     for (size_t i = 0; i < sizeof A / sizeof A[0]; i++) overlay_add_alias(A[i].name, TAB, alias, A[i].filter);

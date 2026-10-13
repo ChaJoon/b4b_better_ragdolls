@@ -92,7 +92,8 @@ Detailed engine findings (addresses, obfuscated layouts, class names): `docs/NOT
     paks too) and the shop's list (shop.c; same content = one row): thumbnail | name + size | installed state | Add,
     Update, Undo, Turn on, Wear / Use / Stop, Remove; installed first, sort name / time installed both ways, search,
     filter All / Installed / Available; no load order, no on/off, no details; Host rules (`models_host_panel`,
-    `addons_mp_panel`) at the bottom. Dev `overlay tab Models|Browse|Get more|Wear|Looks|Installed` = this tab
+    `addons_mp_panel`) at the bottom; thumbnails 6 em, the large picture on hover (`shop_preview`), the table fills the
+    tab (`ov_table_begin_scroll`) in a window of its own size (`overlay_panel_size`). Dev `overlay tab Models|Browse|Get more|Wear|Looks|Installed` = this tab
     (`overlay_add_alias`). docs/investigations/overlay.md "Add-ons tab".
   - `shop.c` the add-on shop (#36): its list is fetched by itself once per game start on the first arrival in Fort
     Hope (`auto_fetch`; host or client), Refresh at will (ini `shop=0`: no list, no downloads): `catalog.json` + `.sig`
@@ -485,7 +486,9 @@ Verified live (2026-09-23/24; details and evidence in `docs/investigations/*.md`
   `tools/shop-test.py` 58/58.
 - Add-ons tab (2026-10-13, lane 2 / native Steam on Proton): one table instead of Wear / Installed / Get more (shop list
   fetched by itself in Fort Hope, installed first, sort / filter / search, Wear = the customization screen, Use / Stop,
-  no load order), host and client, 960x540 and 1080p, text size 1.25 and 0.75; `tools/shop-test.py` 68/68.
+  no load order; large thumbnails + hover picture, the table fills a tab-sized window), host and client, 960x540 and
+  1080p, text size 1.25 and 0.75, the real shop list (127 add-ons: thumbnails without a hitch, Add + Wear + Remove);
+  `tools/shop-test.py` 68/68.
 
 Known issues / open:
 - #8 (fixed): the 5th hero in the post-round lineup stands in the back row, dimmer and without a name plate.

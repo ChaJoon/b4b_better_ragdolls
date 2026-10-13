@@ -29,7 +29,10 @@ command has a control (checklist below); the chat commands stay.
   `ov_tooltip`, `ov_copy`, `ov_header` (collapsing; a dev press toggles it), `ov_table_columns` (fixed / stretch column
   widths in font heights, optional label row), `ov_same_line_fit` (next to the last control only if the next one still
   fits, else below: rows of buttons that wrap in a narrow column), `ov_progress`, `ov_image` / `ov_texture`;
-  `overlay_close()` (a button that opens a game screen). (`ov_tabs`, the mode row of the Looks & add-ons tab, is gone.)
+  `ov_texture_set` (new pixels for a texture), `ov_tooltip_image`, `ov_hovered`, `ov_text_dim_line` (never wrapped),
+  `ov_table_begin_scroll` + `ov_cursor_y` (a table that fills the tab), `overlay_panel_size` (a tab with its own window
+  size and log height), `overlay_close()` (a button that opens a game screen). (`ov_tabs`, the mode row of the Looks &
+  add-ons tab, is gone.)
 - Permissions: `ov_begin_perm(CMD_HOST|CMD_CHEAT)` ... `ov_end_perm()` greys the block out on a client (or with cheats
   off) and shows the reason (a line, and a tooltip on each disabled control). `ov_allowed()` for single controls.
 - Actions: `ov_run("kick #%d", i)` = `admin_slash()` (the chat path: same permission check, same handler, reply in the
@@ -133,16 +136,24 @@ space". Now one **Add-ons** tab (order 60), one table:
   Installed rows always first; then by name or by the time installed (file time: newest of created / written,
   `AddonInfo.time`), each way round (sort combo + A-Z / Z-A or Newest / Oldest button); search (name, file, id,
   author, description); filter All / Installed / Available.
-- Columns (`ov_table_columns`: thumbnail fixed 2.6 em, then stretch 1 / 0.6 / 0.75): thumbnail | name + file size
-  (author, description, license and file name as the tooltip, nothing else in the cell) | installed state:
-  `installed v1.0`, `v1.1 available`, `off`, `loads at restart`, `can't load` (why as tooltip), `removed at restart`,
-  `updated at restart`, `as <file>` (another file adds the same look), `needs a newer b4bcoop`, a failed download's
-  message | controls, wrapping in the column (`ov_same_line_fit`): Add / progress bar while downloading, Undo, Turn on
+- Columns (`ov_table_columns`: thumbnail fixed 6 em = 78 px at text size 1, 98 px at 1.25; then stretch 1 / 0.45 /
+  0.62): thumbnail (hover: the large picture, 20 em on its longer side, `shop_preview` + `ov_tooltip_image`) | name,
+  and the file size on its own line (`ov_text_dim_line`: never wrapped; author, description, license and file name as
+  the tooltip, nothing else in the cell) | installed state, short: `v1.0`, `v1.1 available`, `off`, `loads at
+  restart`, `can't load` (why as tooltip), `removed at restart`, `updated at restart`, `as <file>` (another file adds
+  the same look), `needs newer b4bcoop`, a failed download's message | controls, wrapping in the column (`ov_same_line_fit`): Add / progress bar while downloading, Undo, Turn on
   (`/addons on`, an add-on that is off in `addonlist.txt`), Wear / Use / Stop (`addons_look_buttons`), Update, Remove
   (two clicks).
 - No load order, no on/off toggle, no details view, no conflicts list (Dan: if two add-ons overwrite the same file one
   wins, that's the player's problem; not a mod manager). The backend is unchanged (`ord[]`, `addonlist.txt`,
   `/addons on|off`, conflict log lines and the chat notice); `addons_move` (Up/Down) is gone.
+- Size (coordinator review, 2026-10-13): the table fills the tab down to the footer and scrolls by itself
+  (`ov_table_begin_scroll`: ImGui ScrollY table, label row frozen; the footer's height is measured each frame with
+  `ov_cursor_y`); when less than 3 rows fit (960x540) it is a plain table and the tab scrolls as a whole, so there is
+  never a second scrollbar. The tab has a window size of its own (`overlay_panel_size(TAB, 52 em, the screen's
+  height, 3 log lines)`: overlay.cpp `track_size` switches the window to it when the tab is shown and back to the
+  usual size for the other tabs, keeping the player's resizing per side; the log under the tabs is 3 lines on this
+  tab, 6 elsewhere).
 - **Wear** (an add-on outfit): `models_open_screen(name)` (models.c, both builds; was dev `mdl cs open`):
   `EnterCharacterCustomization(player state)` on Fort Hope's `CharacterCustomizationManager`, `OpenScreen
   CharacterCustomization 0` (a GameInstance exec), `SetCharacter(current hero row)`, then `EquipCustomization(Outfit,
@@ -176,8 +187,18 @@ space". Now one **Add-ons** tab (order 60), one table:
   person shows Holly in the outfit; the client the same (Doc), the host sees it; Add `ak47`, Use -> `your AR02 now
   looks like AK-47`, the row shows Stop, Stop -> `your AR02 back to your own skin`; Z-A, filter, search; client: Host
   rules greyed with the reason. Screenshots: `~/.local/share/b4b-coop/addons-tab-shots/` (not committed).
-- `tools/shop-test.py` (adapted, see shop.md §5): **68/68** (/tmp/b4b-shop-20261013-024727). `tools/e2e.py --quick`
-  (lane 2): **14/14** (/tmp/b4b-e2e-l2-20261013-023630); its overlay smoke check now checks the automatic list fetch
+- Real shop (2026-10-13, after the review: bigger thumbnails, hover picture, table filling the tab, short Installed
+  cell; lane 2, `multi.sh 2`, no catalog override, empty add-ons folders): on arrival in Fort Hope `shop: in Fort Hope
+  for the first time this game: getting the add-on list` -> `127 add-on(s) in the list` (netguard scope open/closed
+  around it); opening the tab fetched the 127 thumbnails in ~6 s, overlay frames/s 57-67 meanwhile (61-67 idle);
+  scrolling, search `ranger` (5 rows), Z-A, Available; Add `rangergreen` (2.5 MB) -> "Added and ready now", its row on
+  top with Wear + Remove; Wear -> customization screen, Esc twice -> `holly now wears rangergreen`, view back on the
+  hero, Holly in the Green Ranger outfit; Remove -> `removed at restart` + Undo, `pending.txt remove rangergreen.pak`;
+  restart -> `shop: removed rangergreen.pak`. 960x540: about 2.5 rows visible, one scrollbar (the tab's); 1920x1080:
+  the table fills a window as tall as the screen (8 rows at 1.25, 12 at 0.75), Host rules under it; the Session tab
+  keeps its usual size. Screenshots: `~/.local/share/b4b-coop/addons-tab-shots/v2/`.
+- `tools/shop-test.py` (adapted, see shop.md §5): **68/68** (/tmp/b4b-shop-20261013-032556). `tools/e2e.py --quick`
+  (lane 2): **14/14** (/tmp/b4b-e2e-l2-20261013-033617); its overlay smoke check now checks the automatic list fetch
   and presses Refresh in this tab (was `Status (/model)` in Wear); its socket check lists the 6 HTTPS connections to
   GitHub (the shop's list on both instances) apart as expected.
 
