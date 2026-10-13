@@ -193,7 +193,9 @@ static void place(UObject *mgr, int type, int n) {
 // rows placed in the designer. OnSlotsUpdated (0x141E3D670) gives hero slot i the row i (PlayerSlot +0x2a0) and skips
 // slots without a row, so the 5th player is not listed on any machine. Before it runs, rows of the same class are
 // added to the box (WidgetBlueprintLibrary::Create + PanelWidget::AddChild, the new slot gets the last row's
-// size/padding/alignment), so the game fills them like the others. A 4-hero team never gets here.
+// size/padding/alignment), so the game fills them like the others. They start Hidden like the designer's rows: the
+// game shows a human's row, a bot's stays hidden (it showed a stale row before). Two columns: hud.c. A 4-hero team
+// never gets here.
 #define ADDR_LOADOUTS_SLOTS VA(0x141E3D670ull)   // void UPlayerLoadoutsUserWidget::OnSlotsUpdated (native body)
 static const uint8_t SIG_LOADOUTS_SLOTS[] = {0x40,0x55,0x53,0x41,0x54,0x48,0x8d,0x6c,0x24,0xb9,0x48,0x81,0xec,0xc0,0x00,0x00,
                                              0x00,0x48,0x8b,0x05};
@@ -250,6 +252,8 @@ static void loadouts_detour(UObject *w) {
         UObject *s = *(UObject **)(p + pr);
         if (!s) { LOG("lineup: player list AddChild failed"); break; }
         copy_slot(last_slot, s);
+        uint8_t v[16] = {2};   // Hidden, like the designer's rows: the game shows a human's row, a bot's stays hidden
+        call_parms(row, "SetVisibility", v, sizeof v);
         n_rows_added++;
         char b[128];
         LOG("lineup: %d hero slots: player list row %d added (%s)", n, slots->num, ue_obj_name(row, b, sizeof b));

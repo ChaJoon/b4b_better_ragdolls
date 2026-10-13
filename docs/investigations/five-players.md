@@ -257,3 +257,71 @@ teammates + self, post-round 4 heroes and no lineup spawn, SP forwarded, no erro
 team); a 5th hero's outline through walls (not visible from the safe room shots). One instance hit `LogRendererCore
 Fatal: GameThread timed out waiting for RenderThread after 120.00 secs` while loading Fort Hope during the 5-instance
 start (headless gamescope on one GPU); relaunched with `launch/instance.sh 3`, it rejoined and took slot 3.
+
+## 8. Teammate lists with 6-8 heroes (`native/src/hud.c`)
+
+Test (2026-10-13, lane 1, 4090 headless): `teamsize=8` on one instance (7 bots) in the Evansburgh_B saferoom and in
+the tunnel (`tp 0 volume 2`), at 960x540 and 1920x1080 (`B4B_RES` + the prefix's GameUserSettings.ini, put back
+after); `teamsize 6` / `teamsize 5` + `mission Easy` for 6 and 5; `multi.sh 2` (host `teamsize=8`, client without):
+leave, rejoin mid-mission, `takeover`; `multi.sh 5` (5 humans + 3 bots): character select, two post-rounds and the
+seamless travel to Evansburgh_C and _D. Widget trees with `hudtree <class|path suffix> [depth]` (pixel rects from the
+cached geometry, slot layout, render transforms), live tuning with `hudxf` / `hud gap`. Screenshots:
+`~/.local/share/b4b-coop/hud8-shots/` (not committed).
+
+**What broke (all machines, host and clients):**
+
+| Place | 5 heroes | 6-8 heroes |
+|---|---|---|
+| HUD teammate list, bottom left (`GameHUDScreen_WBP.PartyStatus`) | 4th teammate over the top of your own panel | 5-7 teammates run down over your own panel and off the bottom of the screen (`before-8-540.png`) |
+| Character select player list (`MissionLoadoutScreen_WBP.PlayerLoadouts`, rows added by lineup.c #28) | fine | rows 7-8 off the bottom; rows of bots past the 4th showed a stale "PREROUND STEP" row with a portrait (`before-charselect-2humans-8slots-540.png`) |
+| Esc menu scoreboard (`SystemSettingsScreen_WBP.Scoreboard`) | fine | fine: 8 rows (`esc-8-540.png`) |
+| World name plates, VOIP overlay (8 entries) | fine | fine |
+| Post-round lineup (lineup.c §6) | 5th in the back row, no plate | 6th-8th stack further back behind the 5th, mostly hidden; still 4 name plates. Not changed |
+
+**HUD layout.** `PartyStatus` (`PartyStatus_WBP_C : UPartyStatusUserWidget`) is a CanvasPanel slot anchored bottom
+left: offset (128, -941), size 673x588 design units (the HUD is laid out for 2160p: 0.25 px/unit at 540p, 0.5 at
+1080p), so the box is y 305-452 px at 540p and your own panel (`HorizontalBox_0`) starts at 468. Inside:
+`VerticalBox_119` = {`PushAllToBottomSpacer` (fill), `PlayerList` (VerticalBox, auto)}; one `PartyStatusEntry_WBP_C`
+per teammate (`SetPlayerAt` index = position in `PlayerList`), 524x116 units each but 176 apart: the 60-unit gap is
+not in the UMG slots (VerticalBoxSlot padding 0, desired size 116), so positions must come from the layout geometry.
+3 entries (528) fit the box bottom-aligned; 7 entries (1232) push the spacer to 0 and hang down from the box's top.
+
+**Fix.** Render transforms only, so the game's indexing, layout and slots are untouched. A first version made the
+HUD list two columns; Dan rejected it (it covers too much of the view), so the HUD keeps the game's single column:
+with 4+ teammates (hero team > 4) `PlayerList` gets a uniform scale about its top-left corner (pivot 0,0, so the
+game's x stays) and a vertical move, so that its bottom stays where the game's own bottom-aligned list ends (the box's
+bottom, above your own panel, which is not touched) and its top sits `fit_margin` (48 units, 12 px at 540p) under the
+objectives' real bottom: `HUDMissions` (GameHUDScreen_WBP, `VerticalBox_2` at (128, 190), one `HUDMission_WBP` per
+mission block, so 1-3 blocks change its height), read every frame. Scale = room / list height, at most 1 (then it is
+only moved up), at least `fit_floor` 0.6 (then the top entries overlap the objectives, never your panel). With 2-3
+objective blocks 7 teammates (293 px at 540p) fit at scale 1 in the 315-327 px of room, so the column mostly just
+moves up. Positions from `Widget.GetCachedGeometry` (FGeometry Size +0, Scale +8, AbsolutePosition +0xC: layout
+only, render transforms excluded), applied every frame (no write when unchanged), widgets looked up once a second
+while the hero team has more than 4 slots (class check: the Blueprint class or its direct super; only
+`/Engine/Transient` instances). Character select keeps two columns: `PlayerLoadouts`' `PlayerList` (top-anchored,
+288 units apart) keeps the designer's 4 rows and rows 5-8 go to a second column beside them, because under row 4 sit
+the hero portraits (y 420 at 540p; one column would need scale 0.59 for 8 rows above them) and the second column only
+shows rows of humans 5-8 (bot rows are Hidden) (5 humans: `charselect-5humans-8slots-host-540.png`). lineup.c's added
+rows now start Hidden like the designer's rows, so a bot's row stays hidden and a human's is shown by the game. Hero
+team of 4 or less: nothing runs (e2e `--quick` logs have no `hud:` line). No ini switch.
+
+**Crash found on the way (not hud.c).** The first `multi.sh 5` run crashed all 5 instances in the agent about a
+second after the GC that follows the post-round (13:55, `UE4Minidump.dmp` in each prefix's `Saved/Crashes`). Mapped
+on a rebuild of that exact source (same SizeOfImage 0x957000): the exception (read of -1) is `ue_process_event`'s
+`jmp [vtable+0x210]` called from `cmds_hotkey_down` (`IsInputKeyDown` on `ue_local_pc()`, the flashlight /
+third-person / bot-heal hotkeys), i.e. the local PlayerController it got was already freed. Not seen before in any
+e2e run; not reproduced in two more post-rounds + transitions with 5 instances and 8 slots. Guards added anyway:
+`ue_object_usable()` (ue.c: still at its GUObjectArray index, FUObjectItem.Flags without Unreachable/PendingKill
+(1<<28, 1<<29), no RF_BeginDestroyed/RF_FinishDestroyed) on that PlayerController (falls back to GetAsyncKeyState)
+and on every widget hud.c touches. Watch for it.
+
+**Results** (single column, `fit-*.png`). 8 heroes: the 7 teammates fit at scale 1 under 2-3 objective lines in the
+saferoom and in the tunnel, 540p and 1080p (`fit-8-540-saferoom.png`, `fit-8heroes-540-VeryHard-2missions-1..4.png`
+(4 runs: "Blood Samples" with 2 lines = room 315 px, others 327 px), `fit-8heroes-1080-Easy-saferoom.png`,
+`fit-8heroes-1080-tunnel.png`); 6 and 5 heroes (`fit-6heroes-*`, `fit-5heroes-*`, both resolutions). Shrinking was
+never needed with real objectives in Evansburgh_B (4 VeryHard + Easy runs never showed a 3rd block), so it was
+checked by raising `hud margin` (taller objectives simulated): 600 units = scale 0.65 / 0.63 at 540p / 1080p, 1100 =
+the 0.6 floor with the top entries over the objectives (`fit-8heroes-*-simulated-margin*.png`); bottom and x stay.
+A client without `teamsize` gets the same (`fit-8heroes-540-client.png`); each new mission rebuilds the HUD
+and it is fitted again; `e2e.py --quick` 14/14. Earlier (two-column version, same mechanics): leave, mid-mission rejoin +
+take-over and two chapter transitions with 5 instances.
