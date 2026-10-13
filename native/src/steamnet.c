@@ -425,6 +425,16 @@ void steamnet_on_log(const char *cat, const char *msg) {
     }
 }
 
+int steamnet_listen_port(void) { return g_listen_port; }
+// A Steam P2P peer that sent us game packets (a client of ours over Steam), not ourselves
+int steamnet_peer_known(uint64_t id) {
+    if (!id || !g_ready) return 0;
+    EnterCriticalSection(&cs);
+    int i = peer_index(id, 0), ok = i >= 0 && peers[i].rx > 0;
+    LeaveCriticalSection(&cs);
+    return ok;
+}
+
 // Host: the authenticated SteamID behind a fake P2P address ("198.18.0.1" or "198.18.0.1:port"), 0 if it is not one.
 uint64_t steamnet_peer_of_addr(const char *addr) {
     unsigned a, b, c, d;

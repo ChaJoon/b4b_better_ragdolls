@@ -331,6 +331,22 @@ UObject *admin_find_player(const char *arg, Out *o);    // "#n", name or unique 
 void admin_display_name(UObject *ps, char *buf, size_t n);   // player name, or a bot's hero name
 int admin_is_client(void);                              // connected to someone else's session
 void admin_notice(const char *fmt, ...);                // "[b4bcoop] <text>" to every player (host notice)
+int admin_data_to_w(UObject *pc, const wchar_t *text, int len); // host: a data line of any length (wide text as is)
+
+// handoff.c: host hand-off (docs/investigations/host-handoff.md): the next host and the campaign run reach every
+// client ahead of time; on /handoff or when the host is gone, the next host hosts and continues the run
+int handoff_init(void);
+void handoff_tick(float dt);
+int handoff_live(const char *key, const char *val);      // ini host_handoff=0: no automatic take-over
+void handoff_host_data(const wchar_t *text, int len);    // chat.c: a data line from the host starting "handoff "
+void handoff_request(const char *why, int old_host_joins); // client: act on the plan on the next tick
+void handoff_host_lost(const char *url);                 // travel.c: the connection to our host ended (not ours, no kick)
+void handoff_slash(const char *rest, Out *o);            // chat /handoff [<name|#>]
+void handoff_players_panel(void);                        // admin.c's Players tab: who hosts next
+int handoff_cmd(const char *verb, char *rest, Out *o);   // dev builds: `handoff [runs|run <id>|resume <id>|go|<player>]`
+void cmds_become_host(void);                             // cmds.c: host our camp from now on, no join targets
+int steamnet_peer_known(uint64_t id);                    // steamnet.c: a Steam P2P peer we exchanged packets with
+int steamnet_listen_port(void);                          // steamnet.c: the game's listen port (0 = not listening yet)
 
 // Who may run a chat command; admin.c checks it before any handler runs (admin.c CMDS, cheats.c VERBS).
 enum {
