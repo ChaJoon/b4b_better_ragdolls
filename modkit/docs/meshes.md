@@ -67,7 +67,8 @@ pipeline does this for you (unused slots get an invisible zero-size triangle).
    b4bmod find "Heroes/Mom/Meshes/Elite/.*_SKM$"
    ```
 3. **Slots** (optional, normally not needed): your materials are put on the outfit's slots automatically, and the
-   pipeline prints what went where and why: face, eyes and skin on the skin (head) slot (skin away from the head, such
+   pipeline prints what went where and why: eyeballs with an iris in their texture on the outfit's **Eyes** slot (the
+   game's eye material: see [Eyes](#eyes)), face, other eyes and skin on the skin (head) slot (skin away from the head, such
    as bare arms, on the outfit's body skin slot when it has one, e.g. Walker's `ArmSkin`), hair, alpha cards, lashes and
    brows on the **Hair** slot (masked by the texture's alpha, in your texture's own colours: see [Hair](#hair)),
    clothes on the cloth slot that covers the same part of the body (sleeves and gloves on `Arms`, trousers and shoes on
@@ -194,6 +195,31 @@ can't find is guessed from the survivor's face scaled to yours (`scaled from the
   cursor onto each pupil (Shift+right-click), read its location (N panel, View tab) and add
   `--face-eyes 0.032,-0.105,1.62;-0.032,-0.105,1.62` (both eyes, metres, as the file imports into Blender).
 - `--face off` leaves the face on the head bone (no talking or blinking), as before.
+- The eyes and the lids around them keep every triangle of your model in the first LOD (the rest of a dense model
+  is thinned to the outfit's budget): thinned lid rims opened the eyes into a stare.
+
+## Eyes
+
+Survivors' eyes use the game's eye material (eye shading, an iris that sits behind the cornea, darker corners).
+Your model's eyeballs get it too when the pipeline can read them:
+
+```
+b4bfit: eyes: the game's eye material for M_Eyes (1028 faces): iris radius 0.58 cm (l 0.57, r 0.60), ...
+b4bmodel:   eyes: Eye_MI (the game's eye shader): ScleraColor/IrisColor from the model's eyes, Iris UV Radius 0.17
+```
+
+- Which: materials named `eye`, `iris`, `pupil` or `sclera` (or drawing an image named so) that are ball-shaped, left
+  and right, plus anything sitting on the front of those balls (a textured cornea or iris shell). Lashes, brows,
+  liner, eye shadow, tear lines and see-through layers are not part of it.
+- How: each eye is photographed from the front (its colour texture where the rays hit), the iris found in that
+  picture (the dark pupil near the middle, the iris edge where it brightens into the white), and two textures made
+  for the game's material: the eye as seen from the front and the iris on its own. The eyeballs get new UVs (a
+  projection from the front, pupil in the middle), so any UV layout works, also eyes that share the head texture.
+- When not: no iris found (painted anime eyes, solid black or glowing eyes, no texture), not ball-shaped (flat eye
+  cards), or the two irises very different: the eyes stay on the skin slot, and the log says why
+  (`eyes: on the skin slot (...)`). `--eyes skin` keeps them there anyway.
+- Check: `preview.py` shows the eyes with the front picture (`--face-view eyes --zoom 2`); in game the iris is
+  drawn by the eye shader (a little darker, with a catchlight).
 
 ## Swinging hair and skirts
 Long hair, skirts, long coats and capes move with the character instead of sticking to the head and hips (on by
@@ -338,6 +364,10 @@ b4bmod convert SomeonesJimMod_P.pak --as mycharacter --title "My Character"
 - Output like `survivor --as`: `<name>/` (default; `-o <moddir>` for another folder) with the files and the
   `outfit=` line(s) in `addoninfo.txt`, packed into `<name>.pak`. `--pak`, `--zip`, `--install`, `--author`,
   `--version`, `--description` as for `survivor`. Converting the same mod again replaces the earlier result.
+- Eyes: many mods draw the eyes with a clothing or skin material (flat, full-bright whites: a stare in game). Such an
+  eye material (named eye/iris/sclera, with a colour texture whose iris sits in the middle, as most game eye textures)
+  is pointed at the game's eye material, the iris cut out of its texture (`eyes: MI_..._Eyes: the game's eye
+  material ...` in the output; `--eyes keep` leaves the mod's eyes as they are).
 - In game: the original mod (if installed) still replaces the survivor for you; the converted add-on doesn't. You
   can have both. Players without the converted add-on see your survivor.
 - Only survivor outfit mods convert. A mod for a weapon, a Ridden, a map or the UI is refused
@@ -406,7 +436,7 @@ What the survivor pipeline prints, and what to do about it.
 | `... is shared with other outfits; yours goes to ...` | the survivor's template shares that texture or material with other outfits: your copy is made in the outfit's folder, other outfits stay as they are |
 | Hair is one colour / a bit dark | only with `--hair tint` (the game's hair shader: one colour root to tip, your texture's average, root 40 % darker). The default `--hair texture` keeps your texture's colours |
 | Hair much darker / another colour than the texture file | the material multiplies the texture by a colour (glTF base colour factor, VRoid/MToon hair colour): that is applied, as in Blender / VRoid. VRM 0.x colours are read as sRGB, like VRoid does |
-| Eyes look flat | eyes go on the skin slot (the game's eye shader has no texture for yours); a transparent iris layer goes on the hair slot, masked, in its own colours (`--hair tint`: in the hair colour); highlights are left out |
+| Eyes look flat, too bright, or stare (whites all round the iris) | eyeballs get the game's eye material when their iris is found (see [Eyes](#eyes)); the log says why not (`eyes: on the skin slot (...)`). Painted eyes stay on the skin slot; a transparent iris layer goes on the hair slot, masked, in its own colours (`--hair tint`: in the hair colour); highlights are left out |
 | Skirts, coats or capes don't swing | the log's `cloth:` lines say what was found; name the materials yourself with `--cloth MAT,...` (`MAT:cape` for a cape) ([Swinging hair and skirts](#swinging-hair-and-skirts)); long hair: a survivor with ponytail bones |
 | A low-poly model turns into triangles at a distance | fixed: models under ~1500 triangles keep every LOD whole (older kits: `--lods 1,1,1,1,1`) |
 | Holes, slits or loose triangles at a distance (flat-shaded models, VRM/glTF models along their UV seams) | fixed: the LODs are made from the model welded by position (older kits: shade smooth / merge by distance in Blender before exporting) |

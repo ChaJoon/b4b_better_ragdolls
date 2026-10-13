@@ -1346,7 +1346,16 @@ def fit_character(o):
         fp_drop_hanging(tpl, smeshes)
         smeshes = [m for m in smeshes if len(m.data.polygons)]
     if o.get("probe") == "regions":
-        body_regions(tpl, smeshes, os.path.join(o["out"], "regions.json"))
+        rj = os.path.join(o["out"], "regions.json")
+        body_regions(tpl, smeshes, rj)
+        if eye_names(o):
+            # eyes on the game's eye material: found here, so b4bmodel can put them on the eye slot (b4beyes.py)
+            set_tex_cache(os.path.join(o["out"], "textures"))
+            ey = eyes_module().detect(smeshes, eye_names(o), eye_tex_of(o, smeshes), log)
+            ey = {k: v for k, v in ey.items() if not k.startswith("_") and k != "samplers"}
+            if not ey.get("ok"): log(f"eyes: they stay on the skin slot: {ey.get('why')}")
+            res = json.load(open(rj)); res["eyes"] = ey
+            json.dump(res, open(rj, "w"), indent=1)
         return
     if o.get("probe"):
         mats = []
@@ -1508,6 +1517,31 @@ def dangle_module():
     if d not in sys.path: sys.path.insert(0, d)
     import b4bdangle
     return b4bdangle
+
+
+def eyes_module():
+    """blender/b4beyes.py (eyes on the game's eye material), next to this script."""
+    d = os.path.dirname(os.path.abspath(__file__))
+    if d not in sys.path: sys.path.insert(0, d)
+    import b4beyes
+    return b4beyes
+
+
+def eye_tex_of(o, meshes):
+    """material -> its base colour image (the texture step's choice) for b4beyes."""
+    tex_dirs = source_tex_dirs(o["source"]) + ([o["textures"]] if o.get("textures") else [])
+    tex_user = dict(x.split("=", 1) for x in o.get("tex", []))
+    n = len({mt for m in meshes for mt in used_materials(m)})
+    return lambda mat: material_textures(mat, tex_dirs, tex_user, n).get("basecolor")
+
+
+def eye_names(o):
+    return [x for x in o.get("eye_mats", "").split("|") if x]
+
+
+def set_tex_cache(d):
+    global TEX_CACHE
+    TEX_CACHE = d
 
 
 def secondary_motion(o, tpl, meshes):
@@ -3307,10 +3341,15 @@ def assign_slots(o, tpl, meshes, tex_dirs):
     sets = {}
     slots_used = {}
     plan = []                                   # (mat, slot, set, tile material, rect, grid)
+    eye_slot = (o.get("eye_slot") or "").lower()
     for mat in srcmats:
         slot = slot_of[mat]
         st = slotset.get(slot.lower(), slot)
         slots_used[slot] = st
+        if slot.lower() == eye_slot and o.get("extras", {}).get("eyes"):
+            # the game's eye material: its own textures (b4beyes baked them, the UVs are already the eye layout)
+            plan.append((mat, slot, st, base(mat).lower(), (0.0, 0.0, 1.0, 1.0), 1))
+            continue
         canon = alias.get(st.lower(), {}).get(base(mat).lower(), base(mat))
         cn = canon.lower()
         if st in atlases:
@@ -3483,6 +3522,8 @@ LOD0_KEEP_GROUP = "b4b_keep"   # vertex group of the face: decimated less (Decim
 LOD0_KEEP_WEIGHT = 0.5         # inverted to 0.5 (an inverted weight of 0 would never collapse: hair on the head stayed)
 LOD0_KEEP_FACTOR = 0.002       # Decimate vertex_group_factor (a cost per metre of edge): at ratio 0.5 the face keeps
                                # ~0.65 of its triangles and the body ~0.4 (0.1+: the face untouched, the body at 0.2)
+EYE_KEEP_RX = re.compile(r"^(eyelid_|eyeball_|eye_)")   # LOD0: vertices on these bones are never collapsed
+EYE_KEEP_MIN = 0.05
 
 
 def render_counts(meshes):
@@ -3532,6 +3573,11 @@ def keep_face_group(tpl, m):
            if sum(g.weight for g in v.groups if names.get(g.group) in head) > 0.5 * (sum(g.weight for g in v.groups) or 1)]
     g = m.vertex_groups.get(LOD0_KEEP_GROUP) or m.vertex_groups.new(name=LOD0_KEEP_GROUP)
     if idx: g.add(idx, LOD0_KEEP_WEIGHT, "REPLACE")
+    # the eyes and the lids around them are never collapsed in LOD0: collapsing the lid rims' thin edge loops pulled
+    # the lids up and rounded them (a wide-open stare) and dented the iris (mesh-mods.md §24)
+    eye_g = {g2.index for g2 in m.vertex_groups if EYE_KEEP_RX.match(g2.name)}
+    eyes = [v.index for v in m.data.vertices if sum(e.weight for e in v.groups if e.group in eye_g) > EYE_KEEP_MIN]
+    if eyes: g.add(eyes, 1.0, "REPLACE")
     return g
 
 
@@ -3642,6 +3688,14 @@ def finish(o, tpl, meshes):
         bpy.ops.mesh.select_all(action="SELECT")
         bpy.ops.mesh.quads_convert_to_tris()
         bpy.ops.object.mode_set(mode="OBJECT")
+    if o.get("eye_slot") and eye_names(o) and o.get("mode", "3p") == "3p":
+        # eyes on the game's eye material (b4bmodel put them on the eye slot after the regions probe found them):
+        # their textures baked from the front and the retail eye UV layout (b4beyes.py)
+        ey = eyes_module().layout(meshes, eye_names(o), eye_tex_of(o, meshes), out, log)
+        if not ey.get("ok"):
+            raise SystemExit(f"eyes: {ey.get('why')} (the regions probe had found them); --eyes skin keeps the eyes "
+                             f"on the skin slot")
+        o.setdefault("extras", {})["eyes"] = ey
     mats = assign_slots(o, tpl, meshes, tex_dirs)
     lods = make_lods(o, meshes, tpl)
     files = []

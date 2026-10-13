@@ -35,6 +35,9 @@ and installs); guide: docs/meshes.md. How it works: docs/investigations/mesh-mod
                                the pelvis and thighs instead (no cloth): each half follows its thigh, front and back
                                stretch between the legs, crouching the front rests on the thighs. For rigs whose skirt
                                bones hang under the pelvis (most Fortnite skirts) when cloth looks wrong in game
+        [--eyes game|skin]      game (default): eyeballs with an iris in their texture get the game's eye material
+                                (eye shading, refracted iris, shaded corners; the iris and the eye as seen from the
+                                front are baked into its textures; mesh-mods.md §24); skin: on the skin slot as before
         [--hair texture|tint]   hair slot: texture (default) = your hair texture's own colours, masked by its alpha;
                                 tint = the game's hair shader, one colour root to tip (your texture's average)
         [--roughness MAT=MIN]...  lifts a material's roughness so its smoothest texel is MIN (MAT: a material name,
@@ -298,6 +301,14 @@ def linear_to_srgb(c): return c * 12.92 if c <= 0.0031308 else 1.055 * c ** (1 /
 # hero hair MIs) it samples one RGBA "Hair MultiMask" on UV0 whose A is the strand alpha; colour = RootColor..TipColor
 HAIR_MASTER_RX = re.compile(r"/Master_Hair_M(\.|$)")
 SKIN_MASTER_RX = re.compile(r"/Master_Hero_Head_M(\.|$)")
+# survivor eyes (Master_Eye_Refractive_M: eye shading, the iris refracted inside "Iris UV Radius" of planar eye UVs
+# centred on the pupil). --eyes game: the model's eyes go on the template's eye slot with a copy of this retail eye MI
+# (it overrides IrisColor and scalars, so ScleraColor/IrisColor can be set) and two new textures, encoded like these
+# retail ones (sRGB DXT1). mesh-mods.md §24
+EYE_MASTER_RX = re.compile(r"/Master_Eye_Refractive_M(\.|$)")
+EYE_MI = "/Game/Characters/Heroes/Karlee/Meshes/Shared/Karlee_Eye_MI"
+EYE_TEX = {"IrisColor": "/Game/Characters/Shared/Eyes/Textures/Eye_Iris_Blue_BC_T",
+           "ScleraColor": "/Game/TU15/Characters/Heroes/Holly/Meshes/Elite/Elite_07/Textures/Holly_Elite_07_Eye_Sclera_BC_T"}
 
 
 def parse_roughness(items):
@@ -452,6 +463,30 @@ class TexTool:
         self.copy_pkg(HAIR_TEX_MI, new_mi, refs)
         self.mi_scalars.append((new_mi, HAIR_TEX_SCALARS))
         self.repoint(mi.split(".")[0], new_mi, "hair: colour texture (masked by its alpha) instead of the game's hair shader")
+
+    def eye_set(self, ey, slot_mi, owned):
+        """--eyes game: the eye slot gets a copy of EYE_MI with b4beyes' ScleraColor/IrisColor (encoded into copies of
+        the retail eye textures) and its Iris UV Radius; the meshes' eye slot is pointed at it."""
+        new_mi = owned + "Materials/Eye_MI"
+        if new_mi in self.done: return
+        self.done.add(new_mi)
+        self.b4b("info", EYE_MI, *EYE_TEX.values(), what="extracting the eye material")
+        sets = []
+        for param, tex in EYE_TEX.items():
+            path = owned + "Textures/Eye_" + param.replace("Color", "") + "_BC_T"
+            asset = self.copy_pkg(tex, path)
+            png = ey["iris"] if param == "IrisColor" else ey["sclera"]
+            r = subprocess.run([sys.executable, self.b4bmod, "texture", asset, png, "-o", self.moddir, "--quality",
+                                self.quality, "--src", self.src], capture_output=True, text=True)
+            if r.returncode:
+                sys.stderr.write(r.stdout + r.stderr); die(f"texture encoding failed for {path}")
+            sets += ["set", param, path]
+        self.copy_pkg(EYE_MI, new_mi)
+        self.b4b("mi", self.mi_ref(new_mi), *sets, "set", "Iris UV Radius", f"{ey['iris_uv']:g}", "-o", self.moddir,
+                 what="eye material")
+        log(f"  eyes: {new_mi.split('/')[-1]} (the game's eye shader): ScleraColor/IrisColor from the model's eyes, "
+            f"Iris UV Radius {ey['iris_uv']:g} (iris {ey['iris_cm']:.2f} cm)")
+        self.repoint(slot_mi.split(".")[0], new_mi, "eyes: the game's eye material with the model's eyes")
 
     def repoint(self, pkg, new, why):
         """Every mesh written so far that uses material package `pkg` is pointed at `new` instead."""
@@ -823,7 +858,24 @@ GARMENT_BONE_FACES = 150    # faces on the rig's own garment bones that make a m
 GARMENT_BONES = r"^dyn_(main_)?(skirt|skit|dress|gown|coat|cape|cloak|robe|poncho|kilt|tail)"   # = b4bdangle's
 
 
-def auto_slots(mats, minfo, s3, user, regions=None, cloth_on=True):
+def eye_candidates(mats, minfo, user):
+    """--eyes game: the materials that may be eyeballs (named eye/iris/pupil/sclera, or drawing an image named so;
+    not lashes, brows, liner, eye shadow, cornea/tear/highlight layers, alpha cards). b4beyes decides on the fitted
+    model (ball-shaped, an iris in the texture)."""
+    out = []
+    for m in mats:
+        if m in user: continue
+        inf = minfo.get(m, {})
+        texn = " ".join(os.path.basename(p).lower() for p in inf.get("textures", {}).values())
+        named = MAT_EYE_RX.search(m) or (MAT_EYE_RX.search(texn) and not MAT_SKIN_RX.search(m))
+        if not named or MAT_OVERLAY_RX.search(m + " " + texn): continue
+        if re.search(r"cornea|tear_?line|moisture|highlight|shadow|occlu|wet|spec|reflect|shine", m, re.I): continue
+        if inf.get("alpha_clear", 0.0) > 0.5: continue
+        out.append(m)
+    return out
+
+
+def auto_slots(mats, minfo, s3, user, regions=None, cloth_on=True, eyes=(None, [], None)):
     """{material: slot} for every kept material, and the dropped ones. --slot MAT=SLOT (or =drop) wins; the rest by
     what the material is: its name and its images' names when they say it (hair, lashes, eyes, skin, trousers ...),
     else what it looks like and where it sits on the body: alpha cards -> the hair slot; texels mostly in skin colours ->
@@ -877,6 +929,11 @@ def auto_slots(mats, minfo, s3, user, regions=None, cloth_on=True):
             v = user.get(m) or next(v for k, v in user.items() if k.endswith("*") and m.lower().startswith(k[:-1].lower()))
             if v.lower() == "drop": drop.append(m); why[m] = "--slot drop"
             else: out[m] = v; why[m] = "--slot"
+            continue
+        if eyes[0] and m in eyes[1]:
+            out[m] = eyes[0]
+            why[m] = (f"eyes: the game's eye material (iris {eyes[2] * 100:.2f} cm found in the texture; --eyes skin: "
+                      f"the skin slot)" if eyes[2] else "eyes: the game's eye material")
             continue
         inf = minfo.get(m, {})
         look = inf.get("look", {})
@@ -1021,12 +1078,23 @@ def survivor(o):
     rigged = os.path.join(work, "rigged3p.blend")
     if os.path.exists(rigged): os.remove(rigged)
     unrigged = not info["armatures"]
+    # --eyes game: the eye-named materials are the eyeballs the probe looks at (b4beyes: iris found -> the eye slot)
+    if o.get("eyes", "game") not in ("game", "skin"): die(f"--eyes {o['eyes']}: game or skin")
+    eye_slot = next((sn for sn, mi, tex, master in s3 if master and EYE_MASTER_RX.search(master)), None)
+    eye_cands = eye_candidates(mats, minfo, user) if eye_slot and o.get("eyes", "game") == "game" else []
+    eye_args = ["--eye_mats", "|".join(eye_cands)] if eye_cands else []
     run_blender(["character", "--template", template_glb(tp, work), "--source", os.path.abspath(model), "--out", rp,
                  "--mode", "3p", "--probe", "regions", "--proportions", o.get("proportions") or "own"] + fit_args(o.o) +
-                sim_args(tp, src) + (["--rigged_out", rigged] if unrigged else []))
+                sim_args(tp, src) + (["--rigged_out", rigged] if unrigged else []) + eye_args)
     rig_args = ["--rigged", rigged] if unrigged and os.path.exists(rigged) else []
     regions = json.load(open(os.path.join(rp, "regions.json")))
-    slot3, drop = auto_slots(mats, minfo, s3, user, regions, cloth_on=o.get("cloth", "auto") != "off")
+    eyes = regions.get("eyes") or {}
+    if eye_cands and not eyes.get("ok"):
+        log(f"eyes: on the skin slot ({eyes.get('why', 'not checked')})")
+    eye_mats = [m for m in eyes.get("materials", []) if m in mats and m not in user] if eyes.get("ok") else []
+    slot3, drop = auto_slots(mats, minfo, s3, user, regions, cloth_on=o.get("cloth", "auto") != "off",
+                             eyes=(eye_slot, eye_mats, eyes.get("iris_r")))
+    if eye_mats: eye_args += ["--eye_slot", eye_slot]
     o.o["drop_mat"] = drop
     if o.get("cloth", "auto") in ("auto", "on"):
         cslots = {sn for sn, mi, tex, master in s3 if master_uses_clothing(master, src)}
@@ -1042,6 +1110,7 @@ def survivor(o):
         set_of_slot3[s] = next((x for x in slot_names if bc3[x] and bc3[x] == bc3[s]), s)
     atlas = {}
     for m, s in slot3.items():
+        if m in eye_mats: continue                 # the eye material's own textures (b4beyes), no atlas
         atlas.setdefault(set_of_slot3[s], []).append(m)
     fp_slot, fp_slotset = {}, {}
     if fp:
@@ -1052,6 +1121,7 @@ def survivor(o):
             st = next((x for x in slot_names if bc and bc3[x] == bc), s)
             fp_slotset[s] = set_of_slot3.get(st, st)
         for m, s in slot3.items():
+            if m in eye_mats: continue             # no eyes in first person
             if m in fuser:
                 fp_slot[m] = fuser[m]; continue
             # same master material as in 3P (skin -> the FP skin slot, cloth -> the FP cloth slot)
@@ -1119,7 +1189,7 @@ def survivor(o):
                  "--mode", "3p", "--lods", o.get("lods", "1,0.5,0.3,0.15,0.06"),
                  "--proportions", o.get("proportions") or "own"] + fit_args(o.o) + atlas_args + density_args(o.o) +
                 slotset3 + [x for m, s in slot3.items() for x in ("--slot", f"{m}={s}")] + sim_args(tp, src) +
-                dangle_args(o.o, tp, src))
+                dangle_args(o.o, tp, src) + (eye_args if eye_mats else []))
     man3 = json.load(open(os.path.join(d3, "manifest.json")))
     # the game's hair shader tints vertex-coloured strands (retail: mostly black); the colour-texture material doesn't
     # (the cultist's hair is white, the default)
@@ -1168,6 +1238,11 @@ def survivor(o):
                 tt.compose_set(sets[st], tex, owned_prefix(mesh), master, mi, None)
     detail_tiling(mans, moddir, src, tt)
     tt.run()
+    ey = man3.get("extras", {}).get("eyes")
+    if ey and ey.get("ok") and eye_slot:
+        mi = next(mi for sn, mi, tex, master in mesh_slots(tp, src) if sn == eye_slot)
+        tt.eye_set(ey, mi, owned_prefix(tp))
+        tt.preview[eye_slot] = ey["sclera"]           # preview: the eye from the front on the eye UVs
     for (man, _), tag in zip(mans, ("3p", "fp")):
         prev = {slot: tt.preview[st] for slot, st in man["slots"].items() if st in tt.preview}
         pbr = {slot: {"png": tt.preview_pbr[st][0], "metallic": tt.preview_pbr[st][1]}
