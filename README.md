@@ -90,8 +90,8 @@ options need a game restart). Every option, with defaults and examples:
 - `host_ip=1`: **advanced**, only if you know you need it: host and join by IP address instead of through Steam. Needs
   port forwarding (UDP 7777) and triggers the Windows Firewall prompt. Everyone in the game needs it.
 
-Add-ons (textures, models): press `~`, tab **Looks & add-ons**: **Get more** lists free ones (**Add**, then **Wear**),
-**Installed** manages yours. Or put an add-on's `.pak` in a `b4bcoop-addons` folder next to `Back4Blood.exe` and
+Add-ons (textures, models): press `~`, tab **Add-ons**: the free ones from the add-on shop and yours in one list
+(**Add**, **Wear**, **Update**, **Remove**). Or put an add-on's `.pak` in a `b4bcoop-addons` folder next to `Back4Blood.exe` and
 restart; `/addons` lists them. Only you see your add-ons, and nobody learns which ones you have. By default hosts
 let in players with any add-ons; a host can allow cosmetic ones only, or none (`addons_policy=`; your game checks
 yours before joining).
@@ -176,9 +176,9 @@ Making your own add-ons: see the modkit ([modkit/README.md](modkit/README.md), `
 - Drop `.pak` add-ons into `b4bcoop-addons`: textures, custom outfits and weapon looks (up to 512 add-ons and 512
   outfits). Added outfits are also in the game's customization screen, for every survivor. Nobody learns which
   add-ons you have; the host decides whether joiners may bring gameplay-changing ones.
-- One **Looks & add-ons** tab in the `~` window: **Get more** finds free add-ons in a signed catalog and adds them
-  (most are ready at once), **Wear** puts on an outfit or weapon look (yours, other survivors', NPC bodies),
-  **Installed** switches add-ons on/off, sets the load order, updates and removes them.
+- One **Add-ons** tab in the `~` window: the free add-ons of a signed catalog and the ones you have in one list; **Add**
+  (most are ready at once), **Wear** (an outfit, on the game's customization screen), **Use** (a weapon look),
+  **Update**, **Remove**; sort, filter and search.
 - **Modkit** (separate download, `b4bcoop-modkit-<version>.zip`): turn a downloaded character (FBX, glTF/glb, VRM, OBJ,
   DAE, .blend) or a gun model into an outfit or weapon look, with hair physics, cloth for skirts, coats and capes,
   talking and blinking faces, and first-person arms. See [modkit/README.md](modkit/README.md).

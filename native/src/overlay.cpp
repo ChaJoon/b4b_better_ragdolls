@@ -771,6 +771,21 @@ extern "C" void ov_image(int tex, float w_em, float h_em) {
     else ImGui::Dummy(sz);
 }
 extern "C" void ov_same_line(void) { LOCKED; ImGui::SameLine(); }
+extern "C" int ov_same_line_fit(const char *label, float w_em) {
+    LOCKED;
+    ImGuiStyle &st = ImGui::GetStyle();
+    float w = w_em * ImGui::GetFontSize();
+    if (label) w = ImGui::CalcTextSize(label, nullptr, true).x + st.FramePadding.x * 2;
+    // the cursor is at the start of the next line now: that line's left edge + the space left on it = the right edge
+    float right = ImGui::GetCursorScreenPos().x + ImGui::GetContentRegionAvail().x;
+    if (ImGui::GetItemRectMax().x + st.ItemSpacing.x + w > right) return 0;
+    ImGui::SameLine();
+    return 1;
+}
+extern "C" void ov_progress(float frac, float w_em, const char *text) {
+    LOCKED;
+    ImGui::ProgressBar(frac < 0 ? 0 : frac > 1 ? 1 : frac, ImVec2(w_em > 0 ? w_em * ImGui::GetFontSize() : -FLT_MIN, 0), text);
+}
 extern "C" void ov_separator(void) { LOCKED; ImGui::Separator(); }
 extern "C" void ov_width(float em) { LOCKED; if (em > 0) ImGui::SetNextItemWidth(ImGui::GetFontSize() * em); }
 extern "C" void ov_tooltip(const char *text) { LOCKED; if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) ImGui::SetTooltip("%s", text); }
@@ -782,27 +797,6 @@ extern "C" int ov_header(const char *label, int default_open) {
     if (drive_take(label, 1)) ImGui::GetStateStorage()->SetInt(id, !open);   // dev press: opens/closes it next frame
     return open;
 }
-// A row of tabs inside a panel (a mode switch): *cur = the one shown; setting *cur selects it from the next frame.
-extern "C" int ov_tabs(const char *id, const char *const *labels, int n, int *cur) {
-    LOCKED;
-    ImGuiStorage *st = ImGui::GetStateStorage();
-    ImGuiID key = ImGui::GetID(id);
-    int last = st->GetInt(key, -1), shown = -1, driven = -1, was = *cur;
-    if (ImGui::BeginTabBar(id)) {
-        for (int i = 0; i < n; i++) {
-            bool sel = ImGui::BeginTabItem(labels[i], nullptr, i == *cur && i != last ? ImGuiTabItemFlags_SetSelected : 0);
-            after_item();
-            if (drive_take(labels[i], 1)) driven = i;
-            if (sel) { shown = i; ImGui::EndTabItem(); }
-        }
-        ImGui::EndTabBar();
-    }
-    if (driven >= 0) *cur = driven;
-    else if (last >= 0 && shown >= 0 && shown != last) *cur = shown;   // clicked (or our SetSelected arrived)
-    if (last >= 0 && shown >= 0 && shown != last) ImGui::SetScrollY(0);   // another mode starts at its top
-    st->SetInt(key, shown);
-    return *cur != was;
-}
 extern "C" void ov_push_id(int id) { LOCKED; ImGui::PushID(id); }
 extern "C" void ov_pop_id(void) { LOCKED; ImGui::PopID(); }
 extern "C" int ov_table_begin(const char *id, int cols) {
@@ -813,6 +807,14 @@ extern "C" void ov_table_header(const char *const *names, int n) {
     LOCKED;
     for (int i = 0; i < n; i++) ImGui::TableSetupColumn(names[i]);
     ImGui::TableHeadersRow();
+}
+extern "C" void ov_table_columns(const char *const *names, const float *w, int n, int header) {
+    LOCKED;
+    float fs = ImGui::GetFontSize();
+    for (int i = 0; i < n; i++)
+        ImGui::TableSetupColumn(names ? names[i] : "", w[i] < 0 ? ImGuiTableColumnFlags_WidthFixed : ImGuiTableColumnFlags_WidthStretch,
+                                w[i] < 0 ? -w[i] * fs : w[i]);
+    if (header) ImGui::TableHeadersRow();
 }
 extern "C" void ov_table_next(void) { LOCKED; ImGui::TableNextColumn(); }
 extern "C" void ov_table_end(void) { LOCKED; ImGui::EndTable(); }
@@ -1044,6 +1046,7 @@ static void set_open(int on) {
     }
     LOG("overlay: %s", on ? "open" : "closed");
 }
+extern "C" void overlay_close(void) { if (open_) set_open(0); }
 static void capture(int vk) {   // a key for ov_key
     cap_vk = vk == VK_ESCAPE ? -2 : (vk == VK_BACK || vk == VK_DELETE) ? 0 : vk;
     InterlockedExchange(&cap_state, 2);

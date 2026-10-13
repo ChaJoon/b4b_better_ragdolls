@@ -21,13 +21,15 @@ command has a control (checklist below); the chat commands stay.
 
 ## Panel registry (overlay.h)
 - `overlay_add_panel(name, order, draw)` from a module's init; a tab per panel, sorted by order (Session 10, Players 20,
-  Camera 30, Flashlight 40, Cheats 50, Looks & add-ons 60 (looks.c; was Models 60, Add-ons 70, Browse 72), Settings 90,
-  Updates 95, Help 100). `overlay_add_alias(alias, panel, select, arg)`: another name for `overlay tab` (dev), e.g. a
-  tab's old name; `select(arg)` picks a mode inside it.
+  Camera 30, Flashlight 40, Cheats 50, Add-ons 60 (looks.c; was Looks & add-ons, before that Models 60, Add-ons 70,
+  Browse 72), Settings 90, Updates 95, Help 100). `overlay_add_alias(alias, panel, select, arg)`: another name for
+  `overlay tab` (dev), e.g. a tab's old name; `select(arg)` sets something inside it (the Add-ons tab's filter).
 - Widgets: `ov_text/_dim/_warn`, `ov_heading`, `ov_button`, `ov_button_confirm` (second click within 3 s),
   `ov_checkbox`, `ov_radio`, `ov_selectable` (list row), `ov_slider(_int)` + `ov_edit_done`, `ov_input_text/int`, `ov_combo`, `ov_key`, tables,
-  `ov_tooltip`, `ov_copy`, `ov_header` (collapsing; a dev press toggles it), `ov_tabs` (a row of tabs inside a panel:
-  a mode switch; setting `*cur` shows that tab from the next frame; a new mode starts scrolled to its top).
+  `ov_tooltip`, `ov_copy`, `ov_header` (collapsing; a dev press toggles it), `ov_table_columns` (fixed / stretch column
+  widths in font heights, optional label row), `ov_same_line_fit` (next to the last control only if the next one still
+  fits, else below: rows of buttons that wrap in a narrow column), `ov_progress`, `ov_image` / `ov_texture`;
+  `overlay_close()` (a button that opens a game screen). (`ov_tabs`, the mode row of the Looks & add-ons tab, is gone.)
 - Permissions: `ov_begin_perm(CMD_HOST|CMD_CHEAT)` ... `ov_end_perm()` greys the block out on a client (or with cheats
   off) and shows the reason (a line, and a tooltip on each disabled control). `ov_allowed()` for single controls.
 - Actions: `ov_run("kick #%d", i)` = `admin_slash()` (the chat path: same permission check, same handler, reply in the
@@ -75,14 +77,14 @@ command has a control (checklist below); the chat commands stay.
 | `/slomo <x>` | Cheats: game speed slider (on release), Normal speed |
 | `/win /lose` | Cheats: Win / Lose the mission (confirm) |
 | `/supply +N`, `/unlockall` | Cheats: amount + Add supply points, Unlock all (both confirm); `/unlockall check` via the Help box |
-| `/addons [list]`, `/addons info <#>` (anyone) | Looks & add-ons > Installed: rows in load order (on, "#. title", kind outfit / weapon look / replacement / gameplay + state or "not loaded: why"), conflicts; click a row = details under it (author, description, content class + first gameplay file, id Copy, the looks it adds with Wear / Use, its conflicts, `/addons info` button, Remove); "Folder and troubleshooting" header: folder path Copy, "Load add-ons" (`addons`, restart), `/addons` button |
-| `/addons on\|off <#>` (anyone) | Installed: the row's checkbox (runs `/addons on\|off <file>`); beyond the chat: Up/Down (load order, `addons_move`), banner while `addonlist.txt` differs from what is mounted; hand edits of the file are re-read; Wear / Use per row (`addons_look_buttons`: one look = `/model <name>`, several = "Wear (n)" shows them in Wear); Update (shop.c, a newer file in the list; "Check for updates" gets it); Remove (details; any add-on: off now, deleted at the next start, `.shop\pending.txt`) + Undo |
-| `/addons policy` (host) | Looks & add-ons > Host rules (header under every mode): policy radios (`addons_policy`, saved + live via `addons_live`); greyed on a client. (`/addons players` and the players' table are gone since #35: add-ons stay private) |
-| `/model`, `/model list [<survivor>\|npc\|outfits\|weapons]` (anyone) | Looks & add-ons > Wear: your look (now, host refusal), your pick, `/model` button; lists Survivors (header per survivor: whole survivor + outfits/heads/torsos/legs) / NPC bodies (grouped) / Add-on outfits (by add-on) / Weapon looks (per weapon type with the add-on); the tab's search box searches all four at once |
-| `/model <name>`, `/model reset` (anyone) | Wear: click a name (runs `/model <name>`), Use per weapon look, Reset my look; beyond the chat: Reset per weapon type (`wlooks_reset_code`); Installed / Get more rows: Wear / Use of the add-on's look |
-| `/model <player> <name>\|reset` (host) | Wear: "Change the look of" combo (host, shown while someone else is in the game; then click a look), Everyone's look header: Change / Reset per row (greyed on a client) |
-| `/models [on\|off]` (host) | Looks & add-ons > Host rules: "Model swaps allowed" checkbox (client: greyed, shows the host's last announced state), `/models` button, add-on policy line |
-| add-on shop (no chat command; ini `shop`) | Looks & add-ons > Get more (hidden with `shop=0`): Get / Refresh the list, filter (all, new looks, replacements, not installed yet), thumbnails, Add, then Wear / Use on the row, Update, Undo; click = details under the row |
+| `/addons [list]`, `/addons info <#>` (anyone) | Add-ons: a row per add-on in the folder (name, size, installed / off / loads at restart / can't load); details as a tooltip on the name; chat only (Dan, 2026-10-13: no details view, no conflicts list): `/addons info`, `/addons` |
+| `/addons on\|off <#>` (anyone) | Add-ons: **Turn on** on a row that is off (runs `/addons on <file>`); **Remove** (any add-on: off now, deleted at the next start, `.shop\pending.txt`) + **Undo**; chat only: `/addons off` (no on/off toggle, no load order in the window: Dan, 2026-10-13) |
+| `/addons policy` (host) | Add-ons > Host rules (bottom): "Who may join with add-ons" combo (`addons_policy`, saved + live via `addons_live`); greyed on a client. (`/addons players` and the players' table are gone since #35: add-ons stay private) |
+| `/model`, `/model list [<survivor>\|npc\|outfits\|weapons]` (anyone) | chat only since 2026-10-13 (the Wear lists were dropped: Dan wants outfits worn from the game's customization screen) |
+| `/model <name>`, `/model reset` (anyone) | Add-ons rows: an add-on outfit's **Wear** (the customization screen with it on, `models_open_screen`), a weapon look's **Use** (`/model <name>`) / **Stop** (`wlooks_reset_code`); other survivors' outfits and NPC bodies: chat only |
+| `/model <player> <name>\|reset` (host) | chat only since 2026-10-13 |
+| `/models [on\|off]` (host) | Add-ons > Host rules: "Model swaps allowed" checkbox (client: greyed, shows the host's last announced state; `/models` for the state) |
+| add-on shop (no chat command; ini `shop`) | Add-ons (`shop=0`: installed rows only): the list fetched by itself on the first arrival in Fort Hope, Refresh, thumbnails, Add (progress bar), Update, Undo, search, filter All / Installed / Available, sort name / installed on, both ways |
 | ini keys | Settings: text size, overlay/flashlight/third-person keys, `launch` ("Game start", online.c, #47); Camera: `thirdperson*`; Flashlight: sticky; Session: `presence`, `allow_joins`, `allow_steamids` |
 
 Beyond the chat: Steam friends list with Invite (was dev-only `invite`), SteamID Copy.
@@ -122,7 +124,64 @@ Beyond the chat: Steam friends list with Invite (was dev-only `invite`), SteamID
   `~/.local/share/b4b-coop/models-tab/shots/` (not committed).
 - Combo labels with spaces need quotes for the dev driver: `overlay set '"Change the look of##target"' "#1"`.
 
-## Looks & add-ons tab (looks.c, 2026-10-12): Models + Add-ons + Browse in one tab
+## Add-ons tab (looks.c, 2026-10-13): one table instead of Wear / Installed / Get more
+Dan rejected the 2026-10-12 "Looks & add-ons" tab (three modes behind a row of tabs, below): "a waste of time and
+space". Now one **Add-ons** tab (order 60), one table:
+- Rows: every add-on in the folder (`addons_info`, also hand-dropped paks) and every entry of the shop's list
+  (`shop_row`) not already there; a shop entry whose file is installed, or whose content id equals an installed
+  file's (e.g. `my_joe.pak` = the shop's `casual_joe`), is that file's row (thumbnail and shop name from the list).
+  Installed rows always first; then by name or by the time installed (file time: newest of created / written,
+  `AddonInfo.time`), each way round (sort combo + A-Z / Z-A or Newest / Oldest button); search (name, file, id,
+  author, description); filter All / Installed / Available.
+- Columns (`ov_table_columns`: thumbnail fixed 2.6 em, then stretch 1 / 0.6 / 0.75): thumbnail | name + file size
+  (author, description, license and file name as the tooltip, nothing else in the cell) | installed state:
+  `installed v1.0`, `v1.1 available`, `off`, `loads at restart`, `can't load` (why as tooltip), `removed at restart`,
+  `updated at restart`, `as <file>` (another file adds the same look), `needs a newer b4bcoop`, a failed download's
+  message | controls, wrapping in the column (`ov_same_line_fit`): Add / progress bar while downloading, Undo, Turn on
+  (`/addons on`, an add-on that is off in `addonlist.txt`), Wear / Use / Stop (`addons_look_buttons`), Update, Remove
+  (two clicks).
+- No load order, no on/off toggle, no details view, no conflicts list (Dan: if two add-ons overwrite the same file one
+  wins, that's the player's problem; not a mod manager). The backend is unchanged (`ord[]`, `addonlist.txt`,
+  `/addons on|off`, conflict log lines and the chat notice); `addons_move` (Up/Down) is gone.
+- **Wear** (an add-on outfit): `models_open_screen(name)` (models.c, both builds; was dev `mdl cs open`):
+  `EnterCharacterCustomization(player state)` on Fort Hope's `CharacterCustomizationManager`, `OpenScreen
+  CharacterCustomization 0` (a GameInstance exec), `SetCharacter(current hero row)`, then `EquipCustomization(Outfit,
+  b4bcoop.outfit.<name>)` so the mannequin wears it; the overlay closes. The game's Back (Esc) goes to its Cleaners menu,
+  a second Back to Fort Hope; the screen's own close stores the choice (#33: `<hero> now wears <name> on the
+  customization screen`, profile keeps its look). The usable that normally leads there restores the view; ours doesn't,
+  so `tick_screen` (models_tick, 0.5 s) watches the screen (`UIScreen::IsOpen`) and when it closes calls
+  `ExitCharacterCustomization` and, if the view target is still the screen's camera (`Character_CineCameraActor`),
+  `SetViewTargetWithBlend(pawn)` (without it the camera stayed in the customization tent). Outside Fort Hope (no
+  manager) or with `outfits_screen=0` the button is disabled with "Wear it from the character customization screen in
+  Fort Hope." (resp. the ini reason). Several outfits in one add-on: a Wear per outfit ("Wear <title>").
+- **Use / Stop** (a weapon look): `/model <name>` / `wlooks_reset_code(code)`; `wlooks_current(code)` tells which.
+- The Wear mode's lists (other survivors' outfits and pieces, NPC bodies, "Change the look of", "Everyone's look") are
+  gone; those stay chat commands (`/model`, `/model <player> <name>`). Base-survivor text ("made on mom") is no longer
+  shown anywhere (it was in Wear's add-on outfits list and the Installed details).
+- The shop's list is fetched by itself once per game start (`auto_fetch` in shop_tick: 3 s in a Fort Hope with a hero,
+  signed in; host or client), Refresh at will; thumbnails are fetched when the tab first shows the list (their own
+  worker, `want_thumbs`, once per list). `shop=0`: no list, installed rows only.
+- Under the table: "Load add-ons" (`addons`) + "Copy folder path" (path as tooltip). **Host rules** at the bottom (one
+  heading, not under every view): "Model swaps allowed" + "Who may join with add-ons" combo (any / cosmetic only / no
+  add-ons / same gameplay add-ons), both `ov_begin_perm(CMD_HOST)`.
+- Dev: `overlay tab Models|Browse|Get more|Wear|Looks|Looks & add-ons` = this tab (filter All, search cleared),
+  `overlay tab Installed` = filter Installed; `overlay set ##filter Installed`, `overlay set ##sort "Installed on"`,
+  `overlay press ##sortdir`, `overlay set ##search holly`, `overlay locate <label>` for row order (shop-test). New dev
+  command `key <vk>` (chat.c: one key press to the game window; `key 0x1B` = Esc, the screen's Back).
+- Live (2026-10-13, lane 2 with the native Steam client, `B4B_GPU=4090`, dev build, `multi.sh 2` with the shop-test
+  catalog): host and client at 960x540 and 1920x1080, text size 1.25 and 0.75; the list fetched by itself on both
+  (`thumbs=0` until the tab opened, then 3 uploaded); Add `casual_joe` -> installed row on top with Wear + Remove;
+  Wear -> the customization screen with Casual Joe on Holly, Esc twice -> `holly now wears casual_joe on the
+  customization screen`, `customization screen closed: left the customization view, view back on the hero`, third
+  person shows Holly in the outfit; the client the same (Doc), the host sees it; Add `ak47`, Use -> `your AR02 now
+  looks like AK-47`, the row shows Stop, Stop -> `your AR02 back to your own skin`; Z-A, filter, search; client: Host
+  rules greyed with the reason. Screenshots: `~/.local/share/b4b-coop/addons-tab-shots/` (not committed).
+- `tools/shop-test.py` (adapted, see shop.md §5): **68/68** (/tmp/b4b-shop-20261013-024727). `tools/e2e.py --quick`
+  (lane 2): **14/14** (/tmp/b4b-e2e-l2-20261013-023630); its overlay smoke check now checks the automatic list fetch
+  and presses Refresh in this tab (was `Status (/model)` in Wear); its socket check lists the 6 HTTPS connections to
+  GitHub (the shop's list on both instances) apart as expected.
+
+## Looks & add-ons tab (looks.c, 2026-10-12, replaced 2026-10-13): Models + Add-ons + Browse in one tab
 Dan: "there's three tabs for 'browse', 'addons', and 'models' and it feels like it could be one." One tab (order 60),
 three modes in a row of tabs at its top (`ov_tabs`), one search box shared by all, and a collapsed **Host rules**
 header under every mode. The player's flow: find (Get more) -> get (Add) -> wear (the row's Wear / Use, or Wear), and

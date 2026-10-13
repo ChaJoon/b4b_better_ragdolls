@@ -60,19 +60,12 @@ outfit for them.
   your profile's outfit in that game.
 - `outfits_screen=0` in `b4bcoop.ini` keeps add-on outfits out of the customization screen (`/model` still works).
 
-## The `~` window: Looks & add-ons tab, Wear
+## The `~` window: Add-ons tab
 
-Everything above without typing, in **Wear** (the tab's first mode; **Installed** and **Get more** next to it manage
-and find add-ons): your look now (and the host's refusal if it said no), your pick, **Reset my look**; what to wear:
-**Survivors**, **NPC bodies**, **Add-on outfits**, **Weapon looks** (per weapon type: **Use**, the add-on it comes
-from, **Reset** for just that weapon type); click a name to wear it. The search box at the top of the tab searches
-all four lists at once. **Everyone's look** (click to open) lists every player and bot. Host only: **Change the look
-of** a player or bot (shown while someone else is in the game; pick them, then click a look; everyone is told), their
-**Reset** in Everyone's look, and **Model swaps allowed** (`/models on|off`) under **Host rules** at the bottom of the
-tab (greyed out on a client).
-
-An add-on that adds an outfit or a weapon look also has **Wear** / **Use** on its own row in **Installed**, and in
-**Get more** right after you add it.
+The `~` window has no lists of looks: the commands above are typed in chat. Its **Add-ons** tab has one button per
+add-on look: an add-on outfit's **Wear** opens your survivor's customization screen with the outfit on (Fort Hope),
+an add-on weapon look's **Use** / **Stop** puts it on your weapon of that type or takes it off. **Model swaps allowed**
+(`/models on|off`, host) is under **Host rules** at the bottom of that tab (greyed out on a client).
 
 `/model list holly` shows names without the survivor in front: `elite_04` there is `/model holly_elite_04`.
 

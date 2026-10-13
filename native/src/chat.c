@@ -506,6 +506,14 @@ int chat_cmd(const char *verb, char *rest, Out *o) {
         out_printf(o, "click at %d,%d (client %ldx%ld)\n", x, y, r.right, r.bottom);
         return 1;
     }
+    if (!strcmp(verb, "key")) {   // key <vk>: one key press to the game window (e.g. key 0x1B = Esc, a screen's Back)
+        int vk = rest ? (int)strtol(rest, NULL, 0) : 0;
+        HWND w = game_window();
+        if (!w || vk <= 0 || vk > 0xFE) { out_printf(o, "usage: key <virtual-key code, e.g. 0x1B> (window %p)\n", (void *)w); return 1; }
+        key(w, vk);
+        out_printf(o, "key 0x%02X\n", vk);
+        return 1;
+    }
     if (!strcmp(verb, "type")) {
         if (!rest || !*rest) { out_printf(o, "usage: type [vk=<code>] <text>\n"); return 1; }
         if (type_pos >= 0) { out_printf(o, "still typing \"%s\"\n", typing); return 1; }

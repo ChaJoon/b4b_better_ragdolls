@@ -81,7 +81,7 @@ static void build_looks(void) {
             l->path[0], l->path[1], l->path[2]);
     }
 }
-// An add-on loaded at runtime (the ~ window's Get more / Installed, /addons on): append its weapon looks; a look whose add-on was updated
+// An add-on loaded at runtime (the ~ window's Add-ons tab, /addons on): append its weapon looks; a look whose add-on was updated
 // (addons_update_runtime: none of its old meshes was loaded) takes the new file's meshes and title.
 void wlooks_refresh(void) {
     if (n_looks < 0) return;
@@ -994,91 +994,10 @@ void wlooks_status(Out *o) {
         if (wish[w].on) out_printf(o, "your %s: %s%s\n", wish[w].code, wish[w].name, wish[w].gave_up ? " (refused by the host)" : "");
 }
 
-// ~ window, "Looks & add-ons" tab, Wear (models.c draws it): the add-ons' weapon looks by weapon type, through /model.
-// search: only looks whose name, title, add-on or weapon code has it; hdr: a section heading for a search across every
-// list (drawn only when something matches, no "nothing" lines). Returns the number of looks shown.
-static int carries(const char *code) {   // this player's hero holds a weapon of that type now
-    UObject **it;
-    int n = items_of(my_pawn(), &it);
-    for (int i = 0; i < n; i++) if (is_live(it[i]) && item_code(it[i], code)) return 1;
-    return 0;
-}
-int wlooks_count(void) {
-    if (n_looks < 0) build_looks();
-    return n_looks;
-}
-static int look_match(const Look *l, const char *s) {
-    const char *f[4] = {l->name, l->title, l->addon, l->code};
-    size_t n = strlen(s);
-    if (!n) return 1;
-    for (int k = 0; k < 4; k++)
-        for (const char *h = f[k]; *h; h++) if (!_strnicmp(h, s, n)) return 1;
-    return 0;
-}
-int wlooks_panel(int blocked, const char *why, const char *search, const char *hdr) {
-    if (n_looks < 0) build_looks();
-    if (!n_looks) {
-        if (!hdr) ov_text_dim("No add-on weapon looks yet: Get more (above) lists free ones; mod makers: b4bmod weapon --as <name>.");
-        return 0;
-    }
-    int done[MAX_LOOKS] = {0}, shown = 0;
-    for (int i = 0; i < n_looks; i++) {
-        if (done[i]) continue;
-        const char *code = looks[i].code;
-        int any = 0;
-        for (int j = i; j < n_looks; j++) if (!_stricmp(looks[j].code, code) && look_match(&looks[j], search)) any++;
-        if (!any) { for (int j = i; j < n_looks; j++) if (!_stricmp(looks[j].code, code)) done[j] = 1; continue; }
-        if (!shown) {
-            if (hdr) ov_heading(hdr);
-            else ov_text_dim("Your weapon of that type shows the add-on's model, also every one you pick up later. Players "
-                             "without the add-on see the normal weapon.");
-        }
-        shown += any;
-        Wish *mine = NULL;
-        for (int w = 0; w < MAX_WISH; w++) if (wish[w].on && !_stricmp(wish[w].code, code)) mine = &wish[w];
-        ov_push_id(i);
-        ov_text("%s", code);
-        ov_same_line();
-        if (mine && mine->gave_up) ov_text_warn("%s: refused by the host", mine->name);
-        else if (mine) ov_text_dim("yours: %s%s", mine->name, carries(code) ? "" : " (applies when you carry one)");
-        else ov_text_dim("your own skin");
-        ov_same_line();
-        ov_begin_disabled(!mine, "No add-on look on this weapon type.");
-        char rl[40];
-        snprintf(rl, sizeof rl, "Reset##w:%s", code);
-        if (ov_button(rl)) {
-            static Out o;
-            out_reset(&o);
-            wlooks_reset_code(code, &o);
-            if (o.len) overlay_note(o.buf);
-        }
-        ov_tooltip("This weapon type back to your own skin (/model reset does all weapons and your survivor).");
-        ov_end_disabled();
-        if (ov_table_begin("wl", 3)) {
-            for (int j = i; j < n_looks; j++) {
-                if (_stricmp(looks[j].code, code)) continue;
-                done[j] = 1;
-                if (!look_match(&looks[j], search)) continue;
-                ov_push_id(j);
-                ov_table_next();
-                ov_begin_disabled(blocked, why);
-                char lab[48];
-                snprintf(lab, sizeof lab, "Use##%s", looks[j].name);
-                if (ov_button(lab)) ov_run("model %s", looks[j].name);
-                ov_tooltip("/model <name>");
-                ov_end_disabled();
-                ov_same_line();
-                ov_text("%s%s", looks[j].name, mine && !strcmp(mine->name, looks[j].name) ? "  (yours)" : "");
-                ov_table_next(); ov_text("%s", looks[j].title);
-                ov_table_next(); ov_text_dim("add-on: %s", looks[j].addon);
-                ov_pop_id();
-            }
-            ov_table_end();
-        }
-        ov_pop_id();
-    }
-    if (!shown && !hdr) ov_text_dim("Nothing matches.");
-    return shown;
+// ~ window, Add-ons tab (addons.c addons_look_buttons): Use / Stop on a weapon look's row
+const char *wlooks_current(const char *code) {
+    for (int w = 0; w < MAX_WISH; w++) if (wish[w].on && !_stricmp(wish[w].code, code)) return wish[w].name;
+    return NULL;
 }
 
 int wlooks_init(void) {

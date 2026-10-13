@@ -19,12 +19,13 @@ extern "C" {
 
 typedef void (*OverlayDrawFn)(void);
 // order: tab position (lower first). Built-in: Session 10, Players 20, Camera 30, Flashlight 40, Cheats 50,
-// Looks & add-ons 60 (looks.c), Settings 90, Updates 95 (updater.c), Help 100. Up to 24 panels; a second call with the
+// Add-ons 60 (looks.c), Settings 90, Updates 95 (updater.c), Help 100. Up to 24 panels; a second call with the
 // same name replaces the draw function, draw NULL removes the tab.
 void overlay_add_panel(const char *name, int order, OverlayDrawFn draw);
 // Another name for a tab (dev `overlay tab <alias>`, e.g. a tab's old name): shows `panel` and runs select(arg).
 void overlay_add_alias(const char *alias, const char *panel, void (*select)(int), int arg);
 int overlay_is_open(void);
+void overlay_close(void);               // e.g. a panel's button that opens a game screen (game thread)
 void overlay_note(const char *text);   // a line in the window's log (any thread)
 
 // ---- widgets (inside a draw function only) ----
@@ -46,17 +47,21 @@ int ov_edit_done(void);                       // the last slider/input: edit fin
 int ov_key(const char *label, int *vk);       // key binding: click, press a key (Esc cancels, Backspace = none)
 const char *ov_key_name(int vk);              // "L", "~", "F5", "none", ...
 void ov_same_line(void);
+// next to the last control if the next one (a button with that label, or w_em font heights wide when label is NULL)
+// still fits on the line, else it goes below; 1 = same line
+int ov_same_line_fit(const char *label, float w_em);
+void ov_progress(float frac, float w_em, const char *text);   // a progress bar (w_em 0 = the whole width), text on it
 void ov_separator(void);
 void ov_width(float em);                      // width of the next control, in font heights (0 = default)
 void ov_tooltip(const char *text);            // for the last control (also when disabled)
 int ov_header(const char *label, int default_open);   // collapsing section; 1 = open (dev press toggles it)
-// A row of tabs inside a panel (a mode switch; draw the chosen mode's content after it). *cur = the shown tab;
-// setting *cur shows that tab from the next frame. 1 when it changed.
-int ov_tabs(const char *id, const char *const *labels, int n, int *cur);
 void ov_push_id(int id);
 void ov_pop_id(void);
 int ov_table_begin(const char *id, int cols);          // 1 = draw rows, then ov_table_end() (only then)
 void ov_table_header(const char *const *names, int n); // column labels, first row
+// instead of ov_table_header: column widths, w[i] > 0 a stretch weight, < 0 a fixed width of -w[i] font heights;
+// names may be NULL (no labels); header 1 = a label row
+void ov_table_columns(const char *const *names, const float *w, int n, int header);
 void ov_table_next(void);                              // next cell (wraps to the next row)
 void ov_table_end(void);
 void ov_copy(const char *text);               // to the clipboard

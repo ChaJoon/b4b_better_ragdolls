@@ -331,7 +331,7 @@ static void build_outfits(void) {
         LOG("models: add-on outfit %s (\"%s\", %s): %s%s%s", o->name, o->title, o->addon, o->p3, o->pf[0] ? " + " : "", o->pf);
     }
 }
-// An add-on loaded at runtime (the ~ window's Get more / Installed, /addons on): append its outfits; one whose add-on was updated (another
+// An add-on loaded at runtime (the ~ window's Add-ons tab, /addons on): append its outfits; one whose add-on was updated (another
 // file now, addons_update_runtime) gets the new meshes and title (its old meshes were not loaded: addons.c checked).
 // The customization screen's rows follow at the next frame.
 void models_outfits_refresh(void) {
@@ -1134,12 +1134,14 @@ static void equip_detour(UObject *prof, RowHandle *hero, CustSet *set) {
         (handle_str(&copy.slot[copy.last & 3], b, sizeof b), b), wears ? nm : "-");
     orig_equip(prof, hero, &copy);
 }
+static void tick_screen(void);
 void models_tick(float dt) {
     if ((tick_acc += dt) < 0.5f) return;
     dt = tick_acc; tick_acc = 0;
     UObject *w = ue_world();
     if (!w || !ue_local_pc()) return;
     tick_npc();
+    tick_screen();
     wlooks_tick(dt);
     screen_rows(dt);
     if (!is_client()) no_subst = 0;
@@ -1423,12 +1425,6 @@ static void want_key(UObject *ps, UObject *slot, char *key, size_t n) {
         snprintf(key, n, "slot:%d", idx);
     } else admin_ps_key(ps, key, n);
 }
-static const Want *want_on(UObject *ps, UObject *slot) {
-    char key[80];
-    want_key(ps, slot, key, sizeof key);
-    for (int i = 0; i < MAX_OTHERS; i++) if (others[i].on && !strcmp(others[i].key, key)) return &others[i];
-    return NULL;
-}
 
 // /model <player> <name|reset> (host)
 static void model_other(const char *who, const char *what, Out *o) {
@@ -1531,360 +1527,123 @@ void models_slash(const char *verb, char *rest, Out *o) {
     tick_acc = 1;   // apply on the next tick
 }
 
-// ---- ~ overlay: Wear and the model swaps part of Host rules in the "Looks & add-ons" tab (looks.c, #26). Every action is the chat command (ov_run -> models_slash), read-only state here.
-static void look_str(UObject *slot, char *buf, size_t n) {
-    CustSet *s = slot_set(slot);
+// ---- ~ window, Add-ons tab (looks.c): an outfit row's Wear opens the game's customization screen with the outfit on
+// (the #33 rows), and the model swaps part of Host rules. ----
+static UObject *live_at(const char *cls, int32_t *idx) {   // the newest live object of that class (not its CDO)
+    UClass *c = ue_find_class(cls);
+    for (int32_t i = ue_num_objects() - 1; c && i >= 0; i--) {
+        UObject *x = ue_object_at(i);
+        if (is_live(x) && ue_is_a(x, c) && x != UC_CDO(U_CLASS(x))) { if (idx) *idx = i; return x; }
+    }
+    return NULL;
+}
+static UObject *live_of(const char *cls) { return live_at(cls, NULL); }
+// The screen opened by models_open_screen: the game's own way there (a usable in Fort Hope) also leaves it by itself;
+// ours enters the customization view (EnterCharacterCustomization: the camera on the screen's mannequin), so we leave
+// it once the screen is closed (Back / Esc), else the camera stays there.
+static UObject *our_screen, *our_mgr, *our_ps;
+static int32_t our_screen_idx, our_mgr_idx;
+static void tick_screen(void) {
+    if (!our_screen) return;
+    int open = 0;
+    if (ue_object_at(our_screen_idx) == our_screen && is_live(our_screen)) {
+        UFunction *f = fn_of(our_screen, "IsOpen");
+        uint8_t p[16] = {0};
+        if (f) { ue_process_event(our_screen, f, p); open = p[0] & 1; }
+    }
+    if (open) return;
+    UFunction *x = ue_object_at(our_mgr_idx) == our_mgr && is_live(our_mgr) ? fn_of(our_mgr, "ExitCharacterCustomization") : NULL;
+    int32_t xo = parm_off(x, "GobiPlayerState");
+    if (x && xo >= 0 && our_ps == my_ps()) {
+        uint8_t p[64] = {0};
+        *(UObject **)(p + xo) = our_ps;
+        ue_process_event(our_mgr, x, p);
+    }
+    // the view: the screen's camera (Character_CineCameraActor) stays the view target; back to our hero (the usable
+    // that normally leads there does this when its screen closes)
+    UObject *pc = ue_local_pc(), *pawn = pc ? ue_get_ptr(pc, "Pawn") : NULL, *vt = NULL;
+    UFunction *gv = fn_of(pc, "GetViewTarget"), *sv = fn_of(pc, "SetViewTargetWithBlend");
+    int32_t gr = parm_off(gv, "ReturnValue"), st = parm_off(sv, "NewViewTarget");
+    static UClass *cam;
+    if (!cam) cam = ue_find_class("CameraActor");
+    if (gv && gr >= 0) { uint8_t p[32] = {0}; ue_process_event(pc, gv, p); vt = *(UObject **)(p + gr); }
+    int view = pawn && sv && st >= 0 && UFN_PARMSSIZE(sv) <= 64 && vt && vt != pawn && cam && ue_is_a(vt, cam);
+    if (view) { uint8_t p[64] = {0}; *(UObject **)(p + st) = pawn; ue_process_event(pc, sv, p); }
+    LOG("models: customization screen closed: %s%s", x ? "left the customization view" : "its manager is gone",
+        view ? ", view back on the hero" : "");
+    our_screen = our_mgr = our_ps = NULL;
+}
+// Fort Hope's customization manager (the Wear button asks every frame: looked up once a second)
+static UObject *screen_mgr(void) {
+    static ULONGLONG t;
+    static UObject *mgr, *world;
+    UObject *w = ue_world();
+    if (w != world || GetTickCount64() - t > 1000) {
+        char pkg[256];
+        world = w; t = GetTickCount64();
+        mgr = w && strstr(ue_world_package(w, pkg, sizeof pkg), "FortHope") ? live_of("CharacterCustomizationManager") : NULL;
+    }
+    return mgr;
+}
+const char *models_screen_why_not(void) {
+    if (screen_off) return "The customization screen has no add-on outfits here (outfits_screen=0 in b4bcoop.ini).";
+    UObject *slot = ps_slot(my_ps());
+    if (!screen_mgr() || !slot || slot_hero(slot) < 0)
+        return "Wear it from the character customization screen in Fort Hope.";
+    return NULL;
+}
+const char *models_open_screen(const char *outfit) {
+    const char *why = models_screen_why_not();
+    if (why) return why;
+    UObject *ps = my_ps(), *slot = ps_slot(ps), *mgr = screen_mgr();
+    int32_t ho = ue_prop_offset(slot, "CurrentHeroRowHandle");
+    UFunction *f = fn_of(mgr, "EnterCharacterCustomization");
+    int32_t fo = parm_off(f, "GobiPlayerState");
+    if (!f || fo < 0 || ho < 0) return "The customization screen could not be opened (see the log).";
+    uint8_t p[64] = {0};
+    *(UObject **)(p + fo) = ps;
+    ue_process_event(mgr, f, p);
+    game_exec("OpenScreen CharacterCustomization 0");
+    int32_t sidx = 0, midx = 0;
+    UObject *scr = live_at("CharacterCustomizationScreen", &sidx);
+    UObject *m2 = live_at("CharacterCustomizationManager", &midx);
+    our_screen = scr; our_screen_idx = sidx; our_mgr = m2; our_mgr_idx = midx; our_ps = ps;   // tick_screen leaves it
+    UFunction *g = fn_of(scr, "SetCharacter");
+    int32_t go = parm_off(g, "CharacterRowHandle");
+    if (!g || go < 0) { LOG("models: customization screen: no screen (%p)", (void *)scr); return "The customization screen could not be opened (see the log)."; }
+    memset(p, 0, sizeof p);
+    RowHandle *h = (RowHandle *)(p + go), *src = (RowHandle *)((char *)slot + ho);
+    h->table = src->table; h->row = src->row;
+    ue_process_event(scr, g, p);
     int hi = slot_hero(slot);
-    char b[3][64], r[80], nm[40];
-    size_t k = hi >= 0 ? (size_t)snprintf(buf, n, "%s: ", heroes[hi].slug) : 0;
-    if (k >= n) k = 0;
-    if (!s || (!s->slot[SLOT_OUTFIT].table && !s->slot[SLOT_HEAD].table)) { snprintf(buf + k, n - k, "-"); return; }
-    if (s->last == SLOT_OUTFIT && s->slot[SLOT_OUTFIT].table) {
-        ue_name(s->slot[SLOT_OUTFIT].row, r, sizeof r);
-        if (!_strnicmp(r, NPC_PREFIX, sizeof NPC_PREFIX - 1)) snprintf(buf + k, n - k, "NPC %s", r + sizeof NPC_PREFIX - 1);
-        else if (outfit_row(s->slot[SLOT_OUTFIT].row, nm, sizeof nm))
-            snprintf(buf + k, n - k, "add-on outfit %s%s", nm, outfit_by_name(nm) ? "" : " (add-on not here: survivor shown)");
-        else handle_str(&s->slot[SLOT_OUTFIT], buf + k, n - k);
-        return;
-    }
-    for (int j = 0; j < 3; j++) handle_str(&s->slot[j], b[j], sizeof b[j]);
-    snprintf(buf + k, n - k, "%s + %s + %s", b[0], b[1], b[2]);
-}
-// The set shows that catalogue entry (its outfit, or one of its pieces).
-static int shows(const CustSet *s, const Entry *e) {
-    if (!s) return 0;
-    const RowHandle *h = &s->slot[e->slot];
-    if (h->table != e->table || !fname_eq(h->row, e->row)) return 0;
-    return (e->slot == SLOT_OUTFIT) == (s->last == SLOT_OUTFIT);
-}
-static int shows_made_up(const CustSet *s, const char *prefix, const char *name) {
-    char r[80], want[80];
-    if (!s || s->last != SLOT_OUTFIT || !s->slot[SLOT_OUTFIT].table) return 0;
-    snprintf(want, sizeof want, "%s%s", prefix, name);
-    return !_stricmp(ue_name(s->slot[SLOT_OUTFIT].row, r, sizeof r), want);
-}
-static int players_of(UObject ***arr) {
-    UObject *gs = ue_world() ? ue_get_ptr(ue_world(), "GameState") : NULL;
-    int32_t off = gs ? ue_prop_offset(gs, "PlayerArray") : -1;
-    if (off < 0) return 0;
-    TArray *pa = (TArray *)((char *)gs + off);
-    *arr = (UObject **)pa->data;
-    return pa->data ? pa->num : 0;
-}
-static int ps_is_bot(UObject *ps, UObject *slot) {
-    if (!is_client()) return is_bot_slot(slot);
-    int32_t off = ps ? ue_prop_offset(ps, "BotRowHandle") : -1;   // a client doesn't see other players' controllers
-    return off >= 0 && *(UObject **)((char *)ps + off);
-}
-static int contains(const char *hay, const char *needle) {
-    if (!needle[0]) return 1;
-    size_t n = strlen(needle);
-    for (; *hay; hay++) if (!_strnicmp(hay, needle, n)) return 1;
-    return 0;
-}
-
-static int p_target = -1;            // PlayerArray index whose look the lists change (host); -1 = your own
-static void pick(const char *name) {
-    if (p_target < 0) ov_run("model %s", name);
-    else ov_run("model #%d %s", p_target, name);
-}
-// A table of clickable names (3 per row); names[i] selected when sel[i].
-static void name_grid(const char *id, const char *const *names, const int *sel, int n) {
-    if (!n || !ov_table_begin(id, 3)) return;
-    for (int i = 0; i < n; i++) {
-        ov_table_next();
-        if (ov_selectable(names[i], sel[i])) pick(names[i]);
-    }
-    ov_table_end();
-}
-static void sort_names(const char **nm, int *sel, int n) {
-    for (int i = 1; i < n; i++)
-        for (int j = i; j > 0 && strcmp(nm[j - 1], nm[j]) > 0; j--) {
-            const char *t = nm[j]; nm[j] = nm[j - 1]; nm[j - 1] = t;
-            int u = sel[j]; sel[j] = sel[j - 1]; sel[j - 1] = u;
-        }
-}
-
-// The lists below return how many names they show. hdr: a search across every list (looks.c): a section heading,
-// drawn only when something matches, and no "nothing" lines.
-static int panel_survivors(const CustSet *cur, const char *search, const char *hdr) {
-    static const int order[4] = {SLOT_OUTFIT, SLOT_HEAD, SLOT_TORSO, SLOT_LEGS};
-    static const char *group[4] = {"Outfits", "Heads", "Torsos", "Legs"};
-    static const char *nm[MAX_ENTRIES];
-    static int sel[MAX_ENTRIES];
-    if (!n_heroes) { if (!hdr) ov_text_dim("No survivor data loaded yet (it loads with Fort Hope)."); return 0; }
-    if (search[0]) {   // flat: survivors and pieces whose name has the text
-        int n = 0, more = 0;
-        for (int h = 0; h < n_heroes; h++) if (heroes[h].count && contains(heroes[h].slug, search) && n < 200) { nm[n] = heroes[h].slug; sel[n++] = 0; }
-        for (int i = 0; i < n_cat; i++) {
-            if (!contains(cat[i].name, search)) continue;
-            if (n >= 200) { more++; continue; }
-            nm[n] = cat[i].name; sel[n++] = shows(cur, &cat[i]);
-        }
-        sort_names(nm, sel, n);
-        if (!n) { if (!hdr) ov_text_dim("Nothing matches."); return 0; }
-        if (hdr) ov_heading(hdr);
-        name_grid("found", nm, sel, n);
-        if (more) ov_text_dim("%d more: type more of the name.", more);
-        return n + more;
-    }
+    char rn[64];
+    snprintf(rn, sizeof rn, OUTFIT_PREFIX "%s", outfit ? outfit : "");
+    UFunction *e = outfit ? fn_of(scr, "EquipCustomization") : NULL;
+    int32_t eo = parm_off(e, "RowName"), so = parm_off(e, "InSlot");
     int shown = 0;
-    for (int h = 0; h < n_heroes; h++) {
-        if (!heroes[h].count) continue;
-        char lab[64];
-        ov_push_id(h);
-        snprintf(lab, sizeof lab, "%s (%d)##hero", heroes[h].slug, heroes[h].count);
-        if (ov_header(lab, 0)) {
-            snprintf(lab, sizeof lab, "Whole survivor: %s##whole", heroes[h].slug);
-            if (ov_button(lab)) pick(heroes[h].slug);
-            ov_tooltip("That survivor's default outfit (/model <survivor>).");
-            for (int g = 0; g < 4; g++) {
-                int n = 0;
-                for (int i = heroes[h].first; i < heroes[h].first + heroes[h].count; i++) {
-                    if (cat[i].slot != order[g]) continue;
-                    nm[n] = cat[i].name; sel[n++] = shows(cur, &cat[i]);
-                }
-                if (!n) continue;
-                sort_names(nm, sel, n);
-                ov_text_dim("%s", group[g]);
-                ov_push_id(g);
-                name_grid("g", nm, sel, n);
-                ov_pop_id();
-            }
-        }
-        ov_pop_id();
-        shown++;
+    if (e && eo >= 0 && so >= 0 && dt_row(heroes[hi].custtable, make_name(rn))) {   // shown on the screen's mannequin
+        memset(p, 0, sizeof p);
+        p[so] = SLOT_OUTFIT;
+        *(FName *)(p + eo) = make_name(rn);
+        ue_process_event(scr, e, p);
+        shown = 1;
     }
-    return shown;
+    LOG("models: customization screen opened for %s (~ window)%s%s", heroes[hi].slug, shown ? ", showing " : "", shown ? rn : "");
+    overlay_close();
+    return NULL;
 }
 
-static int panel_npcs(const CustSet *cur, const char *search, const char *hdr) {
-    static const char *grp[3] = {"Fort Hope and other NPCs", "Other survivors", "Cultists"};
-    static const char *nm[128];
-    static int sel[128];
-    if (n_npcs < 0) build_npcs();
-    if (!n_npcs) { if (!hdr) ov_text_dim("No NPC bodies found (the asset registry wasn't ready: try again in a map)."); return 0; }
-    if (!hdr) ov_text_dim("Seen by players with b4bcoop; others see your survivor. NPC bodies have no first-person arms.");
-    int total = 0;
-    for (int g = 0; g < 3; g++) {
-        int n = 0;
-        for (int i = 0; i < n_npcs; i++) {
-            const Npc *x = &npcs[i];
-            int gi = strstr(x->path, "/Characters/Cultists/") ? 2 : strstr(x->path, "/BaseHero/Meshes/3P_Survivor") ? 1 : 0;
-            if (gi != g || x->bad || !contains(x->name, search) || n >= 128) continue;
-            nm[n] = x->name; sel[n++] = shows_made_up(cur, NPC_PREFIX, x->name);
-        }
-        if (!n) continue;
-        if (hdr && !total) ov_heading(hdr);
-        total += n;
-        ov_text_dim("%s", grp[g]);
-        ov_push_id(g);
-        name_grid("npc", nm, sel, n);
-        ov_pop_id();
-    }
-    if (!total && !hdr) ov_text_dim("Nothing matches.");
-    return total;
-}
-
-static int panel_outfits(const CustSet *cur, const char *search, const char *hdr) {
-    if (!n_outfs) {
-        if (!hdr) ov_text_dim("No add-on outfits yet: Get more (above) lists free ones; mod makers: b4bmod survivor --as <name>.");
-        return 0;
-    }
-    int ord[MAX_OUTFS], n = 0;
-    for (int i = 0; i < n_outfs; i++) {
-        if (!contains(outfs[i].name, search) && !contains(outfs[i].title, search) && !contains(outfs[i].addon, search)) continue;
-        int j = n++;
-        for (; j > 0; j--) {
-            int c = strcmp(outfs[ord[j - 1]].addon, outfs[i].addon);
-            if (c < 0 || (c == 0 && strcmp(outfs[ord[j - 1]].name, outfs[i].name) < 0)) break;
-            ord[j] = ord[j - 1];
-        }
-        ord[j] = i;
-    }
-    if (!n) { if (!hdr) ov_text_dim("Nothing matches."); return 0; }
-    if (hdr) ov_heading(hdr);
-    else ov_text_dim("Seen by players who have the same add-on; others see your survivor.");
-    for (int q = 0; q < n; q++) {
-        const Outf *x = &outfs[ord[q]];
-        if (!q || strcmp(outfs[ord[q - 1]].addon, x->addon)) ov_text_dim("Add-on: %s", x->addon);
-        ov_push_id(ord[q]);
-        ov_begin_disabled(x->bad, "Its meshes did not load (see the log).");
-        if (ov_selectable(x->name, shows_made_up(cur, OUTFIT_PREFIX, x->name))) pick(x->name);
-        ov_end_disabled();
-        ov_same_line();
-        ov_text_dim("%s%s, made on %s", x->bad ? "NOT USABLE: " : "", x->title, x->hero);
-        ov_pop_id();
-    }
-    return n;
-}
-
-// ~ window, "Looks & add-ons" tab, Wear (looks.c draws the tab): your look, what to wear (the game's survivors and NPC
-// bodies, add-on outfits and weapon looks), everyone's look. *kind: the list shown without a search (0 survivors,
-// 1 NPC bodies, 2 add-on outfits, 3 weapon looks); a search shows every list's matches.
-void models_wear_panel(const char *search, int *kind) {
-    static ULONGLONG t_cat;
-    if (!n_cat && GetTickCount64() - t_cat > 3000) { t_cat = GetTickCount64(); build_catalogue(); }   // loads with Fort Hope
-    if (n_outfs < 0) build_outfits();
-    int client = is_client();
-    const char *why_host;
-    int host_ok = ov_allowed(CMD_HOST, &why_host);
-    UObject *mine = my_ps(), *myslot = ps_slot(mine);
-    UObject **pa; int np = players_of(&pa);
-    static UObject *target_ps;
-    if (p_target >= 0 && (!host_ok || p_target >= np || pa[p_target] != target_ps || pa[p_target] == mine)) p_target = -1;
-    char look[200];
-
-    if (!myslot) ov_text_dim("Your look: no survivor yet (character select, loading).");
-    else { look_str(myslot, look, sizeof look); ov_text("Your look: %s", look); }
-    if (refusal[0]) ov_text_warn("%s", refusal);
-    if (client && host_off == 1 && !refusal[0])
-        ov_text_warn("The host turned model swaps off: only your own survivor's outfits are accepted.");
-    if (ov_button("Reset my look##me")) ov_run("model reset");
-    ov_tooltip("/model reset: your survivor and your weapons back to your own look (from your profile).");
-    ov_same_line();
-    if (ov_button("Status (/model)##status")) ov_run("model");
-    ov_tooltip("Nothing is saved: your profile and outfits stay as they are. Everyone sees survivor outfits; NPC bodies "
-               "and add-on looks only players with b4bcoop (and the add-on).");
-    ov_same_line();
-    ov_text_dim("your pick: %s%s", me.on ? me.label : "none", me.on && me.gave_up && !refusal[0] ? " (not applied: the host did not accept it)" : "");
-    // host, with other players or bots here: whose look the lists change (/model <player> <name>)
-    if (host_ok && np > 1) {
-        static const char *items[17];
-        static char names[17][72];
-        static int idx[17];
-        int n = 0, cur = 0;
-        snprintf(names[n], sizeof names[n], "you"); items[n] = names[n]; idx[n++] = -1;
-        for (int i = 0; i < np && n < 17; i++) {
-            if (pa[i] == mine || !ps_slot(pa[i])) continue;
-            char nm[64];
-            admin_display_name(pa[i], nm, sizeof nm);
-            snprintf(names[n], sizeof names[n], "#%d %s%s", i, nm, ps_is_bot(pa[i], ps_slot(pa[i])) ? " [bot]" : "");
-            items[n] = names[n];
-            if (i == p_target) cur = n;
-            idx[n++] = i;
-        }
-        ov_width(14);
-        if (ov_combo("Change the look of##target", &cur, items, n)) {
-            p_target = idx[cur];
-            target_ps = p_target >= 0 ? pa[p_target] : NULL;
-        }
-        ov_tooltip("Host: pick a player or a bot, then click a look (/model <player> <name>); everyone is told.");
-    }
-    UObject *tslot = p_target >= 0 ? ps_slot(pa[p_target]) : myslot;
-    const CustSet *tcur = slot_set(tslot);
-    if (p_target >= 0) {
-        look_str(tslot, look, sizeof look);
-        char tn[64];
-        admin_display_name(pa[p_target], tn, sizeof tn);
-        ov_text("#%d %s now: %s", p_target, tn, look);
-        const Want *w = want_on(pa[p_target], tslot);
-        if (w) { ov_same_line(); ov_text_dim("(your pick for them: %s)", w->label); }
-        char lab[40];
-        snprintf(lab, sizeof lab, "Reset their look##t%d", p_target);
-        if (ov_button(lab)) ov_run("model #%d reset", p_target);
-    }
-    int blocked = !client && locked;
-    const char *why_blocked = "Model swaps are off (Host rules, below: allow them again).";
-    if (blocked) ov_text_warn("%s", why_blocked);
-
-    int nwl = wlooks_count();
-    if (search[0]) {
-        ov_text_dim("Everything that matches \"%s\": click a name to wear it (/model <name>).", search);
-        ov_begin_disabled(blocked, why_blocked);
-        int n = panel_survivors(tcur, search, "Survivors") + panel_npcs(tcur, search, "NPC bodies") +
-                panel_outfits(tcur, search, "Add-on outfits");
-        ov_end_disabled();
-        n += wlooks_panel(blocked, why_blocked, search, "Weapon looks");
-        if (!n) ov_text_dim("Nothing matches.");
-    } else {
-        char kl[48];   // two rows: the game's own looks, then your add-ons' (one row doesn't fit the window)
-        if (ov_radio("Survivors##k", *kind == 0)) *kind = 0;
-        ov_tooltip("Every survivor's outfits, heads, torsos and legs (also ones you haven't unlocked). Everyone sees them.");
-        ov_same_line();
-        if (ov_radio("NPC bodies##k", *kind == 1)) *kind = 1;
-        ov_tooltip("Fort Hope NPCs, other survivors, cultists. Players with b4bcoop see them; others see your survivor.");
-        snprintf(kl, sizeof kl, "Add-on outfits (%d)##k", n_outfs > 0 ? n_outfs : 0);
-        if (ov_radio(kl, *kind == 2)) *kind = 2;
-        ov_tooltip("Outfits your add-ons add. Players with the same add-on see them; others see your survivor.");
-        ov_same_line();
-        snprintf(kl, sizeof kl, "Weapon looks (%d)##k", nwl);
-        if (ov_radio(kl, *kind == 3)) *kind = 3;
-        ov_tooltip("Models your add-ons add for the game's weapons. Players with the same add-on see them.");
-        if (*kind < 3) ov_text_dim("Click a name to wear it (/model <name>).%s", *kind == 0 ? " Pieces add up; an outfit replaces them." : "");
-        ov_begin_disabled(blocked, why_blocked);
-        if (*kind == 0) panel_survivors(tcur, search, NULL);
-        else if (*kind == 1) panel_npcs(tcur, search, NULL);
-        else if (*kind == 2) panel_outfits(tcur, search, NULL);
-        ov_end_disabled();
-        if (*kind == 3) {
-            wlooks_panel(blocked, why_blocked, search, NULL);
-            if (p_target >= 0) ov_text_dim("Weapon looks are per player: these are yours.");
-        }
-    }
-
-    int rows = 0;
-    for (int i = 0; i < np; i++) rows += ps_slot(pa[i]) != NULL;
-    char eh[64];
-    snprintf(eh, sizeof eh, "Everyone's look (%d)###everyone", rows);
-    ov_separator();
-    if (ov_header(eh, 0)) {
-        if (!rows) ov_text_dim("Not in a game.");
-        else if (ov_table_begin("everyone", 4)) {
-            static const char *H[] = {"#", "Player", "Look", ""};
-            ov_table_header(H, 4);
-            for (int i = 0; i < np; i++) {
-                UObject *slot = ps_slot(pa[i]);
-                if (!slot) continue;
-                char nm[64], lab[40];
-                admin_display_name(pa[i], nm, sizeof nm);
-                ov_push_id(i);
-                ov_table_next(); ov_text("%d", i);
-                ov_table_next(); ov_text("%s%s%s", nm, pa[i] == mine ? " (you)" : "", ps_is_bot(pa[i], slot) ? " [bot]" : "");
-                ov_table_next();
-                look_str(slot, look, sizeof look);
-                ov_text("%s", look);
-                const Want *w = !client && pa[i] != mine ? want_on(pa[i], slot) : NULL;
-                if (w) ov_text_dim("host's pick: %s", w->label);
-                else if (pa[i] == mine && me.on) ov_text_dim("your pick: %s", me.label);
-                ov_table_next();
-                if (pa[i] == mine) { if (ov_button("Reset##row")) ov_run("model reset"); }
-                else {
-                    ov_begin_disabled(!host_ok, why_host);
-                    snprintf(lab, sizeof lab, "Change##%d", i);
-                    if (ov_button(lab)) { p_target = i; target_ps = pa[i]; }
-                    ov_tooltip("Pick a look for them above (/model <player> <name>).");
-                    ov_same_line();
-                    snprintf(lab, sizeof lab, "Reset##%d", i);
-                    if (ov_button(lab)) ov_run("model #%d reset", i);
-                    ov_tooltip("/model <player> reset");
-                    ov_end_disabled();
-                }
-                ov_pop_id();
-            }
-            ov_table_end();
-        }
-    }
-}
-
-// Host rules (looks.c, under every mode of the tab): model swaps allowed (/models on|off).
+// Host rules (looks.c, the bottom of the Add-ons tab): model swaps allowed (/models on|off), one line.
 void models_host_panel(void) {
     int client = is_client();
-    ov_heading("Model swaps");
     ov_begin_perm(CMD_HOST);
     int on = client ? host_off != 1 : !locked;   // a client shows what the host's notices said
     if (ov_checkbox("Model swaps allowed##models", &on)) ov_run(on ? "models on" : "models off");
-    ov_tooltip("Off (/models off): every swapped look goes back to normal; nobody can wear another survivor's outfit, an "
-               "NPC body, an add-on outfit or a weapon look. A player's own survivor's outfits stay allowed.");
-    if (client) ov_text_dim("%s", host_off < 0 ? "The host's setting is shown once it announces a change or refuses a look."
-                                               : "As the host last announced.");
-    else {
-        int none = !strcmp(addons_policy_name(), "none");
-        ov_text_dim("Players' add-on outfits and weapon looks: %s (add-on policy %s, below).", none ? "refused" : "allowed",
-                    addons_policy_name());
-        if (n_refused) ov_text_dim("Looks refused this session: %d.", n_refused);
-    }
-    if (ov_button("Status in the log (/models)")) ov_run("models");
+    ov_tooltip(client ? "The host's setting, as it last announced it. Off (/models off): nobody can wear another "
+                        "survivor's outfit, an NPC body, an add-on outfit or a weapon look."
+                      : "Off (/models off): every swapped look goes back to normal; nobody can wear another survivor's "
+                        "outfit, an NPC body, an add-on outfit or a weapon look. A player's own survivor's outfits stay "
+                        "allowed. /models shows the state.");
     ov_end_perm();
 }
 
@@ -2008,31 +1767,13 @@ static void cmd_standins(const char *cls, Out *o) {
 }
 
 // mdl cs open | list | equip <row> | close: the customization screen without walking to it (dev; #33 tests)
-static UObject *live_of(const char *cls) {
-    UClass *c = ue_find_class(cls);
-    for (int32_t i = ue_num_objects() - 1; c && i >= 0; i--) {   // newest first
-        UObject *x = ue_object_at(i);
-        if (is_live(x) && ue_is_a(x, c) && x != UC_CDO(U_CLASS(x))) return x;
-    }
-    return NULL;
-}
 static void cmd_cs(const char *a, const char *arg, Out *o) {
     UObject *ps = my_ps(), *slot = ps_slot(ps), *mgr = live_of("CharacterCustomizationManager");
     UObject *scr = live_of("CharacterCustomizationScreen");
-    int32_t ho = slot ? ue_prop_offset(slot, "CurrentHeroRowHandle") : -1;
-    if (!strcmp(a, "open")) {
-        UFunction *f = fn_of(mgr, "EnterCharacterCustomization");
-        uint8_t p[64] = {0};
-        if (f) { *(UObject **)(p + parm_off(f, "GobiPlayerState")) = ps; ue_process_event(mgr, f, p); }
-        game_exec("OpenScreen CharacterCustomization 0");
-        scr = live_of("CharacterCustomizationScreen");
-        UFunction *g = fn_of(scr, "SetCharacter");
-        if (!g || ho < 0) { out_printf(o, "no screen (%p) or hero\n", (void *)scr); return; }
-        memset(p, 0, sizeof p);
-        RowHandle *h = (RowHandle *)(p + parm_off(g, "CharacterRowHandle")), *src = (RowHandle *)((char *)slot + ho);
-        h->table = src->table; h->row = src->row;
-        ue_process_event(scr, g, p);
-        out_printf(o, "screen open for %s\n", slot_hero(slot) >= 0 ? heroes[slot_hero(slot)].slug : "?");
+    if (!strcmp(a, "open")) {   // as the ~ window's Wear (tick_screen leaves the view when it closes); arg: an outfit
+        const char *e = models_open_screen(arg);
+        if (e) out_printf(o, "%s\n", e);
+        else out_printf(o, "screen open for %s\n", slot_hero(slot) >= 0 ? heroes[slot_hero(slot)].slug : "?");
         return;
     }
     if (!scr) { out_printf(o, "no screen\n"); return; }
@@ -2073,6 +1814,7 @@ static void cmd_cs(const char *a, const char *arg, Out *o) {
     }
     if (!strcmp(a, "close")) {
         game_exec("CloseScreen CharacterCustomization 0");
+        if (our_screen) { out_printf(o, "closed (tick_screen leaves the customization view)\n"); return; }
         UFunction *f = fn_of(mgr, "ExitCharacterCustomization");
         uint8_t p[64] = {0};
         if (f) { *(UObject **)(p + parm_off(f, "GobiPlayerState")) = ps; ue_process_event(mgr, f, p); }

@@ -1,23 +1,23 @@
-// shop: Get more in the `~` window's "Looks & add-ons" tab (looks.c; was the Browse tab, #36,
-// docs/investigations/shop.md), a "Workshop" for publicly licensed add-ons published in a public GitHub repo; also the
-// Update / Remove / Undo of Installed rows (Remove: any add-on in the folder). Nothing is fetched, downloaded or
-// changed without the player's click, and nothing about what a player has leaves the machine (GitHub only sees the
-// downloads themselves).
+// shop: the add-on shop (#36, docs/investigations/shop.md), a "Workshop" for publicly licensed add-ons published in a
+// public GitHub repo: its rows in the `~` window's Add-ons tab (looks.c draws the table; this file has the list, the
+// downloads and the Add / Update / Remove / Undo actions; Remove and Undo work for any add-on in the folder). Nothing
+// about what a player has leaves the machine (GitHub only sees the downloads themselves).
 //   Get the list  catalog.json + catalog.json.sig (ed25519, the shop key from signkeys.h; updcore.c parses and checks it),
-//                 then the thumbnails it names (each checked against the SHA-256 in the signed list before
-//                 imgdecode.c looks at it).
+//                 once per game start when the player first arrives in Fort Hope (auto_fetch), and on Refresh. The
+//                 thumbnails it names are fetched when the tab first shows the list (each checked against the SHA-256
+//                 in the signed list before imgdecode.c looks at it).
 //   Add           the pak is streamed to <add-ons>\.shop\<id>.pak.part, its size and SHA-256 must equal the signed
 //                 list, then it becomes <add-ons>\<id>.pak and addons.c takes it (addons_add_runtime): appended to
 //                 addonlist.txt and mounted right away when that is safe (addons.c addons_load_now: cosmetic, new
 //                 files or replaced assets not in memory, as a client within the host's policy), else at the next start.
-//   Remove        (any add-on, Installed) switched off in addonlist.txt and noted in .shop\pending.txt; the next start
-//                 deletes the file before anything is mounted (shop_early, from addons_scan in DllMain). A mounted pak
-//                 is never unmounted.
+//   Remove        (any add-on) switched off in addonlist.txt and noted in .shop\pending.txt; the next start deletes
+//                 the file before anything is mounted (shop_early, from addons_scan in DllMain). A mounted pak is
+//                 never unmounted.
 //   Update        (a newer file in the list) downloaded to .shop\<id>.pak.new and swapped in by the next start; loaded
 //                 at once from there (above the old one) when nothing of the old version is in memory
 //                 (addons_update_runtime).
-// netguard lets GitHub's hosts through only while a request runs (the updater's scope). ini shop=0 hides Get more and
-// Installed's Update (Remove stays).
+// netguard lets GitHub's hosts through only while a request runs (the updater's scope). ini shop=0: no list, no
+// downloads (the tab shows the installed add-ons only; Remove stays).
 // Dev builds only: shop_catalog=<url> (e.g. http://127.0.0.1:<port>/catalog.json), shop_pubkey=<64 hex> (a test key),
 // dev command `shop status|fetch|add <id>|remove <id or file>|undo <id or file>|list`.
 #include <windows.h>
@@ -26,6 +26,7 @@
 #include <string.h>
 #include <ctype.h>
 #include <stdarg.h>
+#include "ue.h"
 #include "log.h"
 #include "cmds.h"
 #include "netguard.h"
@@ -119,6 +120,7 @@ typedef struct {
     char local_sha[65];             // SHA-256 of the file in the folder (worker, after the list arrived), "" unknown
     int staged;                     // D_VERIFIED: 1 = <id>.pak in place (Add), 2 = .shop\<id>.pak.new (update)
     int like_checked;               // like/like_why computed (game thread; reset when the folder's add-ons change)
+    int inst; ULONGLONG inst_t;     // installed() for the tab's rows, looked up at most once a second (0 = again)
     char like[64], like_why[48];    // the same add-on already in the folder under another file name (e.g. batman.pak)
 } ItemRt;
 // This session's Remove (any add-on) and Update (shop add-ons) clicks, by file name (game thread), written to
@@ -214,7 +216,7 @@ static int file_sha(const wchar_t *path, char hex[65]) {   // SHA-256 of a file 
 
 // .shop\pending.txt: "remove <file>" / "update <file>", applied by shop_early at the next start
 static int pending_write(void) {
-    char buf[16384]; int n = snprintf(buf, sizeof buf, "; b4bcoop ~ window (Looks & add-ons): applied at the next game start. Safe to delete (cancels them).\r\n");
+    char buf[16384]; int n = snprintf(buf, sizeof buf, "; b4bcoop ~ window (Add-ons): applied at the next game start. Safe to delete (cancels them).\r\n");
     for (int i = 0; i < npend && n < (int)sizeof buf - 96; i++)
         if (pend[i].op) n += snprintf(buf + n, sizeof buf - n, "%s %s\r\n", pend[i].op == 1 ? "remove" : "update", pend[i].file);
     wchar_t p[MAX_PATH * 2], t[MAX_PATH * 2];
@@ -264,34 +266,6 @@ static DWORD WINAPI fetch_worker(void *arg) {
                      c.updated[0] ? c.updated : "?", c.n_bad ? " (or none usable by this b4bcoop)" : "");
     else setmsg(C_READY, "%d add-on(s) in the list (updated %s)%s.", c.n, c.updated[0] ? c.updated : "?", c.n_bad ? "; some entries were not usable" : "");
     if (c.n_bad) LOG("shop: %d catalog entr%s skipped (bad fields)", c.n_bad, c.n_bad == 1 ? "y" : "ies");
-    // thumbnails: only bytes whose SHA-256 the signed list names are decoded
-    for (int i = 0; i < c.n; i++) {
-        ShopItem *it = &c.items[i];
-        if (!it->thumb[0]) continue;
-        EnterCriticalSection(&cs);
-        Thumb *t = thumb_of(it->thumb_sha256);
-        int full = nthumbs >= MAX_THUMBS;
-        LeaveCriticalSection(&cs);
-        if (t || full) continue;
-        uint8_t *img = NULL, d[32]; size_t in = 0;
-        if (!updater_http_get(it->thumb, SHOP_MAX_THUMB, &img, &in, err, sizeof err)) { LOG("shop: thumbnail of %s: %s", it->id, err); continue; }
-        upd_sha256(img, in, d);
-        int w = 0, h = 0;
-        uint8_t *rgba = memcmp(d, it->thumb_sha256, 32) ? NULL : img_thumb(img, in, THUMB_SIDE, &w, &h);
-        if (memcmp(d, it->thumb_sha256, 32)) LOG("shop: thumbnail of %s does not match the list's SHA-256: not shown", it->id);
-        else if (!rgba) LOG("shop: thumbnail of %s is not a PNG/JPEG picture", it->id);
-        free(img);
-        if (!rgba) continue;
-        EnterCriticalSection(&cs);
-        if (nthumbs < MAX_THUMBS && !thumb_of(it->thumb_sha256)) {
-            Thumb *n = &thumbs[nthumbs];
-            memcpy(n->sha, it->thumb_sha256, 32); n->rgba = rgba; n->w = w; n->h = h; n->tex = 0;
-            nthumbs++;
-            rgba = NULL;
-        }
-        LeaveCriticalSection(&cs);
-        free(rgba);
-    }
     netguard_updater_scope(0, NULL);
     // files already in the folder: their SHA-256 tells "installed" from "newer version in the list"
     for (int i = 0; i < c.n; i++) {
@@ -308,6 +282,62 @@ out:
     netguard_updater_scope(0, NULL);
     free(json); free(sig);
     return 0;
+}
+
+// ---- thumbnails (their own worker, started when the tab first shows the list): only bytes whose SHA-256 the signed
+// list names are decoded ----
+typedef struct { int n; struct { char id[33], url[400]; uint8_t sha[32]; } j[]; } ThumbJobs;
+static HANDLE thumb_thread;
+static int cat_gen, thumbs_gen = -1;   // the shown list's number; the list whose thumbnails were requested
+static DWORD WINAPI thumb_worker(void *arg) {
+    ThumbJobs *t = arg;
+    char err[300], extra[112] = "";
+    if (t->n) scope_host(t->j[0].url, extra, sizeof extra);
+    netguard_updater_scope(1, extra);
+    for (int i = 0; i < t->n; i++) {
+        uint8_t *img = NULL, d[32]; size_t in = 0;
+        if (!updater_http_get(t->j[i].url, SHOP_MAX_THUMB, &img, &in, err, sizeof err)) { LOG("shop: thumbnail of %s: %s", t->j[i].id, err); continue; }
+        upd_sha256(img, in, d);
+        int w = 0, h = 0;
+        uint8_t *rgba = memcmp(d, t->j[i].sha, 32) ? NULL : img_thumb(img, in, THUMB_SIDE, &w, &h);
+        if (memcmp(d, t->j[i].sha, 32)) LOG("shop: thumbnail of %s does not match the list's SHA-256: not shown", t->j[i].id);
+        else if (!rgba) LOG("shop: thumbnail of %s is not a PNG/JPEG picture", t->j[i].id);
+        free(img);
+        if (!rgba) continue;
+        EnterCriticalSection(&cs);
+        if (nthumbs < MAX_THUMBS && !thumb_of(t->j[i].sha)) {
+            Thumb *n = &thumbs[nthumbs];
+            memcpy(n->sha, t->j[i].sha, 32); n->rgba = rgba; n->w = w; n->h = h; n->tex = 0;
+            nthumbs++;
+            rgba = NULL;
+        }
+        LeaveCriticalSection(&cs);
+        free(rgba);
+    }
+    netguard_updater_scope(0, NULL);
+    free(t);
+    return 0;
+}
+// game thread (the tab, while it shows the list): the thumbnails of this list not fetched yet, once per list
+static void want_thumbs(void) {
+    if (thumbs_gen == cat_gen || !cat.n || (thumb_thread && WaitForSingleObject(thumb_thread, 0) == WAIT_TIMEOUT)) return;
+    thumbs_gen = cat_gen;
+    ThumbJobs *t = calloc(1, sizeof *t + (size_t)cat.n * sizeof t->j[0]);
+    if (!t) return;
+    EnterCriticalSection(&cs);
+    for (int i = 0; i < cat.n; i++) {
+        ShopItem *it = &cat.items[i];
+        if (!it->thumb[0] || thumb_of(it->thumb_sha256) || nthumbs + t->n >= MAX_THUMBS) continue;
+        snprintf(t->j[t->n].id, sizeof t->j[0].id, "%s", it->id);
+        snprintf(t->j[t->n].url, sizeof t->j[0].url, "%s", it->thumb);
+        memcpy(t->j[t->n].sha, it->thumb_sha256, 32);
+        t->n++;
+    }
+    LeaveCriticalSection(&cs);
+    if (!t->n) { free(t); return; }
+    if (thumb_thread) CloseHandle(thumb_thread);
+    thumb_thread = CreateThread(NULL, 0, thumb_worker, t, 0, NULL);
+    if (!thumb_thread) free(t);
 }
 
 // ---- Add / Update (worker): download, verify, put in place; the game thread finishes (shop_tick) ----
@@ -394,15 +424,32 @@ static void finish(int i, int last) {
     int r = again ? addons_load_now(file, last, m, sizeof m) : addons_add_runtime(file, m, sizeof m);
     if (r == 3) { snprintf(retry_id, sizeof retry_id, "%s", cat.items[i].id); return; }
     retry_id[0] = 0;
-    for (int k = 0; k < cat.n; k++) rt[k].like_checked = 0;   // a new add-on in the folder: "installed as" may change
+    for (int k = 0; k < cat.n; k++) rt[k].like_checked = 0, rt[k].inst_t = 0;   // a new add-on in the folder: "installed as" may change
     if (r == 2) {
         item_msg(i, D_DONE, "Added and ready now.");
         overlay_note("[add-ons] add-on added and ready");
     } else if (r == 1) item_msg(i, D_DONE, "Added: %s.", m);
     else item_msg(i, D_ERROR, "Downloaded, but not added: %s.", m);
 }
+// The list is fetched by itself once per game start: when the player first stands in a Fort Hope (theirs or a host's;
+// signed in, with a hero) for 3 s. Refresh gets it again.
+static const char *fetch(void);
+static void auto_fetch(float dt) {
+    static int done;
+    static float t;
+    if (done || !enabled || !addons_enabled()) return;
+    UObject *w = ue_world(), *pc = ue_local_pc();
+    char pkg[256];
+    int camp = w && pc && ue_get_ptr(pc, "Pawn") && !signin_pending() && !signin_on_title() &&
+               strstr(ue_world_package(w, pkg, sizeof pkg), "FortHope");
+    t = camp ? t + dt : 0;
+    if (t < 3) return;
+    done = 1;
+    LOG("shop: in Fort Hope for the first time this game: getting the add-on list");
+    if (cat.n || busy()) return;   // a dev `shop fetch` got there first
+    fetch();
+}
 void shop_tick(float dt) {
-    (void)dt;
     if (!cs_ready) return;
     if (have_next) {   // a fetched list replaces the shown one (only here: the panel reads cat without a lock)
         EnterCriticalSection(&cs);
@@ -411,7 +458,9 @@ void shop_tick(float dt) {
         memset(&next_cat, 0, sizeof next_cat); next_rt = NULL;
         LeaveCriticalSection(&cs);
         upd_catalog_free(&old); free(oldrt);   // this session's Remove/Update clicks stay in pend[] (by file)
+        cat_gen++;
     }
+    auto_fetch(dt);
     if (retry_id[0]) {
         int i = find(retry_id);
         if (i < 0) retry_id[0] = 0;
@@ -440,6 +489,12 @@ static int cat_index(const char *file) {   // the catalog entry whose file is `f
     if (l < 5 || l >= sizeof id || _stricmp(file + l - 4, ".pak")) return -1;
     snprintf(id, sizeof id, "%.*s", (int)(l - 4), file);
     return find(id);
+}
+static int installed(int i);
+static int installed_now(int i) {   // installed(), for the tab's rows drawn every frame: at most one look a second
+    ULONGLONG t = GetTickCount64();
+    if (!rt[i].inst_t || t - rt[i].inst_t > 1000) { rt[i].inst = installed(i); rt[i].inst_t = t; }
+    return rt[i].inst;
 }
 static int installed(int i) {   // the file is in the add-ons folder
     wchar_t p[MAX_PATH * 2];
@@ -498,7 +553,7 @@ static const char *add(int i) {
     start(download_worker, (void *)(intptr_t)i);
     return NULL;
 }
-// Remove (any add-on in the folder, Installed): switched off now, its file deleted at the next start (shop_early).
+// Remove (any add-on in the folder): switched off now, its file deleted at the next start (shop_early).
 static const char *remove_file(const char *file) {
     AddonState st;
     if (!addons_state(file, &st)) return "not in your add-ons folder";
@@ -533,37 +588,59 @@ static const char *undo_file(const char *file) {
     LOG("shop: undo %s of %s", was == 1 ? "remove" : "update", file);
     return NULL;
 }
-static void note_err(const char *e) { if (e) overlay_note(e); }
 
-// ---- ~ window, "Looks & add-ons" tab (looks.c): Get more, and the shop's part of Installed rows ----
-static int has(const char *hay, const char *needle) {
-    if (!*needle) return 1;
-    char h[1600], n[80];
-    snprintf(h, sizeof h, "%s", hay); snprintf(n, sizeof n, "%s", needle);
-    for (char *c = h; *c; c++) *c = (char)tolower((unsigned char)*c);
-    for (char *c = n; *c; c++) *c = (char)tolower((unsigned char)*c);
-    return strstr(h, n) != NULL;
-}
-static void size_str(uint64_t b, char *out, size_t n) {
-    if (b >= 1048576) snprintf(out, n, "%.1f MB", b / 1048576.0);
-    else snprintf(out, n, "%llu KB", (unsigned long long)(b + 1023) / 1024);
-}
-// what the row says and offers: 0 Add, 1 installed, 2 removal pending (Undo), 3 update pending (Undo),
-// 4 newer version (Update), 5 downloading/busy, 6 installed under another file name (*why = that file)
+// ---- the ~ window's Add-ons tab (looks.c draws it; game thread) ----
+// what the entry is now: SHOP_ADD (not here), SHOP_INSTALLED, SHOP_REMOVING / SHOP_UPDATING (a click waits for the
+// next start), SHOP_NEWER (the list has a newer file), SHOP_DOWNLOADING, SHOP_INSTALLED_AS (here under another file
+// name: *why = that file)
 static int row_state(int i, const char **why) {
     *why = NULL;
-    if (rt[i].dl == D_DOWNLOADING) return 5;
+    if (rt[i].dl == D_DOWNLOADING) return SHOP_DOWNLOADING;
     int op = pend_op(file_of(i));
-    if (op == 1) return 2;
-    if (op == 2) return 3;
-    if (!installed(i)) return (*why = like_of(i, NULL)) ? 6 : 0;
+    if (op == 1) return SHOP_REMOVING;
+    if (op == 2) return SHOP_UPDATING;
+    if (!installed_now(i)) return (*why = like_of(i, NULL)) ? SHOP_INSTALLED_AS : SHOP_ADD;
     char hex[65]; upd_hex(cat.items[i].sha256, 32, hex);
-    if (rt[i].local_sha[0] && strcmp(hex, rt[i].local_sha)) return 4;
-    return 1;
+    if (rt[i].local_sha[0] && strcmp(hex, rt[i].local_sha)) return SHOP_NEWER;
+    return SHOP_INSTALLED;
 }
 int shop_enabled(void) { return enabled; }
-// pictures decoded by the worker go to the GPU here (game thread, overlay lock inside ov_texture)
-static void upload_thumbs(void) {
+int shop_rows(void) { return enabled ? cat.n : 0; }
+int shop_index_of(const char *file) { return enabled ? cat_index(file) : -1; }
+const char *shop_name(int i) { return enabled && i >= 0 && i < cat.n ? cat.items[i].name : NULL; }
+int shop_busy(void) { return busy(); }
+int shop_phase(char *m, size_t n) {
+    EnterCriticalSection(&cs);
+    int ph = phase;
+    snprintf(m, n, "%s%s", msg, test_key ? " (dev: shop_pubkey test key)" : "");
+    LeaveCriticalSection(&cs);
+    return ph;
+}
+int shop_row(int i, ShopRow *r) {
+    memset(r, 0, sizeof *r);
+    if (!enabled || i < 0 || i >= cat.n) return 0;
+    const ShopItem *it = &cat.items[i];
+    r->id = it->id; r->name = it->name; r->version = it->version; r->author = it->author; r->desc = it->desc;
+    r->license = it->license; r->size = it->size;
+    snprintf(r->file, sizeof r->file, "%s", file_of(i));
+    const char *old = too_old(it);
+    snprintf(r->too_old, sizeof r->too_old, "%s", old ? old : "");
+    r->state = row_state(i, &r->like);
+    if (r->state == SHOP_INSTALLED_AS) like_of(i, &r->like_why);
+    EnterCriticalSection(&cs);
+    snprintf(r->msg, sizeof r->msg, "%s", rt[i].msg);
+    r->msg_err = rt[i].dl == D_ERROR;
+    Thumb *t = it->thumb[0] ? thumb_of(it->thumb_sha256) : NULL;
+    if (t && t->tex > 0) { r->tex = t->tex; r->tw = t->w; r->th = t->h; }
+    LeaveCriticalSection(&cs);
+    if (r->state == SHOP_DOWNLOADING) r->got = (unsigned long long)dl_got;
+    return 1;
+}
+// the tab shows the list: its thumbnails are fetched (once per list) and the decoded ones go to the GPU (overlay lock
+// inside ov_texture)
+void shop_show_thumbs(void) {
+    if (!enabled || !cat.n) return;
+    want_thumbs();
     EnterCriticalSection(&cs);
     for (int t = 0; t < nthumbs; t++)
         if (thumbs[t].rgba && !thumbs[t].tex) {
@@ -573,193 +650,13 @@ static void upload_thumbs(void) {
         }
     LeaveCriticalSection(&cs);
 }
-static void update_button(int i, int running) {
-    const char *old = too_old(&cat.items[i]);
-    char lab[64];
-    ov_begin_disabled(running || old, running ? "busy" : old);
-    snprintf(lab, sizeof lab, "Update##%s", cat.items[i].id);
-    if (ov_button(lab)) note_err(add(i));
-    ov_tooltip("A newer file is in the shop's list: downloaded now, ready at once when nothing of the old version is "
-               "in use, else after a restart.");
-    ov_end_disabled();
-}
-// A Remove / Update waiting for the next start: what (the row's text column) and Undo (its button column)
-static void pending_text(const char *file) {
-    int op = pend_op(file);
-    if (!op) return;
-    if (op == 2 && pend_live(file)) {
-        ov_text_dim("updated (the new version is loaded)");
-        ov_tooltip("Its file replaces the old one in the add-ons folder when the game next starts.");
-    } else ov_text_warn(op == 1 ? "removed when the game restarts" : "updated when the game restarts");
-}
-static void undo_button(const char *file, const char *undo_id) {
-    char lab[96];
-    if (!pend_op(file) || (pend_op(file) == 2 && pend_live(file))) return;
-    snprintf(lab, sizeof lab, "Undo##%s", undo_id);
-    if (ov_button(lab)) note_err(undo_file(file));
-    ov_tooltip(pend_op(file) == 1 ? "Keep it (switched back on)." : "Keep the current version (the downloaded one is deleted).");
-}
-static void item_note(int i) {   // the entry's last message (download, verify, loaded now or why not)
-    char im[200]; int idl;
-    EnterCriticalSection(&cs); snprintf(im, sizeof im, "%s", rt[i].msg); idl = rt[i].dl; LeaveCriticalSection(&cs);
-    if (!im[0] || idl == D_DOWNLOADING) return;
-    if (idl == D_ERROR) ov_text_warn("%s", im); else ov_text_dim("%s", im);
-}
-static void details(int i) {
-    ShopItem *it = &cat.items[i];
-    char hex[65], sz[32];
-    ov_text("%s%s%s", it->name, it->version[0] ? "  v" : "", it->version);
-    if (it->author[0]) ov_text_dim("by %s", it->author);
-    if (it->desc[0]) ov_text_dim("%s", it->desc);
-    ov_text("License: %s", it->license);
-    if (it->license_url[0]) { ov_same_line(); if (ov_button("Copy the license link")) ov_copy(it->license_url); }
-    ov_text("Content: %s%s%s%s", it->cls, it->kinds[0] ? " (" : "", it->kinds, it->kinds[0] ? ")" : "");
-    if (it->adds[0]) ov_text_dim("Adds: %s. New looks are ready right after Add: Wear / Use on the row, or in Wear (above).", it->adds);
-    if (it->replaces[0]) ov_text_dim("Replaces: %s. A replacement works right after Add unless the game is using what it replaces (then after a restart).", it->replaces);
-    if (!strcmp(it->cls, "gameplay")) ov_text_warn("Gameplay-affecting: hosts with addons_policy=cosmetic, none or match (without the same add-on) refuse players who run it.");
-    size_str(it->size, sz, sizeof sz);
-    upd_hex(it->sha256, 32, hex);
-    ov_text_dim("File %s.pak, %s, SHA-256 %.16s...", it->id, sz, hex);
-    if (it->min_version[0]) ov_text_dim("Needs b4bcoop %s or newer.", it->min_version);
-    if (ov_button("Copy the download link")) ov_copy(it->url);
-}
-
-// Get more: the shop's list. filter: 0 all, 1 new looks, 2 replacements, 3 not installed yet.
-void shop_get_panel(const char *search, int filter) {
-    static int sel = -1;
-    EnterCriticalSection(&cs);
-    int ph = phase; char m[300]; snprintf(m, sizeof m, "%s", msg);
-    LeaveCriticalSection(&cs);
-    int running = busy();
-    static const char *INTRO = "Free add-ons with a public license (github.com/actuallydan/back4blood-shop). Nothing is "
-                               "downloaded until you click, nobody else learns what you add, and every file is checked "
-                               "against the signed list.";
-    if (!cat.n) ov_text_dim("%s", INTRO);
-    if (test_key) ov_text_warn("Dev build: shop_pubkey= test key, list %s", cat_url);
-    if (!addons_enabled()) { ov_text_warn("Add-ons are off (addons=0 in b4bcoop.ini): Installed (above) turns them on."); return; }
-    ov_begin_disabled(running, "busy");
-    if (ov_button(cat.n || ph == C_READY ? "Refresh the list" : "Get the add-on list")) note_err(fetch());
-    ov_end_disabled();
-    if (cat.n) ov_tooltip(INTRO);
-    if (ph == C_FETCHING || ph == C_ERROR || ph == C_READY) { ov_same_line(); if (ph == C_ERROR) ov_text_warn("%s", m); else ov_text_dim("%s", m); }
-    if (!cat.n) return;
-    upload_thumbs();
-    if (sel >= cat.n) sel = -1;
-    int open = ov_table_begin("shop", 3), shown = 0;
-    if (open) { static const char *H[] = {"", "Add-on", ""}; ov_table_header(H, 3); }
-    for (int i = 0; i < cat.n && open; i++) {
-        ShopItem *it = &cat.items[i];
-        char hay[1600], lab[160];
-        snprintf(hay, sizeof hay, "%s|%s|%s|%s|%s|%s|%s|%s", it->name, it->author, it->license, it->desc, it->adds, it->replaces, it->kinds, it->id);
-        if (!has(hay, search)) continue;
-        const char *why;
-        int rs = row_state(i, &why);
-        if (filter == 1 && (!it->adds[0] || it->replaces[0])) continue;
-        if (filter == 2 && !it->replaces[0]) continue;
-        if (filter == 3 && rs != 0 && rs != 5) continue;
-        shown++;
-        ov_push_id(i);
-        ov_table_next();
-        EnterCriticalSection(&cs);
-        Thumb *t = it->thumb[0] ? thumb_of(it->thumb_sha256) : NULL;
-        int tex = t && t->tex > 0 ? t->tex : 0, pw = t ? t->w : 0, phh = t ? t->h : 0;
-        LeaveCriticalSection(&cs);
-        float tw = 3.5f, th = 3.5f;
-        if (tex && pw && phh) { if (pw >= phh) th = 3.5f * phh / pw; else tw = 3.5f * pw / phh; }
-        ov_image(tex, tw, th);
-        ov_table_next();
-        snprintf(lab, sizeof lab, "%s%s%s##sel:%s", it->name, it->version[0] ? "  v" : "", it->version, it->id);
-        if (ov_selectable(lab, sel == i)) sel = sel == i ? -1 : i;
-        ov_tooltip("Click for the details (license, description, file).");
-        char sz[32]; size_str(it->size, sz, sizeof sz);
-        ov_text_dim("%s%s%slicense %s, %s, %s", it->author[0] ? "by " : "", it->author, it->author[0] ? ", " : "", it->license, it->cls, sz);
-        if (it->adds[0]) ov_text_dim("Adds: %s", it->adds);
-        if (it->replaces[0]) ov_text_dim("Replaces: %s", it->replaces);
-        if (rs == 6) {   // already in the folder under another file name: said here (the last column is narrow)
-            const char *lw; like_of(i, &lw);
-            ov_text("Installed (as %s)", why);
-            ov_tooltip("Already in your add-ons folder under another file name, so it isn't added twice. Installed "
-                       "(above) switches it on/off.");
-            if (!strcmp(lw, "same content")) ov_text_dim("the same add-on");
-            else ov_text_dim("%s adds the same %s", why, lw);
-        }
-        if (rs == 2 || rs == 3) pending_text(file_of(i));
-        if (rs != 5) item_note(i);
-        ov_table_next();
-        const char *old = too_old(it);
-        if (rs == 5) {
-            LONG64 g = dl_got;
-            ov_text_dim("%lld / %llu KB", (long long)g / 1024, (unsigned long long)it->size / 1024);
-        } else if (rs == 0) {
-            ov_begin_disabled(running || old, running ? "busy" : old);
-            snprintf(lab, sizeof lab, "Add##%s", it->id);
-            if (ov_button(lab)) note_err(add(i));
-            ov_end_disabled();
-        } else if (rs == 6) {
-            AddonState as;   // that add-on's state, short like an installed row's ("on", "off", ...)
-            ov_text("%s", addons_state(why, &as) ? as.state : "in the folder");
-            addons_look_buttons(why);
-        } else if (rs == 2 || rs == 3) {
-            undo_button(file_of(i), it->id);
-            if (rs == 3) addons_look_buttons(file_of(i));
-        } else {
-            AddonState as;
-            if (addons_state(file_of(i), &as)) ov_text("%s", as.state); else ov_text("in the folder");
-            addons_look_buttons(file_of(i));   // ready now: wear / use it right here
-            if (rs == 4) update_button(i, running);
-        }
-        ov_pop_id();
-        if (sel == i) {   // the details open under the row: this table ends, a new one (same columns) follows
-            ov_table_end();
-            details(i);
-            ov_separator();
-            open = ov_table_begin("shop", 3);
-        }
-    }
-    if (open) ov_table_end();
-    if (!shown) ov_text_dim("Nothing in the list matches%s.", filter ? " (with this filter)" : "");
-}
-
-// Installed: this add-on's shop actions in its row (any add-on: the pending Remove + Undo; shop add-ons: Update when
-// the list has a newer file, the download's progress).
-void shop_installed_actions(const char *file) {
-    int i = enabled ? cat_index(file) : -1;
-    if (i >= 0 && rt[i].dl == D_DOWNLOADING) {
-        LONG64 g = dl_got;
-        ov_text_dim("%lld / %llu KB", (long long)g / 1024, (unsigned long long)cat.items[i].size / 1024);
-        return;
-    }
-    if (pend_op(file)) undo_button(file, file);
-    else if (i >= 0) {
-        const char *why;
-        if (row_state(i, &why) == 4) update_button(i, busy());
-    }
-}
-void shop_item_note(const char *file) {   // Installed: a waiting Remove/Update and the shop's last message (under the title)
-    pending_text(file);
-    int i = enabled ? cat_index(file) : -1;
-    if (i >= 0 && rt[i].dl != D_DOWNLOADING) item_note(i);
-}
+const char *shop_fetch(void) { return fetch(); }
+const char *shop_add(int i) { return add(i); }
 int shop_pending(const char *file) { return pend_op(file); }
+int shop_pending_live(const char *file) { return pend_live(file); }
 const char *shop_remove(const char *file) { return remove_file(file); }
-// Installed, above the list: get the shop's list (as Get more does) so that shop add-ons show Update.
-void shop_check_button(void) {
-    if (!enabled || !addons_enabled()) return;
-    EnterCriticalSection(&cs);
-    int ph = phase; char m[300]; snprintf(m, sizeof m, "%s", msg);
-    LeaveCriticalSection(&cs);
-    ov_begin_disabled(busy(), "busy");
-    if (ov_button("Check for updates##shop")) note_err(fetch());
-    ov_tooltip("Gets the add-on shop's list (as Get more does): your add-ons from the shop show Update when it has a newer file.");
-    ov_end_disabled();
-    if (ph == C_FETCHING || ph == C_ERROR) { ov_same_line(); if (ph == C_ERROR) ov_text_warn("%s", m); else ov_text_dim("%s", m); return; }
-    if (ph != C_READY) return;
-    int n = 0;
-    const char *why;
-    for (int i = 0; i < cat.n; i++) n += row_state(i, &why) == 4;
-    ov_same_line();
-    ov_text_dim(n ? "%d update(s) in the shop's list." : "No updates in the shop's list.", n);
-}
+const char *shop_undo(const char *file) { return undo_file(file); }
+
 // ---- init / ini ----
 static void ini_pair(const char *k, const char *v, void *ctx) {
     (void)ctx;
@@ -771,7 +668,7 @@ static void ini_pair(const char *k, const char *v, void *ctx) {
 }
 int shop_live(const char *k, const char *v) {
     if (!strcmp(k, "shop")) {
-        enabled = !v || atoi(v) != 0;   // the ~ window's Get more (looks.c) reads it every frame
+        enabled = !v || atoi(v) != 0;   // the ~ window (looks.c) reads it every frame
         return 1;
     }
 #ifndef B4B_RELEASE
@@ -791,7 +688,7 @@ void shop_init(void) {
     InitializeCriticalSection(&cs); cs_ready = 1;
     memcpy(pubkey, SHOP_PUBKEY, 32);
     cmds_ini_each(ini_pair, NULL);
-    LOG("shop: %s; list %s%s", enabled ? "on (~ window, Get more)" : "off (shop=0)", cat_url, test_key ? " (test key)" : "");
+    LOG("shop: %s; list %s%s", enabled ? "on (~ window, Add-ons; the list is fetched in Fort Hope)" : "off (shop=0)", cat_url, test_key ? " (test key)" : "");
 }
 
 #ifndef B4B_RELEASE

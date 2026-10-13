@@ -71,36 +71,40 @@ Detailed engine findings (addresses, obfuscated layouts, class names): `docs/NOT
     FPakPlatformFile), `paks`, `mountpak <path> [order]`, ini `modpaks=<windows dir>` (raw paks, order 3000+). Pak
     writer: `modkit/b4bpak.py` (`tools/b4bpak.py` forwards). docs/investigations/model-mods-paks.md.
   - `addons.c` add-ons (#20): `<game>\b4bcoop-addons\*.pak` (ini `addons_dir=`, `addons=0`), read in DllMain:
-    `addonlist.txt` on/off + load order (later wins, read order 1000+), embedded `b4bcoop-addoninfo.txt`, index SHA1
-    checked, conflicts (same file; "mixed" = one package from two add-ons) logged + one chat notice; chat
-    `/addons [on|off|info <#>]` (off/order: next start; on: loaded at once when safe); `~` Installed (Looks & add-ons tab, `addons_installed_panel`: on/off, Up/Down load
-    order = `ord[]` + file, details under the row, Wear/Use `addons_look_buttons`; addons.md §8). Packer `modkit/addon.py pack|info|check`. `addons_mp.c` (#22, private
+    `addonlist.txt` on/off + load order (later wins, read order 1000+; edited by hand or `/addons on|off`, no order UI),
+    embedded `b4bcoop-addoninfo.txt`, index SHA1 checked, conflicts (same file; "mixed" = one package from two add-ons)
+    logged + one chat notice; chat `/addons [on|off|info <#>]` (off/order: next start; on: loaded at once when safe);
+    rows of the `~` Add-ons tab (`addons_info`, `addons_look_buttons`: Wear = `models_open_screen` / Use / Stop;
+    addons.md §8). Packer `modkit/addon.py pack|info|check`. `addons_mp.c` (#22, private
     #35): nothing about a player's add-ons is sent; the host announces `addons_policy` (presence ` addons:<policy>`,
     else a login refusal ending `[addons:<policy>]`), the joiner checks itself, declines locally or logs in with
     `?b4bcoopaddonsok=<policy>`; older clients' `?b4bcoopaddons=` summary still judged, never logged (`log_redact_addons`).
     Client-side only, no protocol bump. docs/investigations/addons.md. Loading without a restart (shop.md §1):
-    `addons_add_runtime` (Get more's Add: appended to addonlist.txt) / `addons_load_now` (also `/addons on`) /
+    `addons_add_runtime` (the shop's Add: appended to addonlist.txt) / `addons_load_now` (also `/addons on`, Turn on) /
     `addons_update_runtime` (Update, mounts `.shop\<id>.pak.new` above all add-ons): cosmetic only; as a client
     only within the host's announced policy (`addons_session_allows`); new paths always; replaced files only whole
     packages (.uasset/.uexp/.ubulk/.uptnl) that are not in memory (`paks_package_loaded`, GUObjectArray) while the
     engine's `IsAsyncLoading` (`paks_async_loading`) is idle (busy: the shop asks again for 15 s), never another add-on's
     files above it in the load order (owner table `own_*`); else next start. Then `models_outfits_refresh` (rows on the
     customization screen next frame) / `wlooks_refresh` (updated entries too).
-  - `looks.c` the `~` **Looks & add-ons** tab (replaced the Models, Add-ons and Browse tabs): modes **Wear**
-    (models.c `models_wear_panel` + weaponlooks.c `wlooks_panel`), **Installed** (addons.c), **Get more** (shop.c),
-    one shared search box, **Host rules** header under every mode (`models_host_panel`, `addons_mp_panel`); a mode row
-    is `ov_tabs`; `looks_show()` switches mode (Installed's "Wear (n)"). Dev `overlay tab Models|Add-ons|Browse|Wear|
-    Installed|Get more` = the tab in that mode (`overlay_add_alias`). docs/investigations/overlay.md "Looks & add-ons".
-  - `shop.c` the add-on shop (#36): **Get more** (ini `shop=0` hides it and Update) + Installed's Update/Remove/Undo
-    (`shop_installed_actions`; Remove works for any add-on file): on click `catalog.json` + `.sig`
+  - `looks.c` the `~` **Add-ons** tab (2026-10-13; replaced the Looks & add-ons tab's Wear / Installed / Get more modes,
+    which had replaced the Models, Add-ons and Browse tabs): one table, the installed add-ons (addons.c, hand-dropped
+    paks too) and the shop's list (shop.c; same content = one row): thumbnail | name + size | installed state | Add,
+    Update, Undo, Turn on, Wear / Use / Stop, Remove; installed first, sort name / time installed both ways, search,
+    filter All / Installed / Available; no load order, no on/off, no details; Host rules (`models_host_panel`,
+    `addons_mp_panel`) at the bottom. Dev `overlay tab Models|Browse|Get more|Wear|Looks|Installed` = this tab
+    (`overlay_add_alias`). docs/investigations/overlay.md "Add-ons tab".
+  - `shop.c` the add-on shop (#36): its list is fetched by itself once per game start on the first arrival in Fort
+    Hope (`auto_fetch`; host or client), Refresh at will (ini `shop=0`: no list, no downloads): `catalog.json` + `.sig`
     (ed25519, its own shop key, never the release key: `signkeys.h`; `upd_catalog_*` in updcore.c) from the public
     shop repo `actuallydan/back4blood-shop` (its workflow builds + signs the list; raw.githubusercontent.com, inside
-    netguard's updater scope), thumbnails (SHA-256 from the signed list, then stb_image in `imgdecode.c`, `ov_texture`),
-    Add = pak streamed to `b4bcoop-addons\.shop\<id>.pak.part`, size + SHA-256 checked, renamed to `<id>.pak`,
-    `addons_add_runtime`; Remove/Update via `.shop\pending.txt`, applied by `shop_early` (DllMain, from addons_scan);
-    an Update is also loaded at once when nothing of the old version is in memory (`addons_update_runtime`).
-    Nothing about installed add-ons is sent. Dev: ini `shop_catalog=`, `shop_pubkey=`; `shop status|list|fetch|add|
-    remove|undo <id>`. Catalog tool `tools/shop-catalog.py build|sign|verify`. docs/investigations/shop.md.
+    netguard's updater scope), thumbnails when the tab first shows the list (SHA-256 from the signed list, then
+    stb_image in `imgdecode.c`, `ov_texture`), Add = pak streamed to `b4bcoop-addons\.shop\<id>.pak.part`, size + SHA-256
+    checked, renamed to `<id>.pak`, `addons_add_runtime`; Remove (any add-on file)/Update via `.shop\pending.txt`,
+    applied by `shop_early` (DllMain, from addons_scan); an Update is also loaded at once when nothing of the old
+    version is in memory (`addons_update_runtime`). Rows for looks.c: `shop_row`. Nothing about installed add-ons is
+    sent. Dev: ini `shop_catalog=`, `shop_pubkey=`; `shop status|list|fetch|add|remove|undo <id>`. Catalog tool
+    `tools/shop-catalog.py build|sign|verify`. docs/investigations/shop.md.
   - `teamsize.c` opt-in 5+ player team (`teamsize=N` ini/command, raises `Config.TeamSize` before InitSlots; `slots`
     dumps the slot layout). docs/investigations/five-players.md.
   - `lineup.c` post-round/pre-round/character-select lineup with 5+ heroes (#8): spawns an extra mannequin when the
@@ -133,7 +137,7 @@ Detailed engine findings (addresses, obfuscated layouts, class names): `docs/NOT
     `overlay_key`, `overlay_scale`. Panels: `overlay.h` (`overlay_add_panel` from a module's init + C `ov_*` widgets;
     actions `ov_run` = the chat path `admin_slash`, settings `ov_setting` = ini live handler + writer; `ov_begin_perm`
     greys out host/cheat controls). Tabs live next to their module (presence.c Session, admin.c Players,
-    thirdperson.c Camera, flashlight.c Flashlight, cheats.c Cheats, looks.c Looks & add-ons). Dev `overlay
+    thirdperson.c Camera, flashlight.c Flashlight, cheats.c Cheats, looks.c Add-ons). Dev `overlay
     open|close|status|tab|press|set|locate|mouse|wheel|log`, `screenshot <path>` (presented frame as PNG,
     launch/shot.sh); e2e has a smoke check. docs/investigations/overlay.md (parity checklist). **It replaces the chat
     commands:** port every chat command into it; once it has them all, new features get overlay controls (+ ini keys)
@@ -141,7 +145,7 @@ Detailed engine findings (addresses, obfuscated layouts, class names): `docs/NOT
   - `chat.c` in-game chat commands: hooks the local player's Say/SayTeam, `/cmd` is run locally and never sent;
     replies as local chat lines; host notices via ClientTeamMessage with our own type (a third type `b4bcoopdata`:
     silent data lines for the client's agent, `admin_data_to`). Test: `type <text>` (real key
-    presses), `click <x> <y>` (mouse click, e.g. post-round Continue), `chat status`, `popup [close]` (dev builds).
+    presses), `key <vk>` (one key press, `key 0x1B` = Esc), `click <x> <y>` (mouse click, e.g. post-round Continue), `chat status`, `popup [close]` (dev builds).
     `admin.c` the commands (`/help join host leave players ping kick ban lock bots restart say ready ...`, same verbs
     on the dev CLI) and the host's PreLogin gate (join policy first, then the b4bcoop protocol (`?b4bcoop=` login
     option; mismatch → "Host runs b4bcoop X (protocol N); you have Y (protocol M). Everyone needs the same version."
@@ -158,14 +162,15 @@ Detailed engine findings (addresses, obfuscated layouts, class names): `docs/NOT
     0x141B75B90: heroes, cutscene stand-ins, lineup mannequins, #37). Customization screen (#33, new-assets.md §11):
     real rows `b4bcoop.outfit.<name>` inserted into every `<Hero>_Customization_DT` on this machine; the profile never
     stores them (equip hook keeps the previous look, choice in `b4bcoop-outfits.txt`, GetProfileCustomization hook
-    answers with it); ini `outfits_screen=0`. Dev `mdl ...` (`mdl screen`, `mdl cs open|list|equip|close`,
-    `mdl standins`). `weaponlooks.c`: add-on weapon looks (addoninfo `weapon=`,
+    answers with it); ini `outfits_screen=0`. The Add-ons tab's Wear opens that screen with the outfit on
+    (`models_open_screen`, Fort Hope; `tick_screen` leaves the customization view and puts the view back on the hero
+    when it closes). Dev `mdl ...` (`mdl screen`, `mdl cs open|list|equip|close`, `mdl standins`). `weaponlooks.c`: add-on weapon looks (addoninfo `weapon=`,
     `b4bmod weapon --as`), made-up skin row `b4bcoop.weapon.<name>` in the weapon's replicated
     `ItemMeshManagementComponent.CustomizationRow`, meshes swapped by every machine with the add-on, others see the
     default weapon; a dropped weapon keeps its look on the floor (pickup's `3P_<Code>_SM`; the host pairs it by
     PreviousOwner, add-on or not, and names it to clients and late joiners in `wlook floor|gone|hello` data lines;
     clients guess by position until then), the next owner's own choice applies; world pickups and the dropped magazine
-    stay retail; `~` Looks & add-ons, Wear; dev `wlook dump|swap|select|drop|drophero|row|pickups|use|guess` (new-assets.md §9).
+    stay retail; `~` Add-ons tab: Use / Stop on the add-on's row; dev `wlook dump|swap|select|drop|drophero|row|pickups|use|guess` (new-assets.md §9).
     docs/investigations/model-swap.md, player page docs/commands-models.md.
   - `cheats.c` Cheats: opt-in, host-only sandbox through chat (`/cheats on|off`, then `/god /heal /revive /ammo /copper
     /card /fly /noclip /walk /tp /freecam /size /horde /director /spawn /killall /freeze /slomo /win /lose`); own-save
@@ -374,7 +379,9 @@ SP forwarded, a seamless chapter transition, both profiles diffed after the defe
 amount exactly, host only its own), the 0.3.0 defaults (host without `host=`, presence `steam:` + `proto:` and no
 `addr:`, protocol in the login options), no public peer on any game socket and nothing bound off loopback (`ss`
 sampler, every second; sockets made through Wine's ws2_32 only: Steam's native steamclient.so relay pings, ss lines
-without `wineserver`, are listed apart and are no failure; steam-p2p.md "Loopback binding"). `--full` adds a vanilla
+without `wineserver`, are listed apart and are no failure; steam-p2p.md "Loopback binding"; so is HTTPS to GitHub's
+raw.githubusercontent.com addresses: the add-on shop's list, fetched once per game start in Fort Hope). The `~`
+window smoke check also opens the Add-ons tab (the list fetched by itself, Refresh). `--full` adds a vanilla
 `multi.sh 5` (5th refused "Server full.", host survives) and a `teamsize=5` round (5 follow, SP forwarded to all 4
 clients). Summary table at the end, exit 1 on failure; logs, agent transcript, profile diffs, ss samples and
 screenshots in `/tmp/b4b-e2e-<time>/` (`--out`). `B4B_LANE=2 tools/e2e.py --quick` runs it on lane 2 (above), in
@@ -389,11 +396,13 @@ release on a local fake GitHub API, refused bad downloads, install → restart �
 39 checks; `B4B_LANE=2 B4B_STEAM=flatpak B4B_GPU=4090 tools/update-test.py [--no-lock]`). `lane-restore.sh` also
 covers `<game>/b4bcoop-update/`.
 **Add-on shop: `tools/shop-test.py`** (live, one instance, then `multi.sh 3` and `multi.sh 2`: local catalog signed with
-a throwaway key on 127.0.0.1, own `addons_dir=`; bad signature, damaged/truncated downloads refused, Add outfit in
-Fort Hope (customization screen opened before: its row there) + weapon look in a mission mounted at once and worn, a
+a throwaway key on 127.0.0.1, own `addons_dir=`; the list fetched by itself in Fort Hope (bad signature refused),
+Refresh, damaged/truncated downloads refused, the Add-ons table (installed first, A-Z / Z-A, time installed both ways,
+filter, search; row order through `overlay locate`), Add outfit in Fort Hope mounted at once and worn through the
+row's Wear (the customization screen, Esc twice: view back on the hero), weapon look in a mission (Use / Stop), a
 replacement of a loaded asset after restart, Remove at the next start, an Update loaded at once / one in use at the
-next start, `/addons on` at once, Add as a client (host with the add-on sees it, a client without sees the survivor),
-a host with `addons_policy=none` keeps the client's Add for the next start; 56 checks, ~12 min;
+next start, Turn on at once, Add + Wear as a client (host with the add-on sees it, a client without sees the
+survivor), a host with `addons_policy=none` keeps the client's Add for the next start; ~65 checks, ~12 min;
 `B4B_LANE=2 B4B_STEAM=flatpak B4B_GPU=4090 tools/shop-test.py [--no-lock]`; test paks in
 `~/.local/share/b4b-coop/shop-test/src/`, never committed).
 **Launch choice co-op / Online (#47): `tools/online-test.py`** (live, test instance 1 on its own prefix and ini, never
@@ -474,6 +483,9 @@ Verified live (2026-09-23/24; details and evidence in `docs/investigations/*.md`
 - One `~` tab, Looks & add-ons (2026-10-12, lane 2 / Flatpak Proton): Models, Add-ons and Browse merged (Wear /
   Installed / Get more, one search box, Host rules), host and client, 960x540 and 1080p, text size 1.25 and 0.75;
   `tools/shop-test.py` 58/58.
+- Add-ons tab (2026-10-13, lane 2 / native Steam on Proton): one table instead of Wear / Installed / Get more (shop list
+  fetched by itself in Fort Hope, installed first, sort / filter / search, Wear = the customization screen, Use / Stop,
+  no load order), host and client, 960x540 and 1080p, text size 1.25 and 0.75; `tools/shop-test.py` 68/68.
 
 Known issues / open:
 - #8 (fixed): the 5th hero in the post-round lineup stands in the back row, dimmer and without a name plate.
