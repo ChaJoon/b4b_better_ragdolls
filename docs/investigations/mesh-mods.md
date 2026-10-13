@@ -1271,3 +1271,70 @@ on whole bodies (Ahsoka 0.02, Spider-Man Miles 0.00, Becky Lynch 0.02) and their
   metal suits); preview stills old vs new: the wet sheen gone. Live (lane 1, Proton, `multi.sh 2`): 12 of them worn by
   host and client in Fort Hope, one in Evansburgh, 0 new log errors; skin and clothes matte in the client's views.
   The other published outfits (fortnite, l4d2 and other suites) already had roughness >= 0.35 everywhere.
+
+## 24. Eyes that stare: the game's eye material for custom eyes, eyelids kept in LOD0 (eyes-fix, 2026-10-13)
+Dan's report: Ada Wong (unrigged RE4 rip, §21) and Lara Croft (Dodylectable's Nexus mod, converted with `b4bmod
+convert`) stare between blinks: eyes too bright and flat, whites all round the iris. Both blink normally.
+- **Not the face animation.** Dev `face <hero#> eyelid_*` sampled at idle (lane 1, Fort Hope): `eyelid_upper_l`
+  +3.4 deg (towards closed), `eyelid_lower_l` -5 deg, the `eyelid_*_01..03` children 0, on retail Holly, Lara and Ada
+  alike. The open eye in game is the mesh's bind pose (Lara's eyeball pivots sit 2-3 mm from the eyeball centres).
+- **Lara (and every Dodylectable CoD port: Ash Williams, Frank West)**: the eye section's material instance has
+  `Master_Hero_Outfit_M` (clothing) as parent with a whole-eye colour texture (`T_LaraCroft_Eye_D`, iris painted at
+  the middle). Retail eyes use `Master_Eye_Refractive_M` (UE's eye shading model: refracted iris inside `Iris UV
+  Radius` of planar UVs centred on the pupil, `ScleraBrightness`, `EyeCornerDarknessColor`) plus a translucent
+  `EyeShadow` occlusion shell. Lit as cloth, Lara's sclera rendered flat and full-bright and the iris pale: in game the
+  whites read as an eye opened wide although her lids are where the mod has them (Blender bind pose: the upper lid on
+  the iris). Experiment: `MI_LaraCroft_Eyes` re-parented to `Karlee_Eye_MI` with `IrisColor` = the iris cut out of
+  her texture (CoD eyes: front-planar UVs, pupil at 0.5/0.5, iris radius 0.205 UV) -> retail-looking eyes (darker
+  sclera, catchlight, lids over the iris top). Her lashes also showed red/green speckles: `MI_LaraCroft_Eyelashes`
+  points its PBR map at `COS201_Hair_ORM`, a texture of another Dodylectable mod (missing: the engine's default).
+- **Ada (survivor pipeline)**, two causes: (1) her eyes went on the skin slot (`Master_Hero_Head_M`, skin shading),
+  as every model's eyes did; (2) the LOD0 budget (§18: 139k -> 53k vertices, the face kept only "more") collapsed the
+  lid rims' thin edge loops: on the same camera the upper lid sat ~2 mm higher than in the source (sclera above the
+  iris) and the 124-vertex iris shell (`refl`) came out at 55 vertices with a dented iris. Her eyeballs (`6_4-eyes`,
+  no texture) were dropped as a "cornea"; the visible eye is the RE Engine `refl` layer in front of them, which
+  carries the eye texture with rotated UVs and a texture transform.
+
+**Fix, survivor pipeline (`modkit/blender/b4beyes.py`, b4bfit, b4bmodel; `--eyes game|skin`, default game):**
+- The regions probe gets the eye-named materials (`eye_candidates`: eye/iris/pupil/sclera in the name or its image
+  names; not lashes, brows, liner, shadow, tear/cornea/highlight layers or alpha cards). Per side the faces must be
+  ball-shaped (sphere fit, radius 0.6-2.5 cm); other opaque materials whose vertices lie on the front of those balls
+  (within 1.6 x the radius) join the eye (Ada's `refl`).
+- Each eye is baked from the front: a ray grid along +X (BVH of the eye faces only, so lids don't block), the hit's
+  colour from its material's base colour image at the interpolated UV, the shader's Mapping node applied (glTF
+  `KHR_texture_transform`). Iris: pupil = the darkest 6 % near the ball's middle; edge = the steepest rise of the
+  ring-luminance profile (0.3-0.95 cm); accepted when the sclera ring is >= 0.10 brighter than the iris ring, the eye
+  surface covers >= 85 % of 1.3 x the iris disc, and both irises agree within 35 %. Otherwise the eyes stay on the
+  skin slot (logged with the reason).
+- 3P run (`finish`, before the slots): ScleraColor (512, the eye from the front, pupil centred, scale = Iris UV
+  Radius 0.17 / iris radius) and IrisColor (512, the iris filling it, edge at 0.47 as the retail iris textures), both
+  eyes averaged; texels on an untextured ball behind a textured layer take the median sclera colour; iris texels the
+  textured layer doesn't reach (Ada's lid-shaped shell cuts the iris top) are filled from the nearest angle at the
+  same radius, so the iris stays round. The eye faces get planar UVs (u towards the survivor's left, v down, as
+  `Karlee_Eye_MI`'s eyes: 0.248 UV/cm, pupil at 0.5/0.5). `assign_slots` puts them on the template's eye slot
+  without atlas or tile remap.
+- b4bmodel: a copy of `Karlee_Eye_MI` as `<outfit>/Materials/Eye_MI` with ScleraColor/IrisColor (encoded into
+  copies of `Eye_Iris_Blue_BC_T` / `Holly_Elite_07_Eye_Sclera_BC_T`, sRGB DXT1) and `Iris UV Radius`; the meshes'
+  eye slot is repointed to it. The preview draws the eye slot with the ScleraColor bake.
+- LOD0: vertices weighted > 0.05 to `eyelid_*`, `eyeball_*`, `eye_*` bones are never collapsed (inverted keep weight
+  0). Ada: LOD0 55k vertices (was 53k).
+
+**Fix, `b4bmod convert` (`retail_eyes`, `modkit/eyetex.py`, pure Python; `--eyes game|keep`):** a copied eye-named
+material instance on a non-eye master with a base colour texture whose pupil sits at the texture's middle (within
+0.06; iris found as above on a <= 1024 mip) is re-parented to `Karlee_Eye_MI`, gets `IrisColor` = the iris cut out
+(`<texture>_Iris`) and `Iris UV Radius` = the measured radius. Lara 0.205, Ash 0.205, Frank West 0.245.
+
+**Results (lane 1, Proton, `B4B_GPU=4090`, `multi.sh 2`, host wearing the outfit, client 20-60 cm in front, dev
+`face look`; Fort Hope at dusk):** Ada and Lara before: bright flat whites all round a small iris; after: lids over
+the iris top as in the source models, darker sclera, a round iris with a catchlight; Ada blinks over the new eyes
+(burst of 8 frames, one mid-blink). Ash and Frank West converted the same way look normal. Lara's lashes pointed at
+her own brows' ORM (per outfit, in the converted folder): no speckles. Screenshots (not committed):
+`~/.local/share/b4b-coop/characters/shots/eyes-before/`, `eyes-test/` (the MI experiment), `eyes-after/`
+(`summary-before-after.png`).
+- **Other outfits** (offline builds only, not rebuilt for the shop): Doja Cat and Sabrina Carpenter (Fortnite rips:
+  eyeballs drawing the head atlas, iris 0.69-0.70 cm) and Nick (L4D2 Source eyeballs, 0.33 cm) all take the eye
+  material; Fortnite eye textures paint the upper lid's skin over the top of the ball, which the iris image keeps
+  (under the lid in game). Every published outfit built with `b4bmod survivor` from a model with separate eyeballs
+  (about 40 Fortnite rips, the 8 L4D survivors, Ada) had its eyes on the skin slot, and every head over the LOD0
+  budget had its lid rims thinned: a rebuild gives them both fixes. Painted eyes (VRoid, most Fortnite heads whose
+  eyes are part of the head material) are unchanged.

@@ -239,7 +239,77 @@ def keep_layout(src_uasset, out_uasset):
     return fixed
 
 
-def convert(stage, name, moddir, src, retail_pkgs, retail_file, title=None, only=None, list_only=False):
+# Eyes: replacement mods often draw the eyes with a clothing/skin material (Dodylectable's CoD ports: the outfit master
+# with a full-eye colour texture): flat, full-bright whites, a stare in game. Such an eye material instance is pointed
+# at the game's eye material (EYE_MI: Master_Eye_Refractive_M: eye shading, refracted iris, shaded corners) with the
+# iris cut out of its colour texture as IrisColor. Needs the usual game eye UV layout (front projection, pupil at the
+# texture's middle), checked on the texture. mesh-mods.md §24.
+EYE_MI = "/Game/Characters/Heroes/Karlee/Meshes/Shared/Karlee_Eye_MI"
+EYE_MI_RX = re.compile(r"eye|iris|pupil|sclera", re.I)
+EYE_NOT_RX = re.compile(r"lash|brow(?!n)|liner|shadow|occlu|tear|cornea|moisture|highlight|wet|refl|spec", re.I)
+
+
+def _b4b(b4bmod, *args):
+    return subprocess.run([sys.executable, b4bmod] + list(args), capture_output=True, text=True)
+
+
+def retail_eyes(b4bmod, moddir, mis):
+    """Each copied eye material instance (mis: new package paths) on a non-eye master -> the game's eye material."""
+    import eyetex
+    for mi in mis:
+        base = mi.rsplit("/", 1)[1]
+        if not EYE_MI_RX.search(base) or EYE_NOT_RX.search(base):
+            continue
+        r = _b4b(b4bmod, "mi", mi, "--src", moddir)
+        if r.returncode:
+            log(f"eyes: {base}: can't read it ({(r.stderr or r.stdout).strip()[:120]})"); continue
+        parent = re.search(r"parent: (\S+)", r.stdout)
+        if parent and re.search(r"/Master_Eye_|_Eye_MI\b|/Eyes/", parent.group(1)):
+            continue                                       # already the game's eye shader
+        bc = re.search(r"texture\s+'(?:base ?colou?r|albedo|diffuse)[^']*'\s*=\s*(/Game/\S+)", r.stdout, re.I)
+        if not bc:
+            log(f"eyes: {base}: no colour texture, left as it is"); continue
+        tex = bc.group(1).split(".")[0]
+        info = _b4b(b4bmod, "info", tex, "--src", moddir).stdout
+        m = re.search(r"PF_\w+ (\d+)x(\d+)", info)
+        mip = 0
+        if m:
+            big = max(int(m.group(1)), int(m.group(2)))
+            while big > 1024: big //= 2; mip += 1
+        work = os.path.join(moddir, ".eyes")
+        os.makedirs(work, exist_ok=True)
+        png = os.path.join(work, tex.rsplit("/", 1)[1] + ".png")
+        e = _b4b(b4bmod, "export", tex, png, "--mip", str(mip), "--src", moddir)
+        if e.returncode or not os.path.exists(png):
+            log(f"eyes: {base}: can't read {tex}"); continue
+        w, h, rows = eyetex.read_png(png)
+        found, why = eyetex.find_iris(w, h, rows)
+        if found is None:
+            log(f"eyes: {base}: left on its own material ({why})"); continue
+        cu, cv, R = found
+        size = 128
+        while size < min(512, 2 * R / (2 * eyetex.IRIS_EDGE) * max(w, h) * 1.5): size *= 2
+        ipng = os.path.join(work, base + "_Iris.png")
+        eyetex.write_png(ipng, size, size, eyetex.iris_image(w, h, rows, cu, cv, R, size))
+        new_tex = tex.rsplit("/", 1)[0] + "/" + tex.rsplit("/", 1)[1] + "_Iris"
+        steps = [("rename", upkg.game_path_to_file(tex, moddir), new_tex, "-o", moddir, "--src", moddir),
+                 ("texture", new_tex, ipng, "-o", moddir, "--src", moddir),
+                 ("mi", mi, "set", "IrisColor", new_tex, "parent", EYE_MI, "-o", moddir, "--src", moddir)]
+        bad = None
+        for s in steps:
+            rr = _b4b(b4bmod, *s)
+            if rr.returncode: bad = (s[0], (rr.stderr or rr.stdout).strip()[-200:]); break
+        if bad:
+            die(f"eyes: {base}: {bad[0]} failed: {bad[1]}")
+        rr = _b4b(b4bmod, "mi", mi, "set", "Iris UV Radius", f"{R:.3f}", "-o", moddir, "--src", moddir)
+        radius = f"Iris UV Radius {R:.3f}" if rr.returncode == 0 else \
+            "Iris UV Radius stays the game's 0.174 (the instance overrides no scalar to copy)"
+        log(f"eyes: {base}: the game's eye material ({EYE_MI.rsplit('/', 1)[1]} as parent), iris cut out of "
+            f"{tex.rsplit('/', 1)[1]} (pupil {cu:.3f},{cv:.3f}) as {new_tex.rsplit('/', 1)[1]}, {radius}")
+    shutil.rmtree(os.path.join(moddir, ".eyes"), ignore_errors=True)
+
+
+def convert(stage, name, moddir, src, retail_pkgs, retail_file, title=None, only=None, list_only=False, eyes="game"):
     """stage: the mod's files extracted (<stage>/Gobi/Content/...). Returns the outfit lines written."""
     if not OUTFIT_NAME_RX.match(name):
         die(f"--as {name!r}: a name of letters, digits and _ (up to 32, starting with a letter), e.g. --as my_outfit")
@@ -300,6 +370,8 @@ def convert(stage, name, moddir, src, retail_pkgs, retail_file, title=None, only
             log(f"  {new[p]}: export sizes kept as in the mod (its BulkDataStartOffset is off)")
         if i % 20 == 0 or classes[p] == "SkeletalMesh":
             log(f"  [{i + 1}/{len(copy)}] {classes[p]}: {p} -> {new[p]}")
+    if eyes == "game":
+        retail_eyes(b4bmod, moddir, [new[p] for p in sorted(copy) if classes[p] == "MaterialInstanceConstant"])
     # the copies must not point at anything that was copied or left out
     bad = set(new) | set(remap)
     for p, nw in new.items():

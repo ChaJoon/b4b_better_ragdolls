@@ -42,7 +42,9 @@
                                           outfit any survivor can wear (/model <name>); the pak is only read. Several
                                           outfits in the mod: <name>_01, _02 ... (--only picks, --list shows them).
                                           Packs <moddir>.pak (default <moddir> = <name>); --pak, --zip, --install,
-                                          --author/--version/--description as for survivor
+                                          --author/--version/--description as for survivor. --eyes game (default):
+                                          eyes drawn with a clothing/skin material get the game's eye material, the
+                                          iris cut out of their texture (--eyes keep: as the mod has them)
   model <b4bmodel.py arguments>           the model pipeline as is (e.g. model textures <manifest.json> ...)
   pack <moddir> [-o NAME.pak] [--title T] [--author A] [--version V] [--category C] [--description D] [--zip]
                                           <moddir> -> one add-on .pak (+ a zip for players with --zip)
@@ -729,6 +731,8 @@ def cmd_convert(a):
     a = [x for x in a if x not in ("--install", "--zip", "--list")]
     meta = {k: take(a, "--" + k) for k in ("title", "author", "version", "description")}
     name, only, moddir = take(a, "--as"), take(a, "--only"), take(a, "-o") or take(a, "--out")
+    eyes = take(a, "--eyes") or "game"
+    if eyes not in ("game", "keep"): die("--eyes game|keep")
     if len(a) != 1 or not a[0].lower().endswith(".pak") or not (name or list_only):
         die("usage: b4bmod convert <mod.pak> --as <name> [-o <moddir>] [--title T] [--only N,...] [--list]", 2)
     src_pak = os.path.abspath(a[0])
@@ -762,7 +766,7 @@ def cmd_convert(a):
     sys.path.insert(0, KIT)
     import convert
     lines = convert.convert(stage, name, moddir, src_dir(), retail, retail_file, title=meta["title"], only=only,
-                            list_only=list_only)
+                            list_only=list_only, eyes=eyes)
     if list_only:
         return 0
     out = pak or moddir.rstrip("/\\") + ".pak"
