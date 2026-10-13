@@ -1,8 +1,9 @@
 # b4bcoop mod maker's kit (b4bmod)
 
 Make add-ons for Back 4 Blood with the [b4bcoop](https://github.com/actuallydan/b4b-coop) mod: new textures and
-material colours, your own models (FBX or glTF) for survivors and weapons, packed as one add-on file that players drop
-into their game folder. No Unreal editor needed.
+material colours, your own models (FBX, glTF/glb, VRM, OBJ, DAE or .blend) for survivors and weapons, packed as one
+add-on file that players drop into their game folder (or get from the add-on shop in the game's `~` window). No
+Unreal editor needed.
 
 This kit is **for mod makers only**. Players don't need it: they install the b4bcoop mod and the add-ons you share.
 
@@ -87,7 +88,8 @@ materials on the outfit's slots (printed; `--slot <material>=<slot>` to choose),
 outfit's own `FP_` mesh (`--fp none`: the game's arms), the LODs (a model denser than the survivor's is reduced to its
 budget; `--keep-density`) and the textures,
 and writes `mymod.pak` (the add-on), `mymod.zip` (to share) and installs it. Start the game and wear the outfit. Weapons: `b4bmod weapon mygun.fbx --fp-mesh ...`.
-Add `--as <name>` to add an outfit instead of replacing Mom's (players wear it with `/model <name>`).
+Add `--as <name>` to add an outfit instead of replacing Mom's (any survivor can wear it: **Wear** in the `~` window's
+Add-ons tab, the game's customization screen, or `/model <name>`).
 
 ## Commands
 `b4bmod help` prints all of them. The main ones:
@@ -102,8 +104,8 @@ Add `--as <name>` to add an outfit instead of replacing Mom's (players wear it w
 | `mi <material instance> [set <param> <value>...] -o <moddir>` | material parameters |
 | `rename <asset> </Game/new/path> -o <moddir> [--ref old=new]...` | a copy of an asset under a new path (textures, materials, meshes); experimental, see docs/textures.md |
 | `survivor <model> --outfit ... [--fp ...\|none] -o <moddir>`, `weapon <model> --fp-mesh <FP mesh or code> -o <moddir>` | your model, fitted in Blender, to a survivor outfit or a weapon, packed (`--install` installs it) |
-| `survivor ... --as <name>` | the same, as an **added** outfit players wear with `/model <name>` (nothing of the game replaced; docs/meshes.md "Add an outfit") |
-| `convert <mod.pak> --as <name> [--title T]` | a survivor **replacement** mod (someone's pak that overrides an outfit) to an added outfit any survivor can wear with `/model <name>`; the pak is only read (docs/meshes.md "Turn a replacement mod into an outfit") |
+| `survivor ... --as <name>` | the same, as an **added** outfit any survivor can wear (customization screen, `~` window, `/model <name>`; nothing of the game replaced; docs/meshes.md "Add an outfit") |
+| `convert <mod.pak> --as <name> [--title T]` | a survivor **replacement** mod (someone's pak that overrides an outfit) to an added outfit any survivor can wear; the pak is only read (docs/meshes.md "Turn a replacement mod into an outfit") |
 | `mesh info / export / import / edit` | skeletal meshes: slots and LODs; to glTF; your own fitted FBX/glTF back; quick edits |
 | `pack <moddir> -o <name>.pak [--title ...] [--zip]` | the add-on |
 | `install <pak>`, `uninstall <name>`, `check [<pak>]` | into / out of `<game>\b4bcoop-addons`; what the game will load |
@@ -131,8 +133,8 @@ Add `--as <name>` to add an outfit instead of replacing Mom's (players wear it w
 - `can't write ...: close the game first`: the game keeps its add-ons open while it runs.
 - A survivor model comes out wrong (bones not found, stretched, wrong textures): [docs/meshes.md "Survivor
   troubleshooting"](docs/meshes.md#survivor-troubleshooting) explains each message.
-- Your add-on doesn't show: `/addons` in the game's chat lists it with the reason if it didn't load; `b4bmod check`
-  shows the same offline. The b4bcoop mod must be installed.
+- Your add-on doesn't show: the `~` window's Add-ons tab and `/addons` in the game's chat list it, `/addons` with the
+  reason if it didn't load; `b4bmod check` shows the same offline. The b4bcoop mod must be installed.
 
 ## Tested on
 - **Linux** (Arch, Python 3.14, .NET SDK 10.0.401, Blender 5.1): everything, from a fresh unzip of this kit

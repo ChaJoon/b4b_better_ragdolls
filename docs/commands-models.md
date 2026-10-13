@@ -2,9 +2,14 @@
 
 Change how your survivor looks for this game session, using outfits and characters the game already has (or outfits
 your add-ons add), and put an add-on's model on your weapon.
-Nothing is saved: your profile, your unlocked outfits and your campaign runs stay as they are. Quit the game (or
-`/model reset`) and you look like before. (Add-on outfits picked in the game's customization screen are kept: see
-[below](#add-on-outfits-on-the-games-customization-screen).)
+
+Only want an add-on outfit or weapon look? The `~` window is easier: tab **Add-ons**, **Wear** (outfits) or **Use**
+(weapon looks); see [below](#the--window-add-ons-tab). This page is the chat command `/model`, which also does other
+survivors' outfits and Fort Hope NPC bodies.
+
+Nothing about `/model` is saved: your profile, your unlocked outfits and your campaign runs stay as they are. Quit
+the game (or `/model reset`) and you look like before. (Add-on outfits picked in the game's customization screen are
+kept: see [below](#add-on-outfits-on-the-games-customization-screen).)
 
 ## Commands
 
