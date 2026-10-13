@@ -505,7 +505,8 @@ Known issues / open:
 - Steam Join Game/invites (`presence.c`), now the players' main join path: the real callback 337 between two accounts
   (rungame URL in the client's Steam, `tools/jointest2acct.py`) passed in every host state, incl. a retry after a
   failed handshake, a mid-mission rejoin, burn-card charge and rewards (join-timing.md "Two-account check", 2026-10-05);
-  the Join Game menu click itself and a Steam-initiated launch are still unchecked (#10). Local copies on one account
+  the Join Game click in Steam's own UI, also with the game closed (Steam starts it), works in Dan's real sessions
+  (2026-10, weeks of play; #10 closed). Local copies on one account
   overwrite each other's rich presence.
 - Steam's own relay sockets (in-process steamclient) bind 0.0.0.0. Fine: the promise is peer-to-peer play without
   official game servers (Steam is how friends connect), not an air gap; only the game's own UDP stays on loopback.
@@ -515,6 +516,5 @@ Known issues / open:
   own, so they may get a product they already have (a no-op).
 
 Next:
-1. Steam's Join Game / invite clicked in Steam's own UI, and Join Game with the game closed (#10; steam-invites.md).
-2. Real multi-machine session on the new build (Windows client, launch.md §6): netguard, rewards, burn cards, 5
+1. Real multi-machine session on the new build (Windows client, launch.md §6): netguard, rewards, burn cards, 5
    players, and whether Windows shows any Firewall prompt.

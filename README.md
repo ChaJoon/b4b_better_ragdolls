@@ -145,7 +145,7 @@ Making your own add-ons: see the modkit ([modkit/README.md](modkit/README.md), `
   the mod doesn't load there, please [open an issue](../../issues) and attach `Gobi\Binaries\Win64\b4bcoop-launcher.log`
   if that file exists.
 - **Join Game missing or not working**: both of you need the mod (same version), Steam online, and the host in Fort
-  Hope or a mission. If your game was closed, start it and click **Join Game** again. Fallback: the host looks up their
+  Hope or a mission. Fallback: the host looks up their
   17-digit Steam ID (Steam → click your account name at the top right → Account details, or `~` → **Session** →
   **Copy**), and you type `/join steam:<that number>` in the game's chat while in your own Fort Hope.
 
