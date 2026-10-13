@@ -198,14 +198,31 @@ def steam_native(line):
     return "wineserver" not in line and '"Back4Blood.exe"' in line
 
 
+# The add-on shop's list (shop.c) is fetched once per game start in Fort Hope from raw.githubusercontent.com (GitHub's
+# Fastly addresses), inside netguard's updater scope: HTTPS to those addresses is expected, listed apart (.shop).
+SHOP_NETS = [ipaddress.ip_network(n) for n in ("185.199.108.0/22", "2606:50c0::/32")]
+
+
+def shop_peer(addr):
+    host, _, port = addr.rpartition(":")
+    try:
+        ip = ipaddress.ip_address(host.strip("[]").split("%")[0])
+    except ValueError:
+        return False
+    if getattr(ip, "ipv4_mapped", None): ip = ip.ipv4_mapped
+    return port == "443" and any(ip in n for n in SHOP_NETS if n.version == ip.version)
+
+
 class SocketSampler(threading.Thread):
     """ss -tunapH every second; any socket of a test-prefix process with a public peer is a finding, and so is (host_ip=0,
     the default) any UDP socket or TCP listener of theirs that is not bound to loopback. Sockets of Steam's native
-    client library (steam_native) are listed apart (.steam) and are no finding."""
+    client library (steam_native) are listed apart (.steam) and are no finding, and so are HTTPS connections to GitHub's
+    raw.githubusercontent.com addresses (.shop: the add-on shop's list, shop_peer)."""
     def __init__(self):
         super().__init__(daemon=True)
         self.stop_ev, self.samples, self.public, self.seen, self.exposed = threading.Event(), 0, [], set(), []
         self.steam = []   # (key, line): Steam's own (native steamclient.so) sockets off loopback or with a public peer
+        self.shop = []    # (key, line): the add-on shop's list from GitHub (shop_peer)
 
     def run(self):
         f = open(os.path.join(OUT, "ss-samples.txt"), "a")
@@ -232,6 +249,9 @@ class SocketSampler(threading.Thread):
                     if native:
                         if (exposed or public(cols[5])) and key not in [k for k, _ in self.steam]:
                             self.steam.append((key, line))
+                        continue
+                    if cols[0] == "tcp" and shop_peer(cols[5]):
+                        if key not in [k for k, _ in self.shop]: self.shop.append((key, line))
                         continue
                     if public(cols[5]) and key not in [k for k, _ in self.public]:
                         self.public.append((key, line))
@@ -457,7 +477,7 @@ def duo(args):
         c = Check("duo", "chat: /players typed on the client gets a reply")
         c.done(*chat_players(S, C))
 
-        c = Check("duo", "~ overlay: opens, draws, a Players control runs /players, closes (host and client)")
+        c = Check("duo", "~ overlay: opens, draws, a Players control runs /players, Add-ons: list fetched by itself + Refresh, closes (host and client)")
         c.done(*overlay_smoke(S, (H, C)))
 
         c = Check("duo", "endmission success: client's SP forwarded")
@@ -511,6 +531,7 @@ def duo(args):
         c = Check("duo", "netguard: no public peer on any game socket (ss)")
         c.done(sampler.samples > 0 and not sampler.public,
                f"{sampler.samples} samples, {len(sampler.seen)} distinct sockets"
+               + (f", {len(sampler.shop)} to GitHub for the add-on shop's list (expected)" if sampler.shop else "")
                + (": " + " | ".join(l for _, l in sampler.public[:3]) if sampler.public else ""))
         c = Check("duo", "nothing reachable from the network (game UDP on 127.0.0.1, ss)")
         c.done(sampler.samples > 0 and not sampler.exposed,
@@ -555,8 +576,8 @@ def chat_players(S, n):
 
 def overlay_smoke(S, insts):
     """The ~ window (dev `overlay` command): open, frames drawn over the game, the Players tab's list button runs the
-    /players chat command (reply in the window's log), the Looks & add-ons tab (Wear) runs /model the same way, close;
-    the game keeps answering."""
+    /players chat command (reply in the window's log), the Add-ons tab's Refresh gets the add-on shop's list again
+    (it was fetched by itself on arrival in Fort Hope), close; the game keeps answering."""
     details = []
     for n in insts:
         agent(n, "overlay", "open")
@@ -567,16 +588,19 @@ def overlay_smoke(S, insts):
         agent(n, "overlay", "press", "List in the log (/players)")
         lg = wait_for(lambda: (lambda t: t if re.search(r"^#\d+ .*\(you\)", t, re.M) else None)(agent(n, "overlay", "log")), 10, 1)
         screenshot(n, f"overlay-{n}.png")
-        agent(n, "overlay", "tab", "Looks & add-ons")   # Models, Add-ons and Browse in one tab; Wear first
+        auto = wait_for(lambda: S.logs[n].grep(r"shop: in Fort Hope for the first time this game", False), 10, 1)
+        g = S.logs[n]
+        g.mark()
+        agent(n, "overlay", "tab", "Add-ons")
         time.sleep(1)
-        agent(n, "overlay", "press", "Status (/model)##status")
-        lk = wait_for(lambda: (lambda t: t if re.search(r"^your model: ", t, re.M) else None)(agent(n, "overlay", "log")), 10, 1)
-        screenshot(n, f"overlay-looks-{n}.png")
+        agent(n, "overlay", "press", "Refresh##shop")
+        lk = auto and wait_for(lambda: g.grep(r"shop: getting the add-on list"), 15, 1)
+        screenshot(n, f"overlay-addons-{n}.png")
         agent(n, "overlay", "close")
         st2 = agent(n, "overlay", "status")
         if not lg or not lk or "open=0" not in st2:
-            return False, (f"instance {n}: log {'ok' if lg else 'missing /players reply'}, looks tab "
-                           f"{'ok' if lk else 'missing /model reply'}, {st2.strip()[:120]}")
+            return False, (f"instance {n}: log {'ok' if lg else 'missing /players reply'}, add-ons tab "
+                           f"{'ok' if lk else 'no automatic list fetch or Refresh'}, {st2.strip()[:120]}")
         details.append(f"#{n} " + re.search(r"frames built=\d+ drawn=\d+", st2).group(0))
     return True, "; ".join(details)
 

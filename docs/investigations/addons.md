@@ -271,7 +271,25 @@ committed)
 - `tools/e2e.py --quick` checked the summary in the login and `/addons players` on the host (replaced in #35).
 - `tools/e2e.py --quick` on this branch's dev build: 13/13 PASS (incl. the new add-ons check).
 
-## 8. `~` window: Installed (Looks & add-ons tab; the Add-ons tab until 2026-10-12, #26)
+## 8. `~` window: the Add-ons tab (2026-10-13; #26)
+Code: `looks.c` draws one table of the installed add-ons and the shop's list (overlay.md "Add-ons tab"); addons.c gives
+it `addons_slots()` / `addons_info()` (file, title, version, author, description, why it can't load, file size, time
+installed = newest of created / written, on / on at start / mounted / valid / gameplay, outfit and weapon-look
+counts), `addons_refresh()` (once a second while the tab is shown: hand edits of `addonlist.txt` re-read as before,
+file sizes and times), `addons_look_buttons(file, after)` (Wear: `models_open_screen`, the customization screen with the
+outfit on; Use / Stop: a weapon look), `addons_tab_header()` (add-ons off / restart warnings) and
+`addons_tab_footer()` ("Load add-ons" = ini `addons`, "Copy folder path").
+- No load order and no on/off toggle in the window (Dan: two add-ons changing one file is the player's problem, not a
+  mod manager). `ord[]` and `addonlist.txt` are unchanged (`/addons` lists and numbers in that order; a hand-edited
+  file is followed); `addons_move` (Up/Down) is gone. An add-on that is off shows **Turn on** (`/addons on <file>`,
+  loaded at once when the live rules allow it); **Remove** (shop.c, any `.pak`) is the way out.
+- No details view and no conflicts list in the window: the conflict / duplicate log lines and the chat notice at
+  start stay, `/addons info` has the rest. The base survivor of an added outfit is no longer shown (it was "outfit x:
+  title (made on mom)" in the details).
+- Policy: `addons_mp_panel()` is one combo ("Who may join with add-ons") under the tab's Host rules at the bottom.
+- The join refusals now say `turn off <add-ons> (/addons off <#>, or Remove in the ~ window's Add-ons tab)`.
+
+### Before 2026-10-13: Installed (Looks & add-ons tab; the Add-ons tab until 2026-10-12)
 Code: `addons_installed_panel()` in `addons.c`, drawn by `looks.c` as the **Installed** mode of the **Looks & add-ons**
 tab (overlay.md "Looks & add-ons"); the policy is `addons_mp_panel()` in `addons_mp.c`, under that tab's **Host rules**
 header. Same code paths as the chat: the row checkbox runs `/addons on|off <file>` (`ov_run`), "Show in the log"

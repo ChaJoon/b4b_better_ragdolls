@@ -138,8 +138,8 @@ the game. Nothing is downloaded or changed until you click; the download must ca
 and your b4bcoop.ini, add-ons and bans stay as they are. "Go back to ..." in the same tab returns to the version you
 had. Or by hand: extract the new zip over the old files. Details: b4bcoop-COMMANDS.txt, "Updates".
 
-ADD-ONS (textures, models): press ~, tab Looks & add-ons: Get more lists free ones (Add, then Wear), Installed
-manages yours. Or put an add-on's .pak in a b4bcoop-addons folder next to Back4Blood.exe and restart the
+ADD-ONS (textures, models): press ~, tab Add-ons: the free ones from the add-on shop and yours in one list
+(Add, Wear, Update, Remove). Or put an add-on's .pak in a b4bcoop-addons folder next to Back4Blood.exe and restart the
 game; /addons lists them. Only you see your add-ons, and nobody learns which ones you have. By
 default hosts let in players with any add-ons; a host can allow cosmetic ones only, or none (addons_policy=;
 your game checks yours before joining). Details: b4bcoop-COMMANDS.txt, "Add-ons".

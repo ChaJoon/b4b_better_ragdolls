@@ -221,7 +221,7 @@ const char *addons_dir8(void);
 typedef struct { int on, on_at_start, mounted, valid, gameplay; char hash[41], state[40]; } AddonState;
 int addons_state(const char *file, AddonState *st);   // 1 = present in the folder (st filled)
 int addons_set_on(const char *file, int on);          // addonlist.txt on/off (next start); 1 = saved
-// game thread, add-ons loaded while the game runs (~ window: Get more, Installed): 2 loaded now, 1 at the next start (msg:
+// game thread, add-ons loaded while the game runs (~ window: the Add-ons tab): 2 loaded now, 1 at the next start (msg:
 // why), 3 the game's loader is busy (ask again in a moment; last=1: never 3), 0 not added
 int addons_add_runtime(const char *file, char *msg, size_t mn);   // a new file in the folder: listed, then loaded
 int addons_load_now(const char *file, int last, char *msg, size_t mn);   // a listed add-on, switched on, not loaded
@@ -232,27 +232,54 @@ int addons_session_allows(int gameplay, char *msg, size_t mn);   // addons_mp.c:
 const char *addons_installed_like(const char *skip, const char *content_id, const char *adds, char *why, size_t wn);
 void models_outfits_refresh(void);            // models.c: add outfits of add-ons mounted at runtime
 void wlooks_refresh(void);                    // weaponlooks.c: same for weapon looks
-void addons_installed_panel(const char *search);   // ~ window, Looks & add-ons: Installed (search: rows that match)
-int addons_look_buttons(const char *file);    // ~ window: Wear / Use for the looks that add-on adds (loaded); 1 = drawn
-// looks.c: the ~ window's "Looks & add-ons" tab: Wear (models.c, weaponlooks.c), Installed (addons.c), Get more
-// (shop.c), Host rules (models.c, addons_mp.c). Replaces the Models, Add-ons and Browse tabs.
-enum { LOOKS_WEAR, LOOKS_INSTALLED, LOOKS_GET };
+// ~ window, Add-ons tab (looks.c): the add-ons in the folder (A[] slots; addons_info 1 = present, filled)
+typedef struct {
+    const char *file, *title, *version, *author, *desc, *why;   // why: it can't load ("" = it can)
+    unsigned long long size, time;   // file size; installed = newest of created / written (100 ns since 1601)
+    int on, on_at_start, mounted, valid, gameplay, outfits, weapons;
+} AddonInfo;
+int addons_slots(void);
+int addons_info(int i, AddonInfo *o);
+void addons_refresh(void);                    // addonlist.txt edited outside the game + file sizes/times (about 1/s)
+int addons_look_buttons(const char *file, int after);   // its row: Wear (outfit) / Use or Stop (weapon look); 1 = drawn
+void addons_tab_footer(void);                 // the folder and the "Load add-ons" switch, one line
+int addons_tab_header(void);                  // warnings over the table (off, changes at restart); 1 = add-ons are on
+// looks.c: the ~ window's "Add-ons" tab: one table of the shop's add-ons (shop.c) and the installed ones (addons.c),
+// Host rules at its bottom (models.c, addons_mp.c). Replaced the Models, Add-ons and Browse tabs.
 void looks_init(void);
-void looks_show(int mode, const char *search, int wear_list);   // switch mode (search NULL: keep; wear_list -1: keep)
-// shop.c: the add-on shop (#36, docs/investigations/shop.md): Get more, and Update / Remove / Undo in Installed
+// shop.c: the add-on shop (#36, docs/investigations/shop.md): its list, downloads, Add / Update / Remove / Undo
 void shop_early(const wchar_t *dir);          // DllMain (addons_scan): pending removals/updates from the last session
 int shop_forget(const char *file);            // addons_scan: 1 = removed at this start, drop its addonlist.txt line
 void shop_init(void);
 void shop_tick(float dt);
 int shop_live(const char *key, const char *val);
 int shop_cmd(const char *verb, char *rest, Out *o);  // dev builds: `shop status|fetch|add <id>|remove <id|file>|undo <id|file>`
-int shop_enabled(void);                       // ini shop (0 hides Get more)
-void shop_get_panel(const char *search, int filter);   // Get more; filter 0 all, 1 new looks, 2 replacements, 3 not installed
-void shop_installed_actions(const char *file);   // Installed row: Update (newer in the list) / pending + Undo / progress
-void shop_item_note(const char *file);        // Installed row: the shop's last message about it (added, updated, error)
-void shop_check_button(void);                 // Installed: "Check for updates" (gets the list) + its result
-int shop_pending(const char *file);           // this session's click: 0 none, 1 removed at the next start, 2 updated
+int shop_enabled(void);                       // ini shop (0: no list, no downloads)
+// the shop's list for the ~ window's Add-ons tab (looks.c; game thread)
+enum { SHOP_ADD, SHOP_INSTALLED, SHOP_REMOVING, SHOP_UPDATING, SHOP_NEWER, SHOP_DOWNLOADING, SHOP_INSTALLED_AS };
+typedef struct {
+    const char *id, *name, *version, *author, *desc, *license;
+    const char *like, *like_why;     // SHOP_INSTALLED_AS: that file, and why ("same content", "outfit batman")
+    char file[48], too_old[80];      // "<id>.pak"; "needs b4bcoop X or newer (Updates tab)" or ""
+    unsigned long long size, got;    // got: bytes so far (SHOP_DOWNLOADING)
+    int state, tex, tw, th;          // tex: thumbnail (ov_image; 0 none yet), its size in pixels
+    int msg_err; char msg[200];      // the last message about it (download, loaded or why not); msg_err: a failure
+} ShopRow;
+int shop_rows(void);                          // entries in the list (0: not fetched yet, or shop=0)
+int shop_row(int i, ShopRow *r);              // 1 = filled
+int shop_index_of(const char *file);          // the entry whose file is `file`, -1 none
+const char *shop_name(int i);                 // its name (NULL: no such entry)
+int shop_phase(char *msg, size_t n);          // 0 idle, 1 getting the list, 2 ready, 3 failed; msg: its last status line
+int shop_busy(void);                          // a list fetch or a download runs
+void shop_show_thumbs(void);                  // the tab shows the list: its thumbnails are fetched (once) and shown
+#define SHOP_PREVIEW_SIDE 320
+int shop_preview(int i, int *w, int *h);      // entry i's large picture for a tooltip (one texture; its w x h top left)
+const char *shop_fetch(void);                 // Refresh: get the list again; NULL or why not
+const char *shop_add(int i);                  // Add, or Update when installed: NULL (downloading) or why not
 const char *shop_remove(const char *file);    // Remove (any add-on): off now, deleted at the next start; NULL or why not
+const char *shop_undo(const char *file);      // a Remove / Update waiting for the next start taken back
+int shop_pending(const char *file);           // this session's click: 0 none, 1 removed at the next start, 2 updated
+int shop_pending_live(const char *file);      // that update is loaded already
 // addons_mp.c: add-ons in multiplayer (#22, private #35): the host announces addons_policy, joiners check themselves
 int addons_policy_set(const char *v);         // any|cosmetic|none|match; -1 if unknown
 const char *addons_policy_name(void);
@@ -274,7 +301,10 @@ int models_locked(void);                                 // host: /models off
 int models_off(void);                                    // host: /models off; client: as the host's notices said
 UObject *models_load_asset(const char *path);            // LoadAsset_Blocking of an object path, NULL if it failed
 int models_hero_pawns(UObject **out, int max);           // pawns of the hero-team slots, slot order
-void models_wear_panel(const char *search, int *list);   // ~ window: Wear (list: 0 survivors, 1 NPC, 2 outfits, 3 weapons)
+// the game's customization screen for your survivor, an add-on outfit (b4bcoop.outfit.<name>) shown on it; NULL
+// opened, else why not (Fort Hope only)
+const char *models_open_screen(const char *outfit);
+const char *models_screen_why_not(void);                 // NULL: models_open_screen can open it now
 void models_host_panel(void);                            // ~ window: the model swaps part of Host rules
 // weaponlooks.c: added weapon looks (/model <weapon look>, docs/investigations/new-assets.md §9)
 int wlooks_init(void);
@@ -282,9 +312,8 @@ void wlooks_tick(float dt);
 int wlooks_pick(const char *name, Out *o);               // /model <name>: 1 if it is a weapon look (handled)
 void wlooks_reset(Out *o);                               // /model reset: your weapons back to your own skins
 void wlooks_reset_code(const char *code, Out *o);        // one weapon type (NULL = all) back to your own skin
-int wlooks_panel(int blocked, const char *why, const char *search, const char *hdr);   // ~ window, Wear: weapon looks
+const char *wlooks_current(const char *code);            // your look for that weapon type (NULL = your own skin)
                                                          // (blocked: Use greyed; hdr: heading of a search; = shown)
-int wlooks_count(void);                                  // weapon looks of the loaded add-ons
 void wlooks_list(Out *o);                                // /model list weapons
 void wlooks_overview(Out *o);                            // the /model list overview line
 void wlooks_status(Out *o);

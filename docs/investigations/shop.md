@@ -1,29 +1,35 @@
-# Add-on shop: Get more in the `~` window's Looks & add-ons tab (#36; the Browse tab until 2026-10-12)
+# Add-on shop: the `~` window's Add-ons tab (#36; the Browse tab until 2026-10-12, then Get more until 2026-10-13)
 
-Status 2026-09-27, build 14216215, Proton (lane 2, Flatpak Steam). Code: `native/src/shop.c` (Get more, downloads,
-pending changes, Installed's Update/Remove/Undo), `native/src/looks.c` (the tab), `native/src/updcore.c` (catalog JSON +
+Status 2026-09-27, build 14216215, Proton (lane 2, Flatpak Steam). Code: `native/src/shop.c` (the list, downloads,
+pending changes, Add/Update/Remove/Undo), `native/src/looks.c` (the tab's table), `native/src/updcore.c` (catalog JSON +
 signature, streaming SHA-256; unit tests `native/test/run.sh`), `native/src/addons.c` (`addons_add_runtime`),
 `native/src/paks.c` (runtime mount), `native/src/imgdecode.c` (thumbnails), `native/src/overlay.cpp`
 (`ov_texture`/`ov_image`), `tools/shop-catalog.py` (build + sign the catalog), `tools/shop-test.py` (live test).
-Player page: docs/COMMANDS.md "Get more (add-on shop)". Below, "the Browse tab" in dated results = today's Get more.
+Player page: docs/COMMANDS.md "Add-ons from the shop". Below, "the Browse tab" / "Get more" in dated results = the
+shop's rows of today's Add-ons tab.
 
 ## TL;DR
-- A "Workshop"-like list (Get more): **Get the add-on list** (a click; nothing automatic) downloads `catalog.json` + its
-  ed25519 signature (the shop key, not the release key: §2), shows the add-ons with thumbnail, license, author, kind, size, what
-  they add/replace, search and a filter. **Add** downloads the pak, checks size + SHA-256 against the signed list,
+- A "Workshop"-like list (the Add-ons tab, one table with the installed add-ons; overlay.md "Add-ons tab"):
+  `catalog.json` + its ed25519 signature (the shop key, not the release key: §2) are fetched by themselves once per
+  game start, when the player first stands in a Fort Hope (theirs or a host's) for 3 s (`auto_fetch`), and on
+  **Refresh** (until 2026-10-13 only on a click); shown with thumbnail, name and size (author, license, description as
+  a tooltip), search, filter (All / Installed / Available) and sort. **Add** downloads the pak, checks size + SHA-256 against the signed list,
   puts it into `b4bcoop-addons\<id>.pak`, appends it to `addonlist.txt` and mounts it **right away** when that is
-  safe; the row then offers **Wear** / **Use**. **Remove** (Installed, any add-on) switches it off and deletes it at
-  the next start. **Update** (newer file in the list; Get more and Installed) is swapped in at the next start, and
-  loaded at once when nothing of the old version is in memory. `shop=0` hides Get more and Update.
+  safe; the row then offers **Wear** (the customization screen with the outfit on) / **Use**. **Remove** (any add-on)
+  switches it off and deletes it at the next start. **Update** (newer file in the list) is swapped in at the next
+  start, and loaded at once when nothing of the old version is in memory. `shop=0`: no list, no downloads (the tab
+  shows the installed add-ons).
 - **Live mounting works** (§1, §1a) for cosmetic add-ons: added outfits and weapon looks are usable right after Add
-  (the row's Wear / Use, Wear, `/model`, the customization screen), in Fort Hope, in a running mission and as a client in someone's
+  (the row's Wear / Use, `/model`, the customization screen), in Fort Hope, in a running mission and as a client in someone's
   session (within the host's `addons_policy`); replacements too when the game has nothing of what they replace in
   memory; updates when nothing of the old version is loaded. The agent decides from the files, not from the catalog.
   Mounted paks are never unmounted.
 - Thumbnails are reasonable (§3): stb_image (PNG + JPEG only), bytes decoded only after their SHA-256 matched the
-  signed list, scaled to 96 px, uploaded through ImGui 1.92's own texture list (no D3D12 code of ours).
-- Privacy: nothing about installed add-ons is sent to anyone. GitHub sees the catalog fetch and each download (like
-  any download from GitHub); other players see nothing (the #35 rules are unchanged).
+  signed list, scaled to 128 px (hover: up to 320 px), uploaded through ImGui 1.92's own texture list (no D3D12 code of ours).
+- Privacy: nothing about installed add-ons is sent to anyone. GitHub sees the catalog fetch (once per game start now,
+  also when the player never opens the tab), the thumbnails (when the tab is opened) and each download, like any
+  download from GitHub; other players see nothing (the #35 rules are unchanged). e2e's socket check lists HTTPS to
+  GitHub's raw.githubusercontent.com addresses (185.199.108.0/22, 2606:50c0::/32) apart, as expected traffic.
 
 ## 1. Spike: mounting at runtime
 `FPakPlatformFile::Mount` (0x143913E60) on the game thread, the same call the Initialize hook uses at start, with our
@@ -152,11 +158,18 @@ is inside netguard's updater scope; no API call, so no 60/hour limit).
 - Decoder: stb_image v2.30 (public domain), pinned in `tools/fetch-deps.sh` (commit 2c980bb, sha256 of
   `stb_image.h`), compiled with `STBI_ONLY_PNG`, `STBI_ONLY_JPEG`, no stdio/HDR, `STBI_MAX_DIMENSIONS 2048`. Its
   input is only bytes whose SHA-256 the signed list names, so a hostile picture needs the signing key.
-- Box-filtered to fit 96×96 (36 KB RGBA each), at most 128 per session, cached by SHA-256 across list refreshes.
+- Box-filtered to fit 128×128 (64 KB RGBA each; 96×96 until 2026-10-13), at most 256 per session, cached by SHA-256
+  across list refreshes. The verified file is kept: hovering a thumbnail decodes it to fit 320×320 into the one preview
+  texture (`shop_preview`, its pixels replaced with `ov_texture_set`, ImGui's `WantUpdates`), shown as the tooltip.
+- At most 2 decoded thumbnails go to the GPU per frame (each DX12 upload waits for the GPU once): the real list (127
+  add-ons) arrived in ~6 s with the frame rate unchanged (overlay frames/s 57-67 while loading, 61-67 idle; lane 2,
+  4090).
+- Fetched (2026-10-13) by their own worker when the tab first shows a list (`want_thumbs`, once per list: the list
+  itself now arrives without the player asking, the pictures only when someone looks).
 - Upload: ImGui 1.92's texture system: `ov_texture()` creates an `ImTextureData` (RGBA32), `RegisterUserTexture`;
   the DX12 backend creates and uploads it inside the next `RenderDrawData` on the render thread (the overlay's
   snapshot already carries `Textures`). Textures are never destroyed during the session (a frame in flight could
-  still use one); the SRV heap went from 64 to 256 slots, `OV_MAX_TEX` = 160. Worst case ~6 MB of GPU memory.
+  still use one); the SRV heap went from 64 to 256 to 384 slots, `OV_MAX_TEX` = 300. Worst case ~17 MB of GPU memory.
 - Live: PNG and JPEG thumbnails `uploaded` in the tab (screenshot §5).
 
 ## 4. Files, next start, updates
@@ -171,7 +184,8 @@ is inside netguard's updater scope; no API call, so no 60/hour limit).
   no `<id>.pak`, but another present add-on has the entry's `content_id` (= the agent's pak index SHA1, the same value
   `tools/shop-catalog.py` writes) or adds an outfit/weapon look the entry's `adds` names (`outfit batman (any)`) →
   the row says **Installed (as batman.pak)** ("the same add-on" / "batman.pak adds the same outfit batman"), the
-  last column that add-on's state, no Add; `shop add`
+  last column that add-on's state, no Add (since 2026-10-13: same content = that file's row of the table, with the
+  shop's picture and name; a same-named look = the shop's row says "as batman.pak"); `shop add`
   refuses with "already installed as batman.pak"; dev `shop status` row `[installed-as] ... msg=installed as
   batman.pak: outfit batman` (`addons_installed_like()`, re-checked after each Add). If both are present anyway, the
   Add-ons tab reports them as a duplicate (addons.md "Duplicates").
@@ -252,6 +266,15 @@ is inside netguard's updater scope; no API call, so no 60/hour limit).
   for `remove`, shop ids only for `update`); Update also in Installed ("Check for updates" gets the list). Lane 2,
   Flatpak Proton, `B4B_GPU=4090`: `tools/shop-test.py` **58/58** (/tmp/b4b-shop-20261012-021647; Get more's Wear right
   after Add, Remove/Update through Installed, Remove + Undo of a hand-installed pak, client 2 through its own window).
+- One table (2026-10-13, overlay.md "Add-ons tab"): the list fetched by itself on the first arrival in Fort Hope
+  (`shop: in Fort Hope for the first time this game: getting the add-on list`), thumbnails when the tab shows the list,
+  Refresh; the shop's rows and the installed add-ons in one table. `tools/shop-test.py` adapted: the automatic fetch
+  served with a bad signature (refused), Refresh for the good list, row order checked with `overlay locate`
+  (installed first, A-Z / Z-A, time installed both ways, filter, search), Wear = the customization screen + Esc twice
+  (`key 0x1B`; worn, view back on the hero), Use / Stop of the weapon look in a mission, Remove / Update / Undo /
+  Turn on from the rows, client 2 gets the list by itself, adds and wears; the test add-on's picks in each prefix's
+  `b4bcoop-outfits.txt` are dropped before every start (a remembered outfit is worn at the start, so its Update would
+  wait for a restart). Lane 2 with the native Steam client, `B4B_GPU=4090`: **68/68** (/tmp/b4b-shop-20261013-032556).
 
 ## 6. Open
 - Still a restart (§1a): gameplay add-ons; replacements/updates of assets in memory (e.g. an outfit someone wears, a

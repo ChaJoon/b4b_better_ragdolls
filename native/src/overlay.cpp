@@ -141,7 +141,7 @@ static int get_buffers(IDXGISwapChain3 *sc) {
     }
     return 1;
 }
-#define SRV_SLOTS 256   // font atlas pages + ov_texture pictures (at most OV_MAX_TEX), never freed
+#define SRV_SLOTS 384   // font atlas pages + ov_texture pictures (at most OV_MAX_TEX), never freed
 static void srv_alloc(ImGui_ImplDX12_InitInfo *, D3D12_CPU_DESCRIPTOR_HANDLE *c, D3D12_GPU_DESCRIPTOR_HANDLE *g) {
     UINT i = srv_used < SRV_SLOTS ? srv_used++ : SRV_SLOTS - 1;   // ov_texture keeps well below the end
     *c = srv_heap->GetCPUDescriptorHandleForHeapStart(); c->ptr += (SIZE_T)i * srv_inc;
@@ -515,7 +515,7 @@ static void notef(const char *fmt, ...) {
 }
 
 // ---- panel registry ----
-struct Panel { char name[32]; int order; OverlayDrawFn draw; };
+struct Panel { char name[32]; int order; OverlayDrawFn draw; float pref_w, pref_h; ImVec2 size; int log_lines; };   // overlay_panel_size
 static Panel panels[24];
 static int n_panels;
 extern "C" void overlay_add_panel(const char *name, int order, OverlayDrawFn draw) {
@@ -529,10 +529,17 @@ extern "C" void overlay_add_panel(const char *name, int order, OverlayDrawFn dra
         if (n_panels == 24) { LOG("overlay: too many panels, %s dropped", name); return; }
         n_panels++;
     }
+    if (strcmp(panels[i].name, name)) { panels[i].pref_w = panels[i].pref_h = 0; panels[i].size = ImVec2(0, 0); panels[i].log_lines = 0; }
     snprintf(panels[i].name, sizeof panels[i].name, "%s", name);
     panels[i].order = order; panels[i].draw = draw;
     for (int a = 1; a < n_panels; a++)   // keep them sorted by order (tiny insertion sort)
         for (int b = a; b > 0 && panels[b].order < panels[b - 1].order; b--) { Panel t = panels[b]; panels[b] = panels[b - 1]; panels[b - 1] = t; }
+}
+// A tab with a window size of its own (overlay_panel_size): the window takes it while that tab is shown (and keeps the
+// player's resizing for that tab); the other tabs share the window's usual size.
+extern "C" void overlay_panel_size(const char *name, float w_em, float h_frac, int log_lines) {
+    for (int i = 0; i < n_panels; i++)
+        if (!strcmp(panels[i].name, name)) { panels[i].pref_w = w_em; panels[i].pref_h = h_frac; panels[i].log_lines = log_lines; }
 }
 // Other names of a tab (dev `overlay tab <alias>`): that tab is shown and select(arg) runs (e.g. a mode inside it).
 struct Alias { char name[32], panel[32]; void (*select)(int); int arg; };
@@ -596,6 +603,14 @@ extern "C" void ov_text_dim(const char *fmt, ...) {
     LOCKED;
     ImGui::PushStyleColor(ImGuiCol_Text, ImGui::GetStyle().Colors[ImGuiCol_TextDisabled]);
     va_list ap; va_start(ap, fmt); ImGui::TextWrappedV(fmt, ap); va_end(ap);
+    ImGui::PopStyleColor();
+}
+extern "C" void ov_text_dim_line(const char *fmt, ...) {
+    LOCKED;
+    ImGui::PushStyleColor(ImGuiCol_Text, ImGui::GetStyle().Colors[ImGuiCol_TextDisabled]);
+    ImGui::PushTextWrapPos(-1.f);   // one line, never wrapped (a size, a number)
+    va_list ap; va_start(ap, fmt); ImGui::TextV(fmt, ap); va_end(ap);
+    ImGui::PopTextWrapPos();
     ImGui::PopStyleColor();
 }
 extern "C" void ov_text_warn(const char *fmt, ...) {
@@ -764,6 +779,26 @@ extern "C" int ov_texture(const unsigned char *rgba, int w, int h) {
     user_tex[++n_user_tex] = t;
     return n_user_tex;
 }
+extern "C" int ov_texture_set(int tex, const unsigned char *rgba, int w, int h) {
+    LOCKED;
+    if (tex <= 0 || tex > n_user_tex || !rgba) return 0;
+    ImTextureData *t = user_tex[tex];
+    if (w != t->Width || h != t->Height) return 0;
+    memcpy(t->Pixels, rgba, (size_t)w * h * 4);
+    if (t->Status == ImTextureStatus_OK) {   // not uploaded yet (WantCreate): the creation takes the new pixels anyway
+        t->UpdateRect.x = t->UpdateRect.y = 0; t->UpdateRect.w = (unsigned short)w; t->UpdateRect.h = (unsigned short)h;
+        t->SetStatus(ImTextureStatus_WantUpdates);
+    }
+    return 1;
+}
+extern "C" int ov_hovered(void) { LOCKED; return ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled); }
+extern "C" void ov_tooltip_image(int tex, float w_em, float h_em, float u1, float v1) {
+    LOCKED;
+    if (tex <= 0 || tex > n_user_tex || !ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) return;
+    ImGui::BeginTooltip();
+    ImGui::Image(user_tex[tex]->GetTexRef(), ImVec2(ImGui::GetFontSize() * w_em, ImGui::GetFontSize() * h_em), ImVec2(0, 0), ImVec2(u1, v1));
+    ImGui::EndTooltip();
+}
 extern "C" void ov_image(int tex, float w_em, float h_em) {
     LOCKED;
     ImVec2 sz(ImGui::GetFontSize() * w_em, ImGui::GetFontSize() * h_em);
@@ -771,6 +806,21 @@ extern "C" void ov_image(int tex, float w_em, float h_em) {
     else ImGui::Dummy(sz);
 }
 extern "C" void ov_same_line(void) { LOCKED; ImGui::SameLine(); }
+extern "C" int ov_same_line_fit(const char *label, float w_em) {
+    LOCKED;
+    ImGuiStyle &st = ImGui::GetStyle();
+    float w = w_em * ImGui::GetFontSize();
+    if (label) w = ImGui::CalcTextSize(label, nullptr, true).x + st.FramePadding.x * 2;
+    // the cursor is at the start of the next line now: that line's left edge + the space left on it = the right edge
+    float right = ImGui::GetCursorScreenPos().x + ImGui::GetContentRegionAvail().x;
+    if (ImGui::GetItemRectMax().x + st.ItemSpacing.x + w > right) return 0;
+    ImGui::SameLine();
+    return 1;
+}
+extern "C" void ov_progress(float frac, float w_em, const char *text) {
+    LOCKED;
+    ImGui::ProgressBar(frac < 0 ? 0 : frac > 1 ? 1 : frac, ImVec2(w_em > 0 ? w_em * ImGui::GetFontSize() : -FLT_MIN, 0), text);
+}
 extern "C" void ov_separator(void) { LOCKED; ImGui::Separator(); }
 extern "C" void ov_width(float em) { LOCKED; if (em > 0) ImGui::SetNextItemWidth(ImGui::GetFontSize() * em); }
 extern "C" void ov_tooltip(const char *text) { LOCKED; if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) ImGui::SetTooltip("%s", text); }
@@ -782,27 +832,6 @@ extern "C" int ov_header(const char *label, int default_open) {
     if (drive_take(label, 1)) ImGui::GetStateStorage()->SetInt(id, !open);   // dev press: opens/closes it next frame
     return open;
 }
-// A row of tabs inside a panel (a mode switch): *cur = the one shown; setting *cur selects it from the next frame.
-extern "C" int ov_tabs(const char *id, const char *const *labels, int n, int *cur) {
-    LOCKED;
-    ImGuiStorage *st = ImGui::GetStateStorage();
-    ImGuiID key = ImGui::GetID(id);
-    int last = st->GetInt(key, -1), shown = -1, driven = -1, was = *cur;
-    if (ImGui::BeginTabBar(id)) {
-        for (int i = 0; i < n; i++) {
-            bool sel = ImGui::BeginTabItem(labels[i], nullptr, i == *cur && i != last ? ImGuiTabItemFlags_SetSelected : 0);
-            after_item();
-            if (drive_take(labels[i], 1)) driven = i;
-            if (sel) { shown = i; ImGui::EndTabItem(); }
-        }
-        ImGui::EndTabBar();
-    }
-    if (driven >= 0) *cur = driven;
-    else if (last >= 0 && shown >= 0 && shown != last) *cur = shown;   // clicked (or our SetSelected arrived)
-    if (last >= 0 && shown >= 0 && shown != last) ImGui::SetScrollY(0);   // another mode starts at its top
-    st->SetInt(key, shown);
-    return *cur != was;
-}
 extern "C" void ov_push_id(int id) { LOCKED; ImGui::PushID(id); }
 extern "C" void ov_pop_id(void) { LOCKED; ImGui::PopID(); }
 extern "C" int ov_table_begin(const char *id, int cols) {
@@ -813,6 +842,23 @@ extern "C" void ov_table_header(const char *const *names, int n) {
     LOCKED;
     for (int i = 0; i < n; i++) ImGui::TableSetupColumn(names[i]);
     ImGui::TableHeadersRow();
+}
+extern "C" int ov_table_begin_scroll(const char *id, int cols, float below_px, float min_em) {
+    LOCKED;
+    float h = ImGui::GetContentRegionAvail().y - below_px;
+    ImGuiTableFlags f = ImGuiTableFlags_RowBg | ImGuiTableFlags_BordersInnerV | ImGuiTableFlags_SizingStretchProp;
+    if (h < min_em * ImGui::GetFontSize()) return ImGui::BeginTable(id, cols, f);   // too low: the tab scrolls as a whole
+    return ImGui::BeginTable(id, cols, f | ImGuiTableFlags_ScrollY, ImVec2(0, h));
+}
+extern "C" float ov_cursor_y(void) { LOCKED; return ImGui::GetCursorPosY(); }
+extern "C" void ov_table_columns(const char *const *names, const float *w, int n, int header) {
+    LOCKED;
+    float fs = ImGui::GetFontSize();
+    if (header) ImGui::TableSetupScrollFreeze(0, 1);   // a scrolling table keeps its labels on top
+    for (int i = 0; i < n; i++)
+        ImGui::TableSetupColumn(names ? names[i] : "", w[i] < 0 ? ImGuiTableColumnFlags_WidthFixed : ImGuiTableColumnFlags_WidthStretch,
+                                w[i] < 0 ? -w[i] * fs : w[i]);
+    if (header) ImGui::TableHeadersRow();
 }
 extern "C" void ov_table_next(void) { LOCKED; ImGui::TableNextColumn(); }
 extern "C" void ov_table_end(void) { LOCKED; ImGui::EndTable(); }
@@ -947,6 +993,30 @@ static void snapshot(void) {   // under cs, right after ImGui::Render()
     snap.TotalVtxCount = d->TotalVtxCount; snap.TotalIdxCount = d->TotalIdxCount;
 }
 
+// the window's size per tab (overlay_panel_size): applied at the next frame after the shown tab changed
+static ImVec2 pending_size, normal_size;
+static char sized_tab[32];
+static int size_settle;
+static void track_size(void) {   // inside the window, after the tabs: remember sizes, switch on a tab change
+    ImVec2 cur = ImGui::GetWindowSize();
+    Panel *now = nullptr;
+    for (int i = 0; i < n_panels; i++) if (!strcmp(panels[i].name, cur_tab)) now = &panels[i];
+    if (strcmp(sized_tab, cur_tab)) {
+        snprintf(sized_tab, sizeof sized_tab, "%s", cur_tab);
+        float fs = ImGui::GetFontSize();
+        ImVec2 want = normal_size;
+        if (now && now->pref_w > 0) {
+            want = now->size.x > 0 ? now->size : ImVec2(fs * now->pref_w, (disp_h - 60) * now->pref_h);
+            if (want.x > disp_w - 60) want.x = disp_w - 60;
+            if (want.y > disp_h - 60) want.y = disp_h - 60;
+        }
+        if (want.x > 0 && (want.x != cur.x || want.y != cur.y)) { pending_size = want; size_settle = 2; }
+        return;
+    }
+    if (size_settle) { size_settle--; return; }
+    if (now && now->pref_w > 0) now->size = cur;
+    else normal_size = cur;
+}
 static void build_frame(void) {
     static LARGE_INTEGER last, freq;
     char role[200];
@@ -969,6 +1039,7 @@ static void build_frame(void) {
         ImGui::SetNextWindowPos(ImVec2(30, 30), ImGuiCond_FirstUseEver);
         ImGui::SetNextWindowSize(ImVec2(fs * 36, fs * 42 < disp_h - 60 ? fs * 42 : disp_h - 60), ImGuiCond_FirstUseEver);   // roomier rows (#44): taller
         ImGui::SetNextWindowSizeConstraints(ImVec2(fs * 16, fs * 12), ImVec2(disp_w, disp_h));
+        if (pending_size.x > 0) { ImGui::SetNextWindowSize(pending_size, ImGuiCond_Always); pending_size = ImVec2(0, 0); }
         char title[80];
         snprintf(title, sizeof title, "b4bcoop  (%s or Esc closes)###b4bcoop", ov_key_name(key));
         ImGui::Begin(title, nullptr, ImGuiWindowFlags_NoCollapse);
@@ -984,7 +1055,8 @@ static void build_frame(void) {
             show = ImGui::BeginTabItem(panels[i].name, nullptr, sel ? ImGuiTabItemFlags_SetSelected : 0);
             if (show) {
                 snprintf(cur_tab, sizeof cur_tab, "%s", panels[i].name);
-                float log_h = (ImGui::GetTextLineHeight() + LOG_SPACING) * 6 + ImGui::GetStyle().ItemSpacing.y * 3;
+                int lines = panels[i].log_lines > 0 ? panels[i].log_lines : 6;
+                float log_h = (ImGui::GetTextLineHeight() + LOG_SPACING) * lines + ImGui::GetStyle().ItemSpacing.y * 3;
                 ImGui::BeginChild("panel", ImVec2(0, -log_h));
                 ImGui::PushTextWrapPos(0);
             }
@@ -1002,6 +1074,7 @@ static void build_frame(void) {
     }
     LOCKED;
     ImGui::EndTabBar();
+    track_size();
     ImGui::Separator();
     ImGui::BeginChild("log", ImVec2(0, 0), 0, ImGuiWindowFlags_HorizontalScrollbar);
     ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(ImGui::GetStyle().ItemSpacing.x, LOG_SPACING));   // log lines stay dense
@@ -1046,6 +1119,7 @@ static void set_open(int on) {
     }
     LOG("overlay: %s", on ? "open" : "closed");
 }
+extern "C" void overlay_close(void) { if (open_) set_open(0); }
 static void capture(int vk) {   // a key for ov_key
     cap_vk = vk == VK_ESCAPE ? -2 : (vk == VK_BACK || vk == VK_DELETE) ? 0 : vk;
     InterlockedExchange(&cap_state, 2);

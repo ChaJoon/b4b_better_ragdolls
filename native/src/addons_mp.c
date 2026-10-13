@@ -194,12 +194,12 @@ static int fails(const Note *n, char *msg, size_t mn) {
     case POL_ANY: return 0;
     case POL_COSMETIC:
         if (!list_own(r, m, 1, NULL, list, sizeof list)) return 0;
-        snprintf(msg, mn, "This host allows only cosmetic add-ons%s; turn off %s (~ window: Looks & add-ons, Installed; or /addons off <#>) "
+        snprintf(msg, mn, "This host allows only cosmetic add-ons%s; turn off %s (/addons off <#>, or Remove in the ~ window's Add-ons tab) "
                  "and restart the game.", n->assumed ? " (an older b4bcoop: its default)" : "", list);
         return 1;
     case POL_NONE:
         if (!list_own(r, m, 0, NULL, list, sizeof list)) return 0;
-        snprintf(msg, mn, "This host allows no add-ons; turn off %s (~ window: Looks & add-ons, Installed; or /addons off <#>) and "
+        snprintf(msg, mn, "This host allows no add-ons; turn off %s (/addons off <#>, or Remove in the ~ window's Add-ons tab) and "
                  "restart the game.", list);
         return 1;
     case POL_MATCH: {
@@ -241,7 +241,7 @@ int addons_join_refused(const char *target, char *msg, size_t mn) {
     return 1;
 }
 
-// addons.c: an add-on would be loaded now (~ window: Get more, Installed; /addons on) as a client in someone's session. The
+// addons.c: an add-on would be loaded now (~ window: Add-ons tab; /addons on) as a client in someone's session. The
 // host's policy as we know it from this join (its rich presence or its login refusal; nothing known = it didn't ask,
 // i.e. any, or an older host reached by IP, which doesn't check) decides, the same way it would decide our next join.
 // 1 = allowed; 0 = not (msg: why, for our own player).
@@ -407,21 +407,17 @@ int addons_mp_slash(const char *sub, char *arg, Out *o) {
     return 0;
 }
 
-// ~ window, Host rules of the "Looks & add-ons" tab (looks.c): the host's policy (saved to b4bcoop.ini, like editing addons_policy=). A client
-// sees the radios greyed out, with the reason.
+// ~ window, Host rules at the bottom of the Add-ons tab (looks.c): the host's policy (saved to b4bcoop.ini, like
+// editing addons_policy=), one combo. A client sees it greyed out, with the reason.
 void addons_mp_panel(void) {
-    static const char *DESC[] = {"everyone, whatever they run (default)", "cosmetic add-ons only", "only players without add-ons",
-                                 "cosmetic free; gameplay add-ons must be the same as yours (joiners see your gameplay add-ons' ids)"};
-    ov_heading("Who may join with add-ons");
+    static const char *ITEMS[] = {"anyone", "cosmetic add-ons only", "no add-ons", "same gameplay add-ons"};
     ov_begin_perm(CMD_HOST);
-    for (int i = 0; i < 4; i++) {
-        char lab[32];
-        snprintf(lab, sizeof lab, "%s##pol", POLICY_NAMES[i]);
-        if (ov_radio(lab, policy == i) && policy != i) ov_setting("addons_policy", i == ADDONS_POLICY_DEFAULT ? NULL : POLICY_NAMES[i], 1);
-        ov_same_line();
-        ov_text_dim("%s", DESC[i]);
-    }
+    int cur = policy;
+    ov_width(11);
+    if (ov_combo("Who may join with add-ons##pol", &cur, ITEMS, 4) && cur != policy)
+        ov_setting("addons_policy", cur == ADDONS_POLICY_DEFAULT ? NULL : POLICY_NAMES[cur], 1);
+    ov_tooltip("addons_policy in b4bcoop.ini (any, cosmetic, none, match); applies to the next player who joins. Joiners "
+               "check their own add-ons against it: nobody's add-ons are sent to anyone. Same gameplay add-ons (match): "
+               "cosmetic ones are free, gameplay add-ons must be the same as yours (joiners see their ids).");
     ov_end_perm();
-    ov_text_dim("addons_policy in b4bcoop.ini; applies to the next player who joins. Joiners check their own add-ons "
-                "against it: nobody's add-ons are sent to anyone, so there is no list of what others run.");
 }
