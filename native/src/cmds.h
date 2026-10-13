@@ -81,6 +81,10 @@ int bots_init(void);                                     // bots.c: pinged toolk
 int bots_live(const char *key, const char *val);          // bot_toolkit_doors=0|1
 int bots_toolkit_doors(void);                            // the setting; -1 = hooks off (signature mismatch)
 int bots_cmd(const char *verb, char *rest, Out *o);      // dev builds: `botdoor [doors|ping|target|tp]`
+void bots_tick(float dt);                                 // bot_heal_key (any machine), heal request jobs (host)
+int bots_heal_requests(void);                            // bot_heal_requests; -1 = hooks off
+int bots_heal_hotkey(void);                              // bot_heal_key (VK, 0 = none)
+int bots_heal_cmd(const char *verb, char *rest, Out *o); // dev builds: `botheal [hurt|ask|keys|watch|fix]`
 int fxsig_init(void);                                    // fxsig.c: inactive particles leave the significance manager (#46)
 int fxsig_cmd(const char *verb, char *rest, Out *o);     // dev builds: `fxsig [fix | guard on|off]`
 int supplylines_init(void);                              // supplylines.c: a client's supply lines refresh (#48)

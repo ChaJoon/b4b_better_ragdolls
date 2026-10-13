@@ -1591,6 +1591,13 @@ static void cheats_panel(void) {
     ov_end_disabled();
     ov_tooltip("Host only, works without cheats. Ping a supply-stash door and the nearest bot carrying a toolkit "
                "(up to 40 m away) goes and opens it. Off = the game's own behaviour (a bot only reacts when it is close).");
+    int hr = bots_heal_requests();
+    ov_begin_disabled(hr < 0, "Not available with this game version.");
+    if (ov_checkbox("Bots heal you on request##botheal", &hr)) ov_setting("bot_heal_requests", hr ? "1" : "0", 1);
+    ov_end_disabled();
+    ov_tooltip("Host only, works without cheats. A player presses the heal key (Settings, Keys; default H) and the "
+               "nearest bot carrying a healing item comes and heals them, at any missing health. Off = the game's own "
+               "behaviour (bots heal a teammate below about 75% health, 65% in a fight, never in a saferoom).");
     ov_end_perm();
     if (admin_is_client()) own_save_panel();
     if (on) ov_text_dim("god on %d hero(es), ammo %s, speed %.2fx%s%s", n_gods, ammo_inf ? "infinite" : "normal", slomo,

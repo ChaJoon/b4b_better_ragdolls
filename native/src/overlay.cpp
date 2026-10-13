@@ -898,6 +898,8 @@ static void panel_settings(void) {
     if (ov_key("Flashlight##flashlight_key", &k)) ov_setting_key("flashlight_key", k);
     k = thirdperson_hotkey();
     if (ov_key("Third person##thirdperson_key", &k)) ov_setting_key("thirdperson_key", k);
+    k = bots_heal_hotkey();
+    if (ov_key("Ask the bots to heal you##bot_heal_key", &k)) ov_setting_key("bot_heal_key", k);
     ov_text_dim("Changes here apply at once and are saved to b4bcoop.ini (only the settings you change). Editing "
                 "b4bcoop.ini while the game runs updates this window too.");
     ov_text_dim("File: %s", cmds_config_path());
