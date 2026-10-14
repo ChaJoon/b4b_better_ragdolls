@@ -332,7 +332,8 @@ static int ini_stat(FILETIME *mt, DWORD *sz) {
 static int ini_apply_live(const char *key, const char *val) {
     return thirdperson_live(key, val) || flashlight_live(key, val) || joinpolicy_live(key, val) ||
            presence_live(key, val) || teamsize_live(key, val) || overlay_live(key, val) || addons_live(key, val) ||
-           updater_live(key, val) || shop_live(key, val) || online_live(key, val) || bots_live(key, val);
+           updater_live(key, val) || shop_live(key, val) || online_live(key, val) || bots_live(key, val) ||
+           handoff_live(key, val);
 }
 const char *cmds_ini_value(const char *key) {
     const IniKV *e = ini_last.n >= 0 ? ini_find(&ini_last, key) : NULL;
@@ -695,6 +696,14 @@ void coop_host(void) {
     cmd_host(&scratch);
 }
 
+// Host hand-off (handoff.c): we host next. No join targets (session or join=), and our camp is hosted from now on.
+void cmds_become_host(void) {
+    cmds_auto_join_stop();
+    auto_host = 1;
+    own_config = 1;
+    LOG("auto: hosting from now on (host hand-off)");
+}
+
 // coop_leave (client): drop the connection and go back to our own offline camp; no auto-rejoin afterwards.
 void coop_leave(void) {
     cmds_auto_join_stop();
@@ -812,6 +821,7 @@ void cmds_tick(float dt) {
     slotguard_tick(dt);
     chat_tick(dt);
     admin_tick(dt);
+    handoff_tick(dt);
     presence_tick(dt);
     steamnet_tick(dt);
     joinpolicy_tick(dt);
@@ -875,7 +885,7 @@ void cmds_run(char *line, Out *o) {
                !cheats_cmd(verb, rest, o) && !thirdperson_cmd(verb, rest, o) && !overlay_cmd(verb, rest, o) &&
                !paks_cmd(verb, rest, o) && !models_cmd(verb, rest, o) && !poststats_cmd(verb, rest, o) &&
                !updater_cmd(verb, rest, o) && !shop_cmd(verb, rest, o) && !fxsig_cmd(verb, rest, o) && !bots_cmd(verb, rest, o) &&
-               !bots_heal_cmd(verb, rest, o) && !supplylines_cmd(verb, rest, o))
+               !bots_heal_cmd(verb, rest, o) && !supplylines_cmd(verb, rest, o) && !handoff_cmd(verb, rest, o))
         out_printf(o, "unknown command: %s\n", verb);
 }
 #endif  // !B4B_RELEASE

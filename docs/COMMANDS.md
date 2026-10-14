@@ -29,7 +29,7 @@ of the window, and also in your chat.
 | Tab | What's in it | Chat equivalent |
 |---|---|---|
 | **Session** | Version and protocol, your Steam ID (Copy), Join a host by Steam ID, Host, Leave; your Steam friends in Back 4 Blood with **Join** (like Steam's Join Game) and **Invite** (while you host); "Show Join Game to Steam friends" (`presence`); host: who may join (Steam friends / anyone, always-allowed Steam IDs) | `/join`, `/host`, `/leave`; ini `presence`, `allow_joins`, `allow_steamids` |
-| **Players** | Everyone in the game with ping and Steam ID; host: **Kick**, **Ban** per player, a message to everyone (**Say**), **Locked**, bots (game default/on/off), team size, **Ready everyone**, **Ready post-round vote**, **Restart mission**, the ban list with **Unban** / **Unban all** | `/players`, `/ping`, `/kick`, `/ban`, `/say`, `/lock`, `/unlock`, `/bots`, `/teamsize`, `/ready`, `/ready vote`, `/restart`, `/bans`, `/unban` |
+| **Players** | Everyone in the game with ping and Steam ID; who hosts next if the host leaves; host: **Kick**, **Ban**, **Make host** per player, a message to everyone (**Say**), **Locked**, bots (game default/on/off), team size, **Ready everyone**, **Ready post-round vote**, **Restart mission**, the ban list with **Unban** / **Unban all** | `/players`, `/ping`, `/kick`, `/ban`, `/handoff`, `/say`, `/lock`, `/unlock`, `/bots`, `/teamsize`, `/ready`, `/ready vote`, `/restart`, `/bans`, `/unban` |
 | **Camera** | Third person on/off, start the game in third person, its key, sliders for distance, side, height and FOV (Ctrl+click a slider to type a number), Swap shoulder, Reset camera, aim correction, free look on/off | `/thirdperson ...`; ini `thirdperson*` |
 | **Flashlight** | Your light (Toggle, On, Off; host: Automatic), its key, sticky mode; **Beam (your view)**: sliders for width, range and brightness, Reset beam | `/flashlight ...`; ini `flashlight_key`, `flashlight_sticky`, `flashlight_width`, `flashlight_range`, `flashlight_brightness` |
 | **Cheats** | Host: **Cheats on**, a player picker (`me`, everyone, a player) for the buttons marked `*`, then every cheat: god, heal, revive, infinite ammo, copper, cards, fly, noclip, walk, teleport, free camera, size, horde, kill all ridden, freeze, director phases, spawn, game speed, win, lose, and your own save's supply points / skull totems / burn cards / unlock all (everyone, while the host has cheats on). Also (host, no cheats needed): **Bots open pinged toolkit doors**, **Bots heal you on request** | every `/cheats` command; ini `bot_toolkit_doors`, `bot_heal_requests` |
@@ -225,6 +225,7 @@ sent to the host.
 | `/ready vote` | Readies everyone for the post-round vote | `/ready vote` |
 | `/restart` | Restarts the current chapter (counts as a wipe) | `/restart` |
 | `/say <message>` | A message every player sees in their chat | `/say back in 5 min` |
+| `/handoff <player>` | That player hosts from now on and everyone moves to them; in a mission the run goes on (see below) | `/handoff 2` |
 | `/model <player> <name\|reset>` | Changes a player's or a bot's look; everyone is told | `/model 2 doc_elite_03` |
 | `/models on\|off` | Allows or stops model swaps for everyone (on by default) | `/models off` |
 | `/addons policy [any\|cosmetic\|none\|match]` | Shows or sets (this session) which add-ons joiners may have | `/addons policy none` |
@@ -270,6 +271,20 @@ sees `The host turned model swaps off (/models).`). Players can still wear their
 allows swaps again. `/model <player> reset` puts one player or bot back to their own look.
 
 **`/say`**: every player with b4bcoop sees `<your name>: [host] back in 5 min` in their chat, you too.
+
+**`/handoff <player>`** (the `~` window's **Make host**): hands the session to that player. They load their own
+Fort Hope as the host and everyone else, you included, joins them (about half a minute). In a mission the campaign run
+goes on from the start of the current chapter, the way the war table's Continue resumes a run: same chapter and
+difficulty, and every player's hero, cards, copper and loadout as the run saved them at the start of that chapter
+(what happened since then in this chapter is lost). In the first chapter of a new run, which isn't saved yet, the new
+host starts a new run on the same chapter. The new host's profile keeps a copy of the run.
+`/handoff` alone (anyone) says who hosts next.
+
+**If the host leaves** (quits the game, or crashes), the same happens without a command: the player shown in the
+Players tab as next host (the one named with `/handoff`, else the first player in the list) takes over, and the others
+join them. A quitting host tells everyone before it closes; after a crash the others notice it once the connection
+times out (up to 90 seconds). `host_handoff=0` in your `b4bcoop.ini`: you don't take over or follow when your host is
+gone (you go back to your own Fort Hope as before).
 
 ## Cheats (sandbox)
 
@@ -575,7 +590,7 @@ Rules:
   `flashlight_key`, `flashlight_sticky`, `bot_heal_key`, `bot_heal_requests`, `bot_toolkit_doors`,
   `flashlight_width`, `flashlight_range`, `flashlight_brightness`,
   `allow_joins`, `allow_steamids`, `presence`, `teamsize` (from the next map), `overlay`, `overlay_key`,
-  `overlay_scale`, `addons_policy`, `updates`, `launch` (read at the next game start). Only the lines you changed count: an edit doesn't undo what you set with a chat command this
+  `overlay_scale`, `addons_policy`, `updates`, `host_handoff`, `launch` (read at the next game start). Only the lines you changed count: an edit doesn't undo what you set with a chat command this
   session. Deleting or commenting out a line = back to its default.
 - **Need a game restart** (chat: `b4bcoop.ini: host_ip changed; restart the game for that`): `auto_signin`, `host`, `join`,
   `host_ip`, `steam_p2p`, `presence_addr`, `netguard`, `netguard_eos`, `netguard_allow`.
@@ -608,6 +623,7 @@ Rules:
 | `allow_joins` | `friends` | `friends`, `anyone` | Host: who may join |
 | `allow_steamids` | none | Steam IDs | Host: these players may always join |
 | `presence` | `1` | `0`, `1` | `0`: friends don't see **Join Game** on you |
+| `host_handoff` | `1` | `0`, `1` | `0`: when your host is gone, don't take over or follow the next host (see `/handoff`) |
 | `netguard` | `block` | `block`, `log`, `off` | Blocks the game's online services while you play |
 | `join` | none | `steam:<id>` | Always join this host automatically |
 | `host_ip` | `0` | `0`, `1` | **Advanced**: host and join by IP address |

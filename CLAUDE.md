@@ -142,6 +142,13 @@ Detailed engine findings (addresses, obfuscated layouts, class names): `docs/NOT
     eval 0x1415D67D0), saferoom rule lifted, tether lifted; next bot after 4 s untaken / 8 s + 0.5 s/m unhealed. A
     client's request = ServerSpawnCommWheelPing(GroupUp) with Scale3D (1,1,0.875) (hook 0x141E88840; older host shows
     "Group up"; no protocol bump). Dev `botheal ...`. bot-pings.md "Heal requests".
+  - `handoff.c` host hand-off (protocol 3): the host sends each client a silent `handoff plan host|join ...` line every
+    second (next host = the one named with `/handoff` / `~` Players **Make host**, else the first other player;
+    `steam:<id64>`, or `127.0.0.1:<port+1>` for local copies; none with `host_ip=1`) and in a mission the campaign
+    run record (JSON in chunks, or `handoff newrun` in chapter 1). Host quit (RequestExit hook) or a lost
+    established connection → the next host hosts its own Fort Hope, waits for the others (60 s), writes the run into
+    its profile (0x141BC1780) and resumes it (`Matchmaking::JoinRun` 0x141AE9240): chapter restarts, run kept.
+    Ini `host_handoff=0` = no automatic take-over. Dev `handoff [runs|resume|go]`. docs/investigations/host-handoff.md.
   - `slotguard.c` host: a joiner with no free survivor slot gets "Server full." at login (bots' slots count as free),
     a slotless player is kicked instead of spawned (was a host crash, #7); `slotguard` command.
     docs/investigations/slot-guard.md.

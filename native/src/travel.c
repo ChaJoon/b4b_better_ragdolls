@@ -102,6 +102,9 @@ static void travel_detour(void *engine, UObject *world, const wchar_t *url, uint
         LOG("travel: suppressed ?closed, rejoining %s in 5s", host_addr);
         return;
     }
+    // client: the connection to our host ended (not our own /leave or a kick: those clear host_addr first): the host quit
+    // or crashed; handoff.c starts its plan (we host next, or join who does) if the host sent one
+    if (!listen && host_addr[0] && (strstr(u, "closed") || strstr(u, "failed"))) handoff_host_lost(u);
     orig_travel(engine, world, url, type);
 }
 

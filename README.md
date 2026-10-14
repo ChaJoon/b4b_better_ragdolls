@@ -159,6 +159,8 @@ Making your own add-ons: see the modkit ([modkit/README.md](modkit/README.md), `
   consumables land in their own profile) and can play **burn cards**, charged to their own profile. Joined players get a
   new supply line after finishing one, like the host.
 - **5 players** (`teamsize=5` on the host); a clean "Server full." when nobody else fits.
+- **The host can leave**: the next player takes over as host and everyone moves to them (or the host picks one: `~` →
+  **Players** → **Make host**). In a mission the run goes on from the start of the current chapter.
 - Who may join: Steam friends by default, or anyone, or a list of Steam IDs. Kick, ban and lock.
 - Everyone must run the same version; a mismatch is refused with a message that points to the Updates tab.
 - **Co-op or online** at every start: online runs the official game with Easy Anti-Cheat and no b4bcoop code.

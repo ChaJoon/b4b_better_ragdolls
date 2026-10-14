@@ -418,6 +418,28 @@ static int send_line_t(UObject *pc, const char *text, int kind) {   // kind: cha
 static int send_line(UObject *pc, const char *text) { return send_line_t(pc, text, 0); }
 int admin_notice_to(UObject *pc, const char *text) { return send_line(pc, text); }   // models.c etc.
 int admin_data_to(UObject *pc, const char *text) { return send_line_t(pc, text, 2); }   // weaponlooks.c
+// A data line of any length, wide text as is (handoff.c: a campaign run's JSON in chunks). The RPC's parameters are
+// serialized during ProcessEvent, so the buffer only has to live for the call.
+int admin_data_to_w(UObject *pc, const wchar_t *text, int len) {
+    static UFunction *f;
+    UObject *me = ue_local_pc(), *my_ps = me ? ue_get_ptr(me, "PlayerState") : NULL;
+    if (!f && pc) f = ue_find_function(U_CLASS(pc), "ClientTeamMessage");
+    FField *ps = f ? ue_find_prop(f, "SenderPlayerState") : NULL, *s = f ? ue_find_prop(f, "S") : NULL;
+    FField *t = f ? ue_find_prop(f, "Type") : NULL;
+    if (!ps || !s || !t || !my_ps || UFN_PARMSSIZE(f) > 64 || len < 0) return -1;
+    wchar_t *w = malloc((len + 1) * sizeof(wchar_t));
+    if (!w) return -1;
+    memcpy(w, text, len * sizeof(wchar_t));
+    w[len] = 0;
+    uint8_t p[64] = {0};
+    *(UObject **)(p + FP_OFFSET(ps)) = my_ps;
+    FString *fs = (FString *)(p + FP_OFFSET(s));
+    fs->data = w; fs->num = len + 1; fs->max = len + 1;
+    *(FName *)(p + FP_OFFSET(t)) = chat_notice_type(2);
+    ue_process_event(pc, f, p);
+    free(w);
+    return 0;
+}
 
 // Shared with cheats.c: the /players list, player lookup, a display name (bots: their hero), and a notice every
 // player sees (the /say path, prefixed "[b4bcoop] ").
@@ -647,7 +669,7 @@ static const struct { const char *name; int perm; const char *usage; } CMDS[] = 
     {"kick", CMD_HOST, "/kick <name|#>"}, {"ban", CMD_HOST, "/ban <name|#>"}, {"unban", CMD_HOST, "/unban <name|steam:id|#n|all>"},
     {"bans", CMD_HOST, "/bans"}, {"lock", CMD_HOST, "/lock"}, {"unlock", CMD_HOST, "/unlock"}, {"teamsize", CMD_HOST, "/teamsize N"},
     {"restart", CMD_HOST, "/restart"}, {"ready", CMD_HOST, "/ready [vote]"}, {"bots", CMD_HOST, "/bots on|off|default"},
-    {"say", CMD_HOST, "/say <message>"},
+    {"say", CMD_HOST, "/say <message>"}, {"handoff", CMD_ANYONE, "/handoff [<name|#>]"},   // host part checked in handoff.c
     {"model", CMD_ANYONE, "/model list|<name>|reset"}, {"models", CMD_ANYONE, "/models [on|off]"},   // host parts checked in models.c
     {"addons", CMD_ANYONE, "/addons [on|off|info <#>|policy]"}, {"addon", CMD_ANYONE, "/addons [on|off|info <#>|policy]"},
 };
@@ -659,7 +681,8 @@ static void help(Out *o) {
                coop_version(), coop_protocol());
     if (is_client()) { out_printf(o, "(/kick /ban /lock ... are for the host)\n/cheats  (when the host has cheats on: your own save)\n"); return; }
     out_printf(o, "host: /kick /ban <name|#>  /unban  /bans\n/lock  /unlock  /teamsize N  /bots on|off\n"
-                  "/restart  /ready [vote]  /say <msg>\n/cheats on|off  (sandbox, /cheats help)\n"
+                  "/restart  /ready [vote]  /say <msg>\n/handoff <name|#>  (they host; the run goes on)\n"
+                  "/cheats on|off  (sandbox, /cheats help)\n"
                   "/model <player> <name>  /models on|off\n/addons policy any|cosmetic|none|match\n"
                   "//text sends a message starting with /\n");
 }
@@ -703,6 +726,7 @@ void admin_slash(char *line, Out *o) {
     else if (!strcmp(verb, "thirdperson")) cmd_thirdperson(rest, o);
     else if (!strcmp(verb, "model") || !strcmp(verb, "models")) models_slash(verb, rest, o);
     else if (!strcmp(verb, "addons") || !strcmp(verb, "addon")) addons_slash(verb, rest, o);
+    else if (!strcmp(verb, "handoff")) handoff_slash(rest, o);
     else if (!strcmp(verb, "join")) {
         if (!rest || !*rest) { out_printf(o, "usage: %s\n", CMDS[i].usage); return; }
         out_printf(o, "joining %s ...\n", rest);
@@ -766,12 +790,17 @@ static void players_panel(void) {
                 ov_same_line();
                 snprintf(lab, sizeof lab, "Ban##%d", i);
                 if (ov_button_confirm(lab, "Sure? Ban")) ov_run("ban #%d", i);
+                ov_same_line();
+                snprintf(lab, sizeof lab, "Make host##%d", i);
+                if (ov_button_confirm(lab, "Sure? Make host")) ov_run("handoff #%d", i);
+                ov_tooltip("They host from now on and everyone moves to them; in a mission the run continues from the start of this chapter.");
                 ov_end_disabled();
             }
             ov_pop_id();
         }
         ov_table_end();
     }
+    handoff_players_panel();
     if (ov_button("Ping")) ov_run("ping");
     ov_same_line();
     if (ov_button("List in the log (/players)")) ov_run("players");

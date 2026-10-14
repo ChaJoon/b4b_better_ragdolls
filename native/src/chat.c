@@ -174,6 +174,12 @@ static void sayteam_detour(UObject *pc, const FString *msg) { say_common(orig_sa
 // our notices are shown in the chat box. Text only, never executed.
 static void ctm_detour(UObject *pc, UObject *sender, const FString *s, FName type, float life) {
     char text[320], name[64] = "host", tn[64];
+    FName dt0 = chat_notice_type(2);
+    if (type.idx == dt0.idx && type.num == dt0.num && s && s->data && s->num > 8 && !wcsncmp(s->data, L"handoff ", 8)) {
+        n_received++;
+        handoff_host_data(s->data, s->num);   // may be long (a campaign run in chunks): not cut to a chat line
+        return;
+    }
     ascii_of(s, text, sizeof text);
     int32_t off = sender ? ue_prop_offset(sender, "PlayerNamePrivate") : -1;
     if (off >= 0) ascii_of((FString *)((char *)sender + off), name, sizeof name);

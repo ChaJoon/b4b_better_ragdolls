@@ -34,6 +34,11 @@ static void logf_detour(const char *file, int line, const FName *cat, uint8_t ve
     if (!strcmp(cname, "LogNet") && strstr(buf, "NetworkFailure: PendingConnectionFailure") && strstr(buf, "Server full."))
         cmds_auto_join_backoff(60);
     if (!strcmp(cname, "LogNet") && !strncmp(buf, "NetworkFailure: ", 16)) cmds_join_failed(buf + 16);   // before chat.c's stop/backoff
+    // an established connection to our host is gone (it crashed or its quit didn't reach us; joins and follows only ever
+    // fail as PendingConnectionFailure): host hand-off (handoff.c)
+    if (!strcmp(cname, "LogNet") && strstr(buf, "Driver = GameNetDriver") &&   // not a pending join's (PendingNetDriver)
+        (strstr(buf, "FailureType = ConnectionLost") || strstr(buf, "FailureType = ConnectionTimeout")))
+        handoff_host_lost("connection lost");
     if (!strcmp(cname, "LogNet") && strstr(buf, "NetworkFailure: PendingConnectionFailure")) chat_on_join_failed(buf);
     orig_logf(file, line, cat, verb, L"%s", wbuf);
 }
