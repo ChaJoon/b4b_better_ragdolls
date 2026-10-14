@@ -2,8 +2,8 @@
 
 A b4bcoop add-on is **one `.pak` file** that players put into `<game>\b4bcoop-addons\` (next to `Back4Blood.exe`).
 The mod loads it after the game's own files, so your files replace the game's files with the same path. Players
-switch add-ons on and off with `/addons` (chat) or `addonlist.txt` in that folder. The player side is in the mod's
-b4bcoop-COMMANDS.txt, "Add-ons".
+manage them in the game's `~` window (tab Add-ons), with `/addons` (chat) or `addonlist.txt` in that folder. The
+player side is in the mod's b4bcoop-COMMANDS.txt, "Add-ons".
 
 ## Your mod folder
 Everything b4bmod writes with `-o mymod` lands in `mymod/Gobi/Content/...`, the same paths as in the game. `pack`

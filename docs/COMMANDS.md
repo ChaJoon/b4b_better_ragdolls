@@ -4,6 +4,9 @@ Everything b4b-coop lets you change, for the current release: the **`~` window**
 chat commands, and `b4bcoop.ini`. You don't need any of it to play: install, press Play, and your Steam friends can
 **Join Game** on you (see the README).
 
+Words used here: the **host** is the player whose game the others join; a **client** is a player who joined someone.
+"Host only" means only the host can use it.
+
 Contents: [The ~ window](#the--window) · [Chat commands](#how-to-use-chat-commands) ·
 [Commands for everyone](#commands-for-everyone) · [Host-only commands](#host-only-commands) ·
 [Cheats](#cheats-sandbox) · [Add-ons](#add-ons) · [b4bcoop.ini options](#b4bcoopini-options) ·
@@ -93,10 +96,10 @@ and changing someone else's look stay chat commands (`/model`, below).
 | `/model list [survivor\|npc\|outfits\|weapons]` | The looks you can use (`outfits`, `weapons`: those your add-ons add) | `/model list`, `/model list walker` |
 | `/model reset` | Back to your own look | `/model reset` |
 | `/addons` | Lists your add-ons, on/off, and conflicts | `/addons` |
-| `/addons on\|off <#>` | Switches an add-on on or off from the next game start | `/addons off 2` |
+| `/addons on\|off <#>` | Switches an add-on on (at once when it can, else at the next game start) or off (from the next game start) | `/addons off 2` |
 | `/addons info <#>` | Title, author, version, description, cosmetic or gameplay, id of an add-on | `/addons info 1` |
 
-**`/help`**: the first line is your version, e.g. `b4bcoop 0.3.0 (protocol 1)`. The host also sees the host-only
+**`/help`**: the first line is your version, e.g. `b4bcoop 0.9.7 (protocol 2)`. The host also sees the host-only
 commands; a client sees `(/kick /ban /lock ... are for the host)`.
 
 **`/players`**: one line per player: `#0 Sam (you)`, `#1 Alex`, `#2 Holly [bot]`. The number is what host commands
@@ -122,6 +125,12 @@ like `/kick 1` use. The host also sees each player's ping and Steam ID (`#1 Alex
   an older host shows a "Group up" marker at your feet instead.
 - Without it, bots heal a teammate only below about 75% health (65% in a fight), never in a saferoom, and after
   using any item (a heal or a grenade) not again for two minutes.
+
+**Bots open pinged toolkit doors**: ping a locked supply-stash door (the kind that needs a toolkit) and the nearest bot
+carrying a toolkit, up to 40 m away, goes and opens it (also when your ping hit a teammate standing in front of the
+door). On by default; the host turns it off with **Bots open pinged toolkit doors** in the `~` window's Cheats tab
+(`bot_toolkit_doors=0`; no cheats needed). In the original game bots only react from close by, to a clean ping on
+the door.
 
 **`/thirdperson`**: no word = toggle. Also `on`, `off`, `status`, and the camera settings below.
 - A third-person camera behind your own hero. **Aiming** (right mouse) switches to first person while you hold it,
@@ -172,13 +181,15 @@ Join Game, it keeps trying for 3 minutes if the host doesn't answer yet (for exa
 - Joining by IP address (`/join 1.2.3.4`) works only with `host_ip=1` (advanced, see below). Without it the reply
   is `Joining by IP address is off. Join through Steam instead: ...`.
 
-**`/model`**: wear another survivor's outfit (`/model walker_elite_07`), a whole survivor's look (`/model holly`),
-single pieces (`/model holly_head_03`), a Fort Hope NPC (`/model vanessa`) or an outfit one of your add-ons adds
+**`/model`**: for add-on outfits and weapon looks the `~` window is easier (**Add-ons** tab: **Wear** opens the
+game's customization screen with the outfit on, **Use** / **Stop** for a weapon look). The rest is chat only: wear
+another survivor's outfit (`/model walker_elite_07`), a whole survivor's look (`/model holly`), single pieces
+(`/model holly_head_03`), a Fort Hope NPC (`/model vanessa`) or an outfit one of your add-ons adds
 (`/model list outfits`), or put an add-on's model on your weapon (`/model list weapons`, e.g. `/model ak47` for your
-AR02). Add-on outfits are also on the game's customization screen (the `~` window's **Add-ons** tab: **Wear**), add-on
-weapon looks have **Use** / **Stop** there; the rest is chat only. Everyone sees survivor outfits; NPC looks only players with b4bcoop; add-on
-outfits and weapon looks only players with the same add-on (the others see your survivor, the normal weapon). Kept through map changes, death and respawn; nothing is saved. `/model` alone shows
-what you wear. All names, examples and limits: `docs/commands-models.md`.
+AR02). Everyone sees survivor outfits; NPC looks only players with b4bcoop; add-on outfits and weapon looks only
+players with the same add-on (the others see your survivor, the normal weapon). Kept through map changes, death and
+respawn; nothing is saved. `/model` alone shows what you wear. All names, examples and limits:
+`docs/commands-models.md`.
 
 **`/leave`**: only while in someone else's game (else `you are not in someone else's session`).
 
@@ -264,12 +275,12 @@ allows swaps again. `/model <player> reset` puts one player or bot back to their
 
 An opt-in sandbox for the **host**: god mode, flying, spawning ridden, forcing a horde, and so on. While the host has
 cheats on, **every player** can also add supply points, skull totem points and burn cards to **their own save**
-([Your own progression](#your-own-progression-permanent)). Everything is a chat command (type it in the game's chat
-box; a message starting with `/` is never sent to the other players) and a control in the `~` window's Cheats tab.
+([Your own progression](#your-own-progression-permanent)). Everything is a control in the `~` window's **Cheats** tab
+and a chat command (type it in the game's chat box; a message starting with `/` is never sent to the other players).
 
 **The rules:**
-- **Off until the host turns them on** with `/cheats on`. `/cheats off` turns them off again, and they switch off by
-  themselves when the game goes back to the menus.
+- **Off until the host turns them on** with **Cheats on** in the `~` window's Cheats tab, or `/cheats on`.
+  `/cheats off` turns them off again, and they switch off by themselves when the game goes back to the menus.
 - **Every map change clears the sandbox.** Cheats stay on between Fort Hope (camp) and missions, both ways, and on
   into the next chapter, but everything they were doing stops at the map change: god mode, fly, noclip, infinite ammo, game
   speed, freeze, size and the free camera (spawned ridden and director changes go with the old map). Everyone sees
@@ -376,17 +387,20 @@ copy the backup over `PlayerProfileSettings.sav`. If the backup can't be made, n
 
 ## Add-ons
 
-Add-ons change how the game looks (textures, models, UI), Left 4 Dead style: drop a file in a folder, restart (or get
-free ones from the `~` window's **Add-ons** tab, see [Add-ons from the shop](#add-ons-from-the-shop)). Add-ons are **only on your PC**: other players don't need them and don't see them. If you have
-a survivor skin add-on, you see it on every survivor wearing that outfit; players without it see the normal outfit.
+Add-ons change how the game looks (new outfits, weapon looks, textures, UI), Left 4 Dead style. The easy way: the
+`~` window's **Add-ons** tab ([above](#the--windows-add-ons-tab)), with free add-ons from the add-on shop that are
+mostly ready at once ([Add-ons from the shop](#add-ons-from-the-shop)). Add-ons are **only on your PC**: other players
+don't need them and don't see them. If you have a survivor skin add-on, you see it on every survivor wearing that
+outfit; players without it see the normal outfit.
 Some add-ons **add** outfits instead of replacing one: they are in the game's customization screen for every survivor
-(kept for that survivor; your profile keeps its previous outfit), and `/model list outfits` lists them, `/model <name>`
-puts one on for the session; players with the same add-on see it on you, the others your survivor. A host with
-`addons_policy=none` refuses them.
+(**Wear** in the Add-ons tab opens it; kept for that survivor, your profile keeps its previous outfit), and
+`/model list outfits` lists them, `/model <name>` puts one on for the session; players with the same add-on see it on
+you, the others your survivor. A host with `addons_policy=none` refuses them.
 
-**Install:** an add-on is one `.pak` file. Put it in the `b4bcoop-addons` folder in the game folder (next to
+**Install by hand:** an add-on is one `.pak` file. Put it in the `b4bcoop-addons` folder in the game folder (next to
 `Back4Blood.exe`; create the folder if it isn't there). An add-on zip already contains that folder: extract it into
-the game folder. Restart the game. **Remove:** delete the `.pak` file.
+the game folder. Restart the game. **Remove:** **Remove** in the Add-ons tab, or delete the `.pak` file while the game
+is closed.
 
 **On/off and load order:** the game writes `b4bcoop-addons\addonlist.txt`, one line per add-on:
 ```
@@ -565,8 +579,8 @@ Rules:
   session. Deleting or commenting out a line = back to its default.
 - **Need a game restart** (chat: `b4bcoop.ini: host_ip changed; restart the game for that`): `auto_signin`, `host`, `join`,
   `host_ip`, `steam_p2p`, `presence_addr`, `netguard`, `netguard_eos`, `netguard_allow`.
-- **Updating b4bcoop** (extracting a new zip) replaces `b4bcoop.ini` with a fresh one: note your changes first.
-  Bans (`b4bcoop-bans.txt`) are kept.
+- **Updating b4bcoop by hand** (extracting a new zip) replaces `b4bcoop.ini` with a fresh one: note your changes
+  first. Bans (`b4bcoop-bans.txt`) are kept. The `~` window's **Updates** tab keeps `b4bcoop.ini` as it is.
 
 ### Common options
 
@@ -765,7 +779,7 @@ let it go online; start it again.
 ### The log, and reporting a problem
 
 - The log is `Gobi\Binaries\Win64\b4bcoop-<date>-<time>-<number>.log` in the game folder. Every game start writes a new one (the last 20 are kept): take
-  the **newest**. Its first lines show the version, e.g. `b4bcoop 0.3.0 (protocol 1)`.
+  the **newest**. Its first lines show the version, e.g. `b4bcoop 0.9.7 (protocol 2)`.
 - No new log after starting the game = the mod didn't load (check that all files from the zip are in place).
 - If the mod doesn't load or the start question doesn't appear, also `Gobi\Binaries\Win64\b4bcoop-launcher.log` (if it
   exists).

@@ -124,7 +124,8 @@ Steps 4/5/7/9 with the real callback: the client's Steam (dreamsofants, Flatpak)
 URL (`steam://rungame/924970/<host id>/<connect>`) and the running game got `GameRichPresenceJoinRequested_t` from
 the host (Hergmgurk, native) every time: 21/21 joins (host in camp, loading a mission, in the lobby, mid-mission,
 and the session runs' rejoins) and 2/2 after the host's `invite <id>` (`sent`). Details and timings: join-timing.md "Two-account check". Not clicked in
-Steam's UI (the URL is what the click opens); a Join Game with the game closed (step 3) is still unchecked.
+Steam's UI (the URL is what the click opens). Since then (2026-10) Dan has used Join Game from Steam's friends list
+for weeks, also with the game closed (Steam starts it and it joins): both work.
 
 ## Limits / follow-ups
 - Clients don't advertise. A friend of B (not of A) can't Join via B. Possible later: B mirrors A's `connect`.
