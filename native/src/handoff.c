@@ -313,10 +313,11 @@ static void host_tick(void) {
                 st->run_id = run->id; st->run_ts = run->ts; st->run_dver = run->dver;
                 LOG("handoff: run %d (%d chars, resumes at %s) sent to #%d", run->id, run->data.num, mappath, idxs[i]);
             }
-        } else if (!run && mission && (st->run_id != 0 || st->run_ts != -2)) {
-            // the first chapter of a new run (nothing saved yet): the next host starts a new run on this map
+        } else if (!run && mission && (st->run_id != 0 || st->run_ts != -2 || st->map != fnv_a(pkg))) {
+            // nothing saved for this run (its first chapter, or the game refused to save it: a profile at the 16-run
+            // limit): the next host starts a new run on the current map
             snprintf(line, sizeof line, "handoff newrun %d %s", mission_difficulty(), pkg);
-            if (!admin_data_to(pcs[i], line)) { st->run_id = 0; st->run_ts = -2; LOG("handoff: to #%d: %s", idxs[i], line); }
+            if (!admin_data_to(pcs[i], line)) { st->run_id = 0; st->run_ts = -2; st->map = fnv_a(pkg); LOG("handoff: to #%d: %s", idxs[i], line); }
         } else if (!run && in_camp() && (st->run_id != 0 || st->run_ts != 0)) {   // (not on a transition map)
             if (!admin_data_to(pcs[i], "handoff run none")) { st->run_id = 0; st->run_ts = 0; }
         }
@@ -468,7 +469,7 @@ static void execute(const char *why) {
 
 // travel.c: the connection to our host ended (a `?closed`/`?failed` travel, not our own /leave or a kick)
 void handoff_host_lost(const char *url) {
-    if (xstate != X_IDLE) return;
+    if (xstate != X_IDLE || ue_is_listen_server(ue_world())) return;   // a host's own client connections time out too
     if (!plan.role || !was_connected) { LOG("handoff: host gone (%s), no plan", url); return; }
     if (!enabled) { LOG("handoff: host gone, take-over off (host_handoff=0)"); return; }
     handoff_request("the host is gone", 0);

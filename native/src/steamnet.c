@@ -422,6 +422,14 @@ void steamnet_on_log(const char *cat, const char *msg) {
     if (!strcmp(cat, "LogNet") && strstr(msg, "GameNetDriver") && (p = strstr(msg, "listening on port "))) {
         g_listen_port = atoi(p + 18);
         LOG("steamnet: game listen port %d%s", g_listen_port, g_enabled ? "; Steam P2P packets go to that socket too" : "");
+        // we host now: the host we joined before (a host hand-off, or /leave then hosting) is a client like any other.
+        // Left set, its packets were taken for our client socket's (one fixed port), so its next connection attempt
+        // landed on its old dead connection on our side and hung (join-timing.md #41)
+        EnterCriticalSection(&cs);
+        if (g_join_id) LOG("steamnet: no longer the client of %llu", (unsigned long long)g_join_id);
+        g_join_id = 0;
+        g_client_sock = INVALID_SOCKET;
+        LeaveCriticalSection(&cs);
     }
 }
 

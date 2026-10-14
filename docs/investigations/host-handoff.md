@@ -6,7 +6,7 @@ multiplayer run today); as a start, the host names someone else as host mid-matc
 Result: a prototype in `native/src/handoff.c` hands the session over in Fort Hope and in a mission, on `/handoff`
 (the `~` Players tab's **Make host**) and automatically when the host quits or drops. In a mission the campaign run
 continues on the new host from the start of the current chapter, with every player's run state (hero, cards, copper,
-loadout) as the run saved it. Verified live with three local copies (lane 2, loopback); not yet across two Steam
+loadout) as the run saved it. Verified live with three local copies (lane 2, loopback) and across two Steam
 accounts (below).
 
 ## 1. What lives where
@@ -126,13 +126,35 @@ id (all copies share it). With real accounts the departing player is not the own
 
 `tools/e2e.py --quick` on the final build, lane 2: 14/14 (protocol 3 in presence and login).
 
-## 5. Not verified / open
-- **Two Steam accounts** (Steam P2P addresses, `steam:<id64>` plans, slot ownership with distinct ids): not run. The
-  Flatpak Steam (dreamsofants) was running with a shared IPC namespace; `launch/flatpak-steam.sh start` restarted it
-  isolated but it did not log on by itself (login prompt), so lane 2's two-account setup was unavailable, and lane 1
-  was held by another session. Next: `tools/jointest2acct.py`-style run, host native, client Flatpak, `/handoff` both
-  ways and a host `quit` in a mission; check `claimed reserved slot` per owner and that the old host's slot keeps its
-  cards when it rejoins.
+## 5. Two Steam accounts (2026-10-14, 0.9.8 + this branch, one machine)
+
+Host = lane 1 test1 (native Steam, Hergmgurk), client = lane 2 test1 (Flatpak Steam, dreamsofants, isolated with
+`launch/flatpak-steam.sh start`), client ini `join=steam:<host id>`: every join and hand-off over Steam P2P (`steam:`
+plans: `if you leave, dreamsofants (#1) hosts next ... at steam:76561198994546085`). Both on the 4090.
+
+| Test | Result |
+|---|---|
+| Fort Hope `/handoff` to the Flatpak account, then back | 18 s / 37 s until the other was connected. The hand-back first failed: see "Fixed" below. |
+| Chapter C, `/handoff` (Flatpak host → native) | `JoinRun` 28 s after the command, the other in C at 49 s. Distinct ids: the new host `claimed reserved slot 1` (Walker, its own), the returning player `claimed reserved slot 0` (Evangelo, its own); both with the run's copper (2,200) and loadouts (screenshots). The native profile was at the 16-run limit: `profile has 16 runs (limit 16): one more for this run`, `creating campaign run` went through. |
+| Chapter end on the new host | `rewards: forwarding AdjustSupplyPoints (62) to remote player offline.76561198994546085`; on the client `rewardguard: accepted`, `[CLIENT RPC] adjusting SP by 62`, `ApplyCommandToOfflineData:AdjustSupplyPoints` (its own profile); record updated (resume at D) and pushed. |
+| Chapter D, the native host `quit`s | `handoff go quit` at once; the Flatpak account continued run 1792004425 at D 22 s later (`ResumedRun`, `campaign run applied: 1`, its own slot 0, the quitter's slot 1 reserved for it). |
+| `tools/e2e.py --quick`, lane 2, merged build | 14/14. |
+
+"campaign run abandoned" with distinct ids: logged only by the old host about itself as it leaves (`offline.<its own id>
+has disconnected ... w/o penalty`), as when anyone quits a run; its profile keeps the run in progress
+(`handoff runs`: state 0). The same-id artefact of §4 (the old host abandoning when the *next* host left) is gone.
+
+Fixed during this run:
+- **Steam P2P after being someone's client** (steamnet.c, also outside hand-offs: `/leave` then host): the old host had
+  joined the new host, so `g_join_id` still named it when it hosted again; its packets were taken for our own client
+  socket (one fixed port), so its next connection attempt landed on its old dead connection on our side and hung for
+  180 s. steamnet now forgets the joined host when the game starts listening (`steamnet: no longer the client of ...`).
+- A pending join's `ConnectionTimeout` (`PendingNetDriver`) and a host's own client connection timing out were taken
+  for "the host is gone"; now only an established client connection (`Driver = GameNetDriver`, not while hosting).
+- Test profiles at the 16-run limit: the game refuses to save the run (`campaign run limit has been reached`), so there
+  is no record; the hand-off then starts a new run on the *current* map (the `newrun` line now follows map changes).
+
+## 6. Not verified / open
 - Real multi-machine: a crashed host is noticed after `ConnectionTimeout` (90 s, raised in cmds.c for slow loads).
 - `host_ip=1` sessions to other machines: no hand-off (address unknown); would need the client to report its public
   address and forwarded port.
