@@ -480,7 +480,8 @@ int cmds_hotkey_down(int vk) {
     static int n_names;
     static UFunction *fn; static int32_t o_key = -1, o_ret = -1, psize;
     UObject *pc = ue_local_pc();
-    char nb[16];
+    if (pc && !ue_object_usable(pc, U_INDEX(pc))) pc = NULL;   // a destroyed PC after a post-round GC crashed all 5
+    char nb[16];                                                 // instances of a teamsize=8 test (five-players.md §8)
     const char *kn = vk_key_name(vk, nb, sizeof nb);
     if (pc && kn && !fn) {
         UClass *c = ue_find_class("PlayerController");
@@ -807,6 +808,7 @@ void cmds_tick(float dt) {
     flashlight_tick(dt);
     signin_tick(dt);
     teamsize_tick(dt);
+    hud_tick(dt);
     slotguard_tick(dt);
     chat_tick(dt);
     admin_tick(dt);
@@ -867,7 +869,7 @@ void cmds_run(char *line, Out *o) {
     } else if (!strcmp(verb, "call") && rest) {
         char *c = strtok(rest, " "), *f = strtok(NULL, " "), *cdo = strtok(NULL, " ");
         if (c && f) cmd_call(c, f, cdo && !strcmp(cdo, "cdo"), o); else out_printf(o, "usage: call <Class> <Func> [cdo]\n");
-    } else if (!steamnet_cmd(verb, rest, o) && !testing_cmd(verb, rest, o) && !teamsize_cmd(verb, rest, o) && !lineup_cmd(verb, rest, o) &&
+    } else if (!steamnet_cmd(verb, rest, o) && !testing_cmd(verb, rest, o) && !teamsize_cmd(verb, rest, o) && !lineup_cmd(verb, rest, o) && !hud_cmd(verb, rest, o) &&
                !slotguard_cmd(verb, rest, o) && !chat_cmd(verb, rest, o) && !admin_cmd(verb, rest, o) &&
                !presence_cmd(verb, rest, o) && !rewardguard_cmd(verb, rest, o) && !joinpolicy_cmd(verb, rest, o) &&
                !cheats_cmd(verb, rest, o) && !thirdperson_cmd(verb, rest, o) && !overlay_cmd(verb, rest, o) &&

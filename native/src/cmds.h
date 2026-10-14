@@ -92,6 +92,9 @@ void supplylines_tick(float dt);
 int supplylines_cmd(const char *verb, char *rest, Out *o); // dev builds: `supplylines [fix|off|update|auto|buy|sp]`
 int lineup_init(void);                                   // lineup.c: 5th+ hero in the character lineups (#8)
 int lineup_cmd(const char *verb, char *rest, Out *o);    // dev builds: `lineup [off dx dy | fov deg | apply]`
+int hud_init(void);                                      // hud.c: teammate list with 5+ heroes
+int hud_cmd(const char *verb, char *rest, Out *o);       // dev builds: `hudtree`, `hudxf`, `hud`
+void hud_tick(float dt);
 void teamsize_tick(float dt);
 int slotguard_init(void);
 int slotguard_cmd(const char *verb, char *rest, Out *o);  // game thread; 1 if handled

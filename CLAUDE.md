@@ -112,6 +112,12 @@ Detailed engine findings (addresses, obfuscated layouts, class names): `docs/NOT
     hero team has more slots than the lineup level's 4 and places it in the back row; `lineup` dumps it.
     five-players.md §6. Also the mission-start player list (#28): adds PlayerLoadoutsEntry rows to its 4-row box
     before OnSlotsUpdated (five-players.md §7).
+  - `hud.c` teammate lists with 5+ heroes, render transforms only (from the widgets' cached geometry, every frame;
+    widgets found once a second; nothing runs with 4 heroes): the HUD's bottom-left list (`GameHUDScreen_WBP.
+    PartyStatus`) stays one column, moved up and scaled (floor 0.6) to fit between the objectives' real bottom
+    (`HUDMissions`) and your own panel; the character select's player list (`PlayerLoadouts`) puts rows 5-8 in a second
+    column. Dev `hud [floor|margin|gap <v>]`, `hudtree <class|path suffix> [depth]` (any widget tree with pixel rects,
+    slots, transforms), `hudxf`. five-players.md §8.
   - `dialogue.c` client: one cutscene radio line per cue (the host's replicated pick and the client's own level pick
     of `PlayClientCinematicVO` doubled lines/subtitles; the second within 4 s is dropped). Dev `subprobe` (testing.c)
     logs every HUD subtitle with its call stack. model-swap.md #37 "Doubled subtitle".

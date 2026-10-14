@@ -236,7 +236,10 @@ sees `The host locked the session.`. A player you kick while locked can't come b
 or until you close the game.
 
 **`/teamsize <N>`**: survivors per team, from the next map load (next mission, chapter or Fort Hope). The game's
-normal size is 4. `5` is tested and works (5 players, or 4 players + a bot); up to `8` is accepted but untested.
+normal size is 4. `5` is tested and works (5 players, or 4 players + a bot); `8` was tested with 5 players and 3 bots.
+With 5 or more survivors everyone's teammate list (bottom left) moves up and, when it has to, shrinks (down to 60%)
+so it fits between the objectives and your own panel; the character select's player list puts survivors 5-8 in a
+second column. The post-round lineup still shows 4 name plates; heroes past the 4th stand in the back.
 Only the host's setting decides the team size (friends don't need it). Same as the `teamsize` ini option, for this game session only.
 `/teamsize 4` goes back to normal. Numbers below 4 change nothing.
 

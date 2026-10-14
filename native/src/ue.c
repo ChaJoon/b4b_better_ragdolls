@@ -33,6 +33,18 @@ UObject *ue_object_at(int32_t i) {
     return *(UObject **)(chunk + (i & 0xFFFF) * 0x18 + 8);
 }
 
+// FUObjectItem.Flags (EInternalObjectFlags) Unreachable 1<<28 | PendingKill 1<<29: set by the GC's mark phase, the
+// object is destroyed over the next frames (incremental purge); RF_BeginDestroyed 0x8000 | RF_FinishDestroyed 0x10000
+int ue_object_usable(UObject *o, int32_t i) {
+    if (!o || i < 0 || i >= ue_num_objects()) return 0;
+    char **chunks = (char **)(*(uint64_t *)(oa() + 0x48) ^ OBJECTS_XOR);
+    char *chunk = chunks[i >> 16];
+    if (!chunk) return 0;
+    char *item = chunk + (i & 0xFFFF) * 0x18;
+    if (*(UObject **)(item + 8) != o || (*(uint32_t *)item & (3u << 28))) return 0;
+    return !(U_FLAGS(o) & 0x18000u);
+}
+
 // FWeakObjectPtr {ObjectIndex, SerialNumber}: the object if that slot still holds the same object
 UObject *ue_weak_get(const void *wp) {
     int32_t idx = ((const int32_t *)wp)[0], serial = ((const int32_t *)wp)[1];
