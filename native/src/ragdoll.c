@@ -191,7 +191,8 @@ static int npairs, n_calls;
 typedef struct { double t; UObject *actor; UClass *oc; UFunction *fn; } RingE;
 static RingE ring[512];
 static int ring_at;
-typedef struct { UObject *actor; double until; int lines; } Focus;
+typedef struct { UObject *actor; double from, until; int lines; } Focus;
+#define FOCUS_SECS 8.0
 static Focus focus[8];
 
 static UObject *owner_actor(UObject *o) {
@@ -209,9 +210,9 @@ static int per_frame(const char *fn) {   // left out of the death sequences (sti
            !strncmp(fn, "BlueprintThreadSafe", 19) || !strncmp(fn, "BlueprintPostEvaluate", 21);
 }
 
-static void trace_call(UObject *o, UFunction *fn) {
+static void trace_call(UObject *o, UFunction *fn, void *params) {
     UObject *actor = owner_actor(o);
-    if (!actor || !is_ridden_fast(actor)) return;
+    if (!actor || !(is_ridden_fast(actor) || (n_corpse_cls && is_corpse(actor)))) return;
     double t = now_s();
     char cb[128], fb[128], ab[128];
     EnterCriticalSection(&tcs);
@@ -228,19 +229,22 @@ static void trace_call(UObject *o, UFunction *fn) {
     }
     for (int i = 0; i < 8; i++) {
         Focus *f = &focus[i];
-        if (f->actor != actor || t > f->until || f->lines >= 300) continue;
+        if (f->actor != actor || t > f->until || f->lines >= 600) continue;
         ue_obj_name(fn, fb, sizeof fb);
         if (per_frame(fb)) break;
         f->lines++;
-        LOG("ragdoll death %s +%.3fs %s.%s", ue_obj_name(actor, ab, sizeof ab), t - (f->until - 4.0),
-            ue_obj_name(oc, cb, sizeof cb), fb);
+        if (!strcmp(fb, "ReceiveEndPlay") && params)   // EEndPlayReason: 0 Destroyed, 1 LevelTransition, 3 RemovedFromWorld
+            LOG("ragdoll death %s +%.3fs %s.%s (reason %u)", ue_obj_name(actor, ab, sizeof ab), t - f->from,
+                ue_obj_name(oc, cb, sizeof cb), fb, *(uint8_t *)params);
+        else
+            LOG("ragdoll death %s +%.3fs %s.%s", ue_obj_name(actor, ab, sizeof ab), t - f->from, ue_obj_name(oc, cb, sizeof cb), fb);
         break;
     }
     LeaveCriticalSection(&tcs);
 }
 
 static void pe_detour(UObject *o, UFunction *fn, void *params) {
-    if (tracing && o && fn) trace_call(o, fn);
+    if (tracing && o && fn) trace_call(o, fn, params);
     orig_pe(o, fn, params);
 }
 
@@ -260,8 +264,8 @@ static void trace_on_death(UObject *actor) {   // game thread, from the tick tha
     }
     int slot = 0;
     for (int i = 0; i < 8; i++) if (focus[i].until < focus[slot].until) slot = i;
-    focus[slot] = (Focus){actor, t + 4.0, 0};
-    LOG("ragdoll death %s: calls in the next 4 s follow (\"+s\" after we saw it)", ab);
+    focus[slot] = (Focus){actor, t, t + FOCUS_SECS, 0};
+    LOG("ragdoll death %s: calls in the next %.0f s follow (\"+s\" after we saw it)", ab, FOCUS_SECS);
     LeaveCriticalSection(&tcs);
 }
 
@@ -538,8 +542,19 @@ static int ragdoll_mesh(UObject *mesh) {   // physics on, full weight, awake; 1 
     if (!ragdoll_profile.idx) ragdoll_profile = fname_of(L"Ragdoll");
     Call k;
     if (call_prep(&k, mesh, "SetCollisionProfileName")) { SET(&k, "InCollisionProfileName", FName, ragdoll_profile); call_go(&k); }
-    if (call_prep(&k, mesh, "SetAllBodiesSimulatePhysics")) { SET(&k, "bNewSimulate", uint8_t, 1); call_go(&k); }
-    if (call_prep(&k, mesh, "SetSimulatePhysics")) { SET(&k, "bSimulate", uint8_t, 1); call_go(&k); }
+    // the profile call is a no-op when the name is already "Ragdoll" (the game's corpse swap turns collision off
+    // without renaming it), and physics won't simulate without collision: set it explicitly
+    if (call_prep(&k, mesh, "SetCollisionEnabled")) { SET(&k, "NewType", uint8_t, 3); call_go(&k); }   // QueryAndPhysics
+    for (int attempt = 0; attempt < 2; attempt++) {
+        if (call_prep(&k, mesh, "SetAllBodiesSimulatePhysics")) { SET(&k, "bNewSimulate", uint8_t, 1); call_go(&k); }
+        if (call_prep(&k, mesh, "SetSimulatePhysics")) { SET(&k, "bSimulate", uint8_t, 1); call_go(&k); }
+        if (call_bool(mesh, "IsSimulatingPhysics") == 1 || attempt) break;
+        // still not simulating: the bodies may have been torn down; build them again from the physics asset
+        UObject *sk = ue_get_ptr(mesh, "SkeletalMesh"), *pa = ue_get_ptr(mesh, "PhysicsAssetOverride");
+        if (!pa && sk) pa = ue_get_ptr(sk, "PhysicsAsset");
+        if (pa && call_prep(&k, mesh, "SetPhysicsAsset")) { SET(&k, "NewPhysicsAsset", UObject *, pa); SET(&k, "bForceReInit", uint8_t, 1); call_go(&k); }
+        LOG("ragdoll: physics didn't start, bodies rebuilt from %s", pa ? "the physics asset" : "nothing (no physics asset)");
+    }
     if (call_prep(&k, mesh, "SetPhysicsBlendWeight")) { SET(&k, "PhysicsBlendWeight", float, 1.f); call_go(&k); }
     call_void(mesh, "WakeAllRigidBodies");
     return call_bool(mesh, "IsSimulatingPhysics") == 1;
@@ -706,6 +721,8 @@ static void keep_body(Tracked *x) {
     Call k;
     UObject *mesh = x->mesh;
     float life = call_prep_lifespan(x->a);
+    int cen = -1;
+    if (call_prep(&k, mesh, "GetCollisionEnabled")) { call_go(&k); uint8_t *r = carg(&k, "ReturnValue"); cen = r ? *r : -1; }
     if (call_prep(&k, mesh, "SetVisibility")) { SET(&k, "bNewVisibility", uint8_t, 1); SET(&k, "bPropagateToChildren", uint8_t, 1); call_go(&k); }
     if (call_prep(&k, mesh, "SetActive")) { SET(&k, "bNewActive", uint8_t, 1); call_go(&k); }
     if (call_prep(&k, mesh, "SetComponentTickEnabled")) { SET(&k, "bEnabled", uint8_t, 1); call_go(&k); }
@@ -716,8 +733,8 @@ static void keep_body(Tracked *x) {
     if (!found) { x->standin_until = now_s() + 0.5; snprintf(c, sizeof c, "not there yet, looking for 0.5 s"); }
     x->kept++;
     if (x->kept == 1) n_kept++;
-    LOG("ragdoll keep: %s %.2f s after death%s: body back (simulating %d), life span was %.1f s, stand-in: %s",
-        oname(x->a, a, sizeof a), now_s() - x->died_at, x->kept > 1 ? " (hidden again)" : "", sim, life, c);
+    LOG("ragdoll keep: %s %.2f s after death%s: body back (simulating %d; collision was %d), life span was %.1f s, stand-in: %s",
+        oname(x->a, a, sizeof a), now_s() - x->died_at, x->kept > 1 ? " (hidden again)" : "", sim, cen, life, c);
     if (n_kept <= 2 && x->kept == 1) watch_start(x->a, mesh);
 }
 
