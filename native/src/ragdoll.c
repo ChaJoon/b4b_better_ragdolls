@@ -291,7 +291,17 @@ static int name_has(const char *s, const char *const *keys) {
 static const char *const KEYS[] = {"death", "dead", "die", "dying", "kill", "ragdoll", "physic", "corpse", "gib",
                                    "dismember", "impulse", "lifestate", "lifespan", "simulat", "collision", "hitreact", NULL};
 
-static void list_class(UClass *c, int all_funcs, const char *what, UObject *inst) {
+static UObject *comp_of(UObject *actor, const char *class_name) {   // AActor::GetComponentByClass
+    UClass *c = cls(class_name);
+    Call k;
+    if (!c || !actor || !call_prep(&k, actor, "GetComponentByClass")) return NULL;
+    SET(&k, "ComponentClass", UClass *, c);
+    call_go(&k);
+    UObject **r = carg(&k, "ReturnValue");
+    return r ? *r : NULL;
+}
+
+static void list_class(UClass *c, int all_funcs, int all_props, const char *what, UObject *inst) {
     char b[160], t[64], v[48];
     LOG("ragdoll probe: %s class chain:", what);
     for (UStruct *s = c; s; s = US_SUPER(s)) {
@@ -309,7 +319,7 @@ static void list_class(UClass *c, int all_funcs, const char *what, UObject *inst
         }
         for (FField *p = US_CHILDPROPS(s); p; p = FF_NEXT(p)) {
             ue_name(FF_NAME(p), b, sizeof b);
-            if (!name_has(b, KEYS)) continue;
+            if (!all_props && !name_has(b, KEYS)) continue;
             ue_name(*(FName *)FF_CLASS(p), t, sizeof t);
             v[0] = 0;
             if (inst) {
@@ -318,6 +328,8 @@ static void list_class(UClass *c, int all_funcs, const char *what, UObject *inst
                 else if (!strcmp(t, "IntProperty")) snprintf(v, sizeof v, " = %d", *(int32_t *)a);
                 else if (!strcmp(t, "ByteProperty") || !strcmp(t, "EnumProperty") || !strcmp(t, "BoolProperty"))
                     snprintf(v, sizeof v, " = byte %u", *(uint8_t *)a);
+                else if (!strcmp(t, "ObjectProperty")) { char on[96]; snprintf(v, sizeof v, " = %s", oname(*(UObject **)a, on, sizeof on)); }
+                else if (!strcmp(t, "ArrayProperty")) snprintf(v, sizeof v, " = %d entries", ((TArray *)a)->num);
             }
             LOG("ragdoll probe:   prop %s.%s %s @0x%x%s", sn, b, t, FP_OFFSET(p), v);
         }
@@ -369,15 +381,20 @@ static void cmd_probe(Out *o) {
     char a[160], c[160];
     LOG("ragdoll probe: ---- %s (%s), %.0f m away ----", oname(best, a, sizeof a), cname(best, c, sizeof c),
         have_me ? sqrtf(bd) / 100.f : -1.f);
-    list_class(U_CLASS(best), 0, "actor", best);
+    list_class(U_CLASS(best), 0, 0, "actor", best);
     UObject *ls = call_obj(best, "GetLifeStateComponent"), *hc = call_obj(best, "GetHealthComponent");
-    if (ls) list_class(U_CLASS(ls), 0, "life state component", ls);
-    if (hc) list_class(U_CLASS(hc), 0, "health component", hc);
+    if (ls) list_class(U_CLASS(ls), 0, 0, "life state component", ls);
+    if (hc) list_class(U_CLASS(hc), 0, 0, "health component", hc);
+    UObject *dr = comp_of(best, "PlayDeathReactionComponent"), *hr = comp_of(best, "PlayHitReactionComponent");
+    UObject *pac = comp_of(best, "PhysicalAnimationComponent");
+    if (dr) list_class(U_CLASS(dr), 1, 1, "death reaction component (everything)", dr);
+    if (hr) list_class(U_CLASS(hr), 1, 1, "hit reaction component (everything)", hr);
+    LOG("ragdoll probe: physical animation component: %s", pac ? oname(pac, a, sizeof a) : "none");
     UObject *mesh = ue_get_ptr(best, "Mesh"), *cap = ue_get_ptr(best, "CapsuleComponent");
     if (mesh) {
         log_mesh(mesh, "probe");
         UObject *ai = ue_get_ptr(mesh, "AnimScriptInstance");
-        if (ai) list_class(U_CLASS(ai), 1, "anim instance (all functions)", ai);
+        if (ai) list_class(U_CLASS(ai), 1, 0, "anim instance (all functions)", ai);
     }
     if (cap) LOG("ragdoll probe: capsule %s, collision profile %s", oname(cap, a, sizeof a), ue_name(collision_profile(cap), c, sizeof c));
     LOG("ragdoll probe: ---- end ----");
@@ -391,9 +408,24 @@ static int apply(Tracked *t) {
     UObject *mesh = ue_get_ptr(t->a, "Mesh"), *cap = ue_get_ptr(t->a, "CapsuleComponent");
     if (!mesh) { LOG("ragdoll: %s has no mesh", oname(t->a, a, sizeof a)); return -1; }
     int detail = detail_left > 0;
-    if (detail) { detail_left--; LOG("ragdoll: ---- %s (%s) ----", oname(t->a, a, sizeof a), cname(t->a, c, sizeof c)); log_mesh(mesh, "before"); }
+    UObject *ai = ue_get_ptr(mesh, "AnimScriptInstance"), *pac = comp_of(t->a, "PhysicalAnimationComponent");
+    if (detail) {
+        detail_left--;
+        LOG("ragdoll: ---- %s (%s), %.3f s after death ----", oname(t->a, a, sizeof a), cname(t->a, c, sizeof c), now_s() - t->died_at);
+        log_mesh(mesh, "before");
+        LOG("ragdoll before:   montage playing %d, physical animation component %s", ai ? call_bool(ai, "IsAnyMontagePlaying") : -1,
+            pac ? oname(pac, a, sizeof a) : "none");
+        static int dr_logged;
+        UObject *dr = comp_of(t->a, "PlayDeathReactionComponent");
+        if (dr && !dr_logged++) list_class(U_CLASS(dr), 0, 1, "death reaction component at death (values)", dr);
+    }
 
     Call k;
+    // The game's own death: physics already on, but a death-reaction montage steers the bodies for ~0.5 s (the
+    // "forward lunge") until PlayDeathReactionComponent's ragdoll point. Stop every montage at once (no blend out)
+    // and give physics the full say.
+    if (ai && call_prep(&k, ai, "Montage_Stop")) { SET(&k, "InBlendOutTime", float, 0.f); call_go(&k); }
+    if (pac && call_prep(&k, pac, "SetStrengthMultiplyer")) { SET(&k, "InStrengthMultiplyer", float, 0.f); call_go(&k); }
     t->prof = collision_profile(mesh);
     t->cap_coll = 3;
     if (cap && call_prep(&k, cap, "GetCollisionEnabled")) { call_go(&k); uint8_t *r = carg(&k, "ReturnValue"); if (r) t->cap_coll = *r; }
@@ -407,10 +439,14 @@ static int apply(Tracked *t) {
     if (call_prep(&k, mesh, "SetCollisionProfileName")) { SET(&k, "InCollisionProfileName", FName, ragdoll_profile); call_go(&k); }
     if (call_prep(&k, mesh, "SetAllBodiesSimulatePhysics")) { SET(&k, "bNewSimulate", uint8_t, 1); call_go(&k); }
     if (call_prep(&k, mesh, "SetSimulatePhysics")) { SET(&k, "bSimulate", uint8_t, 1); call_go(&k); }
+    if (call_prep(&k, mesh, "SetPhysicsBlendWeight")) { SET(&k, "PhysicsBlendWeight", float, 1.f); call_go(&k); }
     call_void(mesh, "WakeAllRigidBodies");
 
     int sim = call_bool(mesh, "IsSimulatingPhysics");
-    if (detail) log_mesh(mesh, "after");
+    if (detail) {
+        log_mesh(mesh, "after");
+        LOG("ragdoll after:   montage playing %d", ai ? call_bool(ai, "IsAnyMontagePlaying") : -1);
+    }
     if (sim != 1) { LOG("ragdoll: %s is not simulating after the calls", oname(t->a, a, sizeof a)); return -1; }
     return 0;
 }
