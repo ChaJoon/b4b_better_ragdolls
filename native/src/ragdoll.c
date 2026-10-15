@@ -390,6 +390,9 @@ static void cmd_probe(Out *o) {
     if (dr) list_class(U_CLASS(dr), 1, 1, "death reaction component (everything)", dr);
     if (hr) list_class(U_CLASS(hr), 1, 1, "hit reaction component (everything)", hr);
     LOG("ragdoll probe: physical animation component: %s", pac ? oname(pac, a, sizeof a) : "none");
+    UObject *rc = ue_get_ptr(best, "RagdollComponent");
+    if (rc) list_class(U_CLASS(rc), 1, 1, "ragdoll component (everything)", rc);
+    else LOG("ragdoll probe: no RagdollComponent");
     UObject *mesh = ue_get_ptr(best, "Mesh"), *cap = ue_get_ptr(best, "CapsuleComponent");
     if (mesh) {
         log_mesh(mesh, "probe");
@@ -400,6 +403,105 @@ static void cmd_probe(Out *o) {
     LOG("ragdoll probe: ---- end ----");
     out_printf(o, "/ragdoll probe: %s, %.0f m away: details in the b4bcoop log\n", cname(best, c, sizeof c),
                have_me ? sqrtf(bd) / 100.f : -1.f);
+}
+
+// ---- watch (discovery): what changes on a ragdolled body over its first seconds ----
+// Snapshots of a few components at death; at each sample time, every simple property whose bytes changed is logged
+// (old -> new) together with the body's physics state. Finds what the game flips when it freezes a corpse.
+typedef struct { UObject *o; int32_t oi; uint8_t *snap; int32_t size; char tag[24]; } Snap;
+typedef struct { UObject *actor, *mesh; int32_t ai; double t0; int next; Snap s[4]; } Watch;
+static Watch watches[3];
+static const float SAMPLE_T[] = {0.25f, 0.5f, 1.f, 1.5f, 2.f, 2.5f, 3.f, 4.f, 6.f, 8.f};
+#define N_SAMPLES ((int)(sizeof SAMPLE_T / sizeof SAMPLE_T[0]))
+
+static void snap_take(Snap *sn, UObject *o, const char *tag) {
+    memset(sn, 0, sizeof *sn);
+    if (!o || !U_CLASS(o)) return;
+    int32_t size = US_PROPSSIZE(U_CLASS(o));
+    if (size <= 0 || size > 0x10000 || !(sn->snap = malloc(size))) return;
+    memcpy(sn->snap, o, size);
+    sn->o = o; sn->oi = U_INDEX(o); sn->size = size;
+    snprintf(sn->tag, sizeof sn->tag, "%s", tag);
+}
+
+static int simple_type(const char *t) {
+    return !strcmp(t, "BoolProperty") || !strcmp(t, "ByteProperty") || !strcmp(t, "EnumProperty") ||
+           !strcmp(t, "FloatProperty") || !strcmp(t, "IntProperty") || !strcmp(t, "ObjectProperty") || !strcmp(t, "NameProperty");
+}
+
+static void fmt_val(const char *t, const uint8_t *a, char *out, size_t n) {
+    if (!strcmp(t, "FloatProperty")) snprintf(out, n, "%g", *(const float *)a);
+    else if (!strcmp(t, "IntProperty")) snprintf(out, n, "%d", *(const int32_t *)a);
+    else if (!strcmp(t, "ObjectProperty")) { char b[96]; snprintf(out, n, "%s", *(UObject *const *)a ? ue_obj_name(*(UObject *const *)a, b, sizeof b) : "None"); }
+    else if (!strcmp(t, "NameProperty")) { char b[96]; snprintf(out, n, "%s", ue_name(*(const FName *)a, b, sizeof b)); }
+    else snprintf(out, n, "byte %u", *a);
+}
+
+static void snap_diff(Snap *sn, const char *who, double dt) {
+    if (!sn->o || !ue_object_usable(sn->o, sn->oi)) return;
+    char pn[128], t[64], ov[112], nv[112];
+    int lines = 0;
+    for (UStruct *st = U_CLASS(sn->o); st; st = US_SUPER(st)) {
+        for (FField *p = US_CHILDPROPS(st); p; p = FF_NEXT(p)) {
+            int32_t off = FP_OFFSET(p), sz = FP_ELSIZE(p);
+            if (off < 0 || sz <= 0 || off + sz > sn->size) continue;
+            ue_name(*(FName *)FF_CLASS(p), t, sizeof t);
+            if (!simple_type(t)) continue;
+            uint8_t *now = (uint8_t *)sn->o + off, *was = sn->snap + off;
+            if (!memcmp(now, was, sz)) continue;
+            ue_name(FF_NAME(p), pn, sizeof pn);
+            if (!strcmp(pn, "LastRenderTime") || !strcmp(pn, "LastRenderTimeOnScreen") || strstr(pn, "Time") == pn + strlen(pn) - 4) {
+                continue;   // clocks, not state
+            }
+            fmt_val(t, was, ov, sizeof ov); fmt_val(t, now, nv, sizeof nv);
+            // bools share bytes: name every one in a changed byte, with its bit (FBoolProperty ByteMask, +0x7A,
+            // assumed from the FProperty layout in NOTES.md: base ends at 0x78) so the right one can be told apart
+            if (!strcmp(t, "BoolProperty")) {
+                uint8_t mask = *((uint8_t *)p + 0x7A);
+                if (!mask || (mask & (mask - 1))) mask = 0xFF;   // not a single bit: the layout guess is wrong, show the byte
+                if (!((*now ^ *was) & mask)) continue;   // another bool in this byte changed
+                snprintf(ov, sizeof ov, "%d", (*was & mask) != 0); snprintf(nv, sizeof nv, "%d", (*now & mask) != 0);
+            }
+            if (lines++ < 40) LOG("ragdoll watch %s +%.2fs   %s.%s: %s -> %s", who, dt, sn->tag, pn, ov, nv);
+        }
+        char b[64];
+        ue_obj_name(st, b, sizeof b);
+        if (!strcmp(b, "ActorComponent") || !strcmp(b, "Object")) break;
+    }
+    memcpy(sn->snap, sn->o, sn->size);   // the next sample compares against now
+}
+
+static void watch_start(UObject *actor, UObject *mesh) {
+    for (int i = 0; i < 3; i++) {
+        Watch *w = &watches[i];
+        if (w->actor) continue;
+        w->actor = actor; w->ai = U_INDEX(actor); w->mesh = mesh; w->t0 = now_s(); w->next = 0;
+        snap_take(&w->s[0], ue_get_ptr(actor, "RagdollComponent"), "RagdollComponent");
+        snap_take(&w->s[1], call_obj(actor, "GetLifeStateComponent"), "LifeState");
+        snap_take(&w->s[2], comp_of(actor, "PhysicalAnimationComponent"), "PhysicalAnimation");
+        snap_take(&w->s[3], mesh, "Mesh");
+        return;
+    }
+}
+
+static void watch_end(Watch *w) { for (int k = 0; k < 4; k++) free(w->s[k].snap); memset(w, 0, sizeof *w); }
+
+static void watch_tick(void) {
+    char a[160];
+    double t = now_s();
+    for (int i = 0; i < 3; i++) {
+        Watch *w = &watches[i];
+        if (!w->actor || t - w->t0 < SAMPLE_T[w->next]) continue;
+        if (!ue_object_usable(w->actor, w->ai)) { LOG("ragdoll watch: body gone (despawned) before +%.2fs", SAMPLE_T[w->next]); watch_end(w); continue; }
+        oname(w->actor, a, sizeof a);
+        int sim = call_bool(w->mesh, "IsSimulatingPhysics"), awake = call_bool(w->mesh, "IsAnyRigidBodyAwake");
+        int tick = call_bool(w->mesh, "IsComponentTickEnabled"), rag = call_bool(w->actor, "IsInRagdoll");
+        int phys = call_bool(w->actor, "IsInPhysicalizedDeath");
+        LOG("ragdoll watch %s +%.2fs: simulating %d, awake %d, mesh tick %d, IsInRagdoll %d, IsInPhysicalizedDeath %d",
+            a, t - w->t0, sim, awake, tick, rag, phys);
+        for (int k = 0; k < 4; k++) snap_diff(&w->s[k], a, t - w->t0);
+        if (++w->next == N_SAMPLES) { LOG("ragdoll watch %s: done", a); watch_end(w); }
+    }
 }
 
 // ---- the ragdoll ----
@@ -444,6 +546,7 @@ static int apply(Tracked *t) {
 
     int sim = call_bool(mesh, "IsSimulatingPhysics");
     if (detail) {
+        watch_start(t->a, mesh);
         log_mesh(mesh, "after");
         LOG("ragdoll after:   montage playing %d", ai ? call_bool(ai, "IsAnyMontagePlaying") : -1);
     }
@@ -487,7 +590,8 @@ void ragdoll_tick(float dt) {
     tick_n++;
     if (!mode_on && !tracing && !any_ragdolled()) return;
     if (tracing && now_s() > trace_end) trace_stop("time up");
-    if (!world_check()) return;
+    if (!world_check()) { for (int i = 0; i < 3; i++) if (watches[i].actor) watch_end(&watches[i]); return; }
+    watch_tick();
     scan_step();
     double t = now_s();
     for (int i = 0; i < ntr; i++) {
