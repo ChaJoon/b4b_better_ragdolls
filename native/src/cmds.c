@@ -834,6 +834,7 @@ void cmds_tick(float dt) {
     updater_tick(dt);
     shop_tick(dt);
     supplylines_tick(dt);
+    ragdoll_tick(dt);
     overlay_tick(dt);
     cmds_ini_poll(dt);
 }

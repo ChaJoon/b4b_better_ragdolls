@@ -669,14 +669,14 @@ static const struct { const char *name; int perm; const char *usage; } CMDS[] = 
     {"kick", CMD_HOST, "/kick <name|#>"}, {"ban", CMD_HOST, "/ban <name|#>"}, {"unban", CMD_HOST, "/unban <name|steam:id|#n|all>"},
     {"bans", CMD_HOST, "/bans"}, {"lock", CMD_HOST, "/lock"}, {"unlock", CMD_HOST, "/unlock"}, {"teamsize", CMD_HOST, "/teamsize N"},
     {"restart", CMD_HOST, "/restart"}, {"ready", CMD_HOST, "/ready [vote]"}, {"bots", CMD_HOST, "/bots on|off|default"},
-    {"say", CMD_HOST, "/say <message>"}, {"handoff", CMD_ANYONE, "/handoff [<name|#>]"},   // host part checked in handoff.c
+    {"say", CMD_HOST, "/say <message>"}, {"ragdoll", CMD_ANYONE, "/ragdoll [on [delay]|off|probe|trace [secs]]"}, {"handoff", CMD_ANYONE, "/handoff [<name|#>]"},   // host part checked in handoff.c
     {"model", CMD_ANYONE, "/model list|<name>|reset"}, {"models", CMD_ANYONE, "/models [on|off]"},   // host parts checked in models.c
     {"addons", CMD_ANYONE, "/addons [on|off|info <#>|policy]"}, {"addon", CMD_ANYONE, "/addons [on|off|info <#>|policy]"},
 };
 #define N_CMDS ((int)(sizeof CMDS / sizeof CMDS[0]))
 
 static void help(Out *o) {
-    out_printf(o, "b4bcoop %s (protocol %d)\n/join steam:<id64>  /host  /leave\n/players  /ping  /flashlight [on|off|auto]\n"
+    out_printf(o, "b4bcoop %s (protocol %d)\n/join steam:<id64>  /host  /leave\n/players  /ping  /flashlight [on|off|auto]\n/ragdoll on|off|probe|trace  (experimental)\n"
                   "/thirdperson  (your own camera)\n/model list|<name>|reset\n/addons [on|off|info <#>|players]\n",
                coop_version(), coop_protocol());
     if (is_client()) { out_printf(o, "(/kick /ban /lock ... are for the host)\n/cheats  (when the host has cheats on: your own save)\n"); return; }
@@ -727,6 +727,7 @@ void admin_slash(char *line, Out *o) {
     else if (!strcmp(verb, "model") || !strcmp(verb, "models")) models_slash(verb, rest, o);
     else if (!strcmp(verb, "addons") || !strcmp(verb, "addon")) addons_slash(verb, rest, o);
     else if (!strcmp(verb, "handoff")) handoff_slash(rest, o);
+    else if (!strcmp(verb, "ragdoll")) ragdoll_slash(rest, o);
     else if (!strcmp(verb, "join")) {
         if (!rest || !*rest) { out_printf(o, "usage: %s\n", CMDS[i].usage); return; }
         out_printf(o, "joining %s ...\n", rest);
