@@ -143,6 +143,16 @@ static int world_check(void) {   // new map: every old pointer is gone
     return w != NULL;
 }
 
+// The game's corpse stand-in: 2-4 s after death it hides the real Ridden and puts an actor of the class in its
+// RagdollComponent.VFXCorpseActorType in the same pose (the body players see from then on; the Ridden is deleted).
+static UClass *corpse_cls[8];
+static int n_corpse_cls, corpse_phys = 1, n_corpses, n_corpse_phys, corpse_detail_left;
+static struct { UObject *o; int32_t oi; } corpses[128];
+static int corpse_at;
+static void corpse_found(UObject *o, int32_t i);
+static void note_corpse_class(UObject *ridden);
+static int is_corpse(UObject *o) { for (int k = 0; k < n_corpse_cls; k++) if (ue_is_a(o, corpse_cls[k])) return 1; return 0; }
+
 static int tracked_has(UObject *a) { for (int i = 0; i < ntr; i++) if (tr[i].a == a) return 1; return 0; }
 
 static void scan_step(void) {
@@ -151,7 +161,9 @@ static void scan_step(void) {
     int32_t end = scan_at + SCAN_STEP < n ? scan_at + SCAN_STEP : n;
     for (int32_t i = scan_at; i < end; i++) {
         UObject *o = ue_object_at(i);
-        if (!o || (U_FLAGS(o) & LIVE_FLAGS) || !is_ridden_fast(o) || !ue_object_usable(o, i) || tracked_has(o)) continue;
+        if (!o || (U_FLAGS(o) & LIVE_FLAGS)) continue;
+        if (n_corpse_cls && is_corpse(o)) { if (ue_object_usable(o, i)) corpse_found(o, i); continue; }
+        if (!is_ridden_fast(o) || !ue_object_usable(o, i) || tracked_has(o)) continue;
         if (!is_ridden(o)) continue;
         UObject *ls = call_obj(o, "GetLifeStateComponent");
         if (!ls || call_bool(ls, "IsAlive") != 1) continue;   // only bodies we see die
@@ -390,6 +402,7 @@ static void cmd_probe(Out *o) {
     if (dr) list_class(U_CLASS(dr), 1, 1, "death reaction component (everything)", dr);
     if (hr) list_class(U_CLASS(hr), 1, 1, "hit reaction component (everything)", hr);
     LOG("ragdoll probe: physical animation component: %s", pac ? oname(pac, a, sizeof a) : "none");
+    note_corpse_class(best);
     UObject *rc = ue_get_ptr(best, "RagdollComponent");
     if (rc) list_class(U_CLASS(rc), 1, 1, "ragdoll component (everything)", rc);
     else LOG("ragdoll probe: no RagdollComponent");
@@ -410,7 +423,7 @@ static void cmd_probe(Out *o) {
 // (old -> new) together with the body's physics state. Finds what the game flips when it freezes a corpse.
 typedef struct { UObject *o; int32_t oi; uint8_t *snap; int32_t size; char tag[24]; } Snap;
 typedef struct { UObject *actor, *mesh; int32_t ai; double t0; int next; Snap s[4]; } Watch;
-static Watch watches[3];
+static Watch watches[6];
 static const float SAMPLE_T[] = {0.25f, 0.5f, 1.f, 1.5f, 2.f, 2.5f, 3.f, 4.f, 6.f, 8.f};
 #define N_SAMPLES ((int)(sizeof SAMPLE_T / sizeof SAMPLE_T[0]))
 
@@ -472,7 +485,7 @@ static void snap_diff(Snap *sn, const char *who, double dt) {
 }
 
 static void watch_start(UObject *actor, UObject *mesh) {
-    for (int i = 0; i < 3; i++) {
+    for (int i = 0; i < 6; i++) {
         Watch *w = &watches[i];
         if (w->actor) continue;
         w->actor = actor; w->ai = U_INDEX(actor); w->mesh = mesh; w->t0 = now_s(); w->next = 0;
@@ -489,7 +502,7 @@ static void watch_end(Watch *w) { for (int k = 0; k < 4; k++) free(w->s[k].snap)
 static void watch_tick(void) {
     char a[160];
     double t = now_s();
-    for (int i = 0; i < 3; i++) {
+    for (int i = 0; i < 6; i++) {
         Watch *w = &watches[i];
         if (!w->actor || t - w->t0 < SAMPLE_T[w->next]) continue;
         if (!ue_object_usable(w->actor, w->ai)) { LOG("ragdoll watch: body gone (despawned) before +%.2fs", SAMPLE_T[w->next]); watch_end(w); continue; }
@@ -504,12 +517,78 @@ static void watch_tick(void) {
     }
 }
 
+// ---- corpses ----
+static void note_corpse_class(UObject *ridden) {
+    char a[160];
+    UObject *rc = ue_get_ptr(ridden, "RagdollComponent");
+    int32_t off = rc ? ue_prop_offset(rc, "VFXCorpseActorType") : -1;
+    UClass *cc = off >= 0 ? *(UClass **)((char *)rc + off) : NULL;
+    if (!cc) return;
+    for (int k = 0; k < n_corpse_cls; k++) if (corpse_cls[k] == cc) return;
+    if (n_corpse_cls < 8) corpse_cls[n_corpse_cls++] = cc;
+    LOG("ragdoll: corpse stand-in class for %s: %s", cname(ridden, a, sizeof a), ue_obj_name(cc, a, sizeof a));
+}
+
+static int ragdoll_mesh(UObject *mesh) {   // physics on, full weight, awake; 1 = simulating afterwards
+    static FName ragdoll_profile;
+    if (!ragdoll_profile.idx) ragdoll_profile = fname_of(L"Ragdoll");
+    Call k;
+    if (call_prep(&k, mesh, "SetCollisionProfileName")) { SET(&k, "InCollisionProfileName", FName, ragdoll_profile); call_go(&k); }
+    if (call_prep(&k, mesh, "SetAllBodiesSimulatePhysics")) { SET(&k, "bNewSimulate", uint8_t, 1); call_go(&k); }
+    if (call_prep(&k, mesh, "SetSimulatePhysics")) { SET(&k, "bSimulate", uint8_t, 1); call_go(&k); }
+    if (call_prep(&k, mesh, "SetPhysicsBlendWeight")) { SET(&k, "PhysicsBlendWeight", float, 1.f); call_go(&k); }
+    call_void(mesh, "WakeAllRigidBodies");
+    return call_bool(mesh, "IsSimulatingPhysics") == 1;
+}
+
+static float call_prep_lifespan(UObject *o) {
+    Call k;
+    if (!call_prep(&k, o, "GetLifeSpan")) return -1;
+    call_go(&k);
+    float *r = carg(&k, "ReturnValue");
+    return r ? *r : -1;
+}
+
+static void corpse_found(UObject *o, int32_t i) {
+    for (int k = 0; k < 128; k++) if (corpses[k].o == o && corpses[k].oi == i) return;
+    corpses[corpse_at].o = o; corpses[corpse_at].oi = i;
+    corpse_at = (corpse_at + 1) % 128;
+    n_corpses++;
+    char a[160], c[160];
+    UObject *sk = comp_of(o, "SkeletalMeshComponent");
+    int detail = corpse_detail_left > 0;
+    if (detail) {
+        corpse_detail_left--;
+        static int listed;
+        if (!listed++) list_class(U_CLASS(o), 1, 1, "corpse stand-in (everything)", o);
+        LOG("ragdoll corpse: %s (%s), life span %.1f s", oname(o, a, sizeof a), cname(o, c, sizeof c),
+            call_prep_lifespan(o));
+        static const char *const KINDS[] = {"SkeletalMeshComponent", "PoseableMeshComponent", "SkinnedMeshComponent",
+                                            "StaticMeshComponent", "InstancedStaticMeshComponent", NULL};
+        for (int k = 0; KINDS[k]; k++) {
+            UObject *cmp = comp_of(o, KINDS[k]);
+            if (cmp) LOG("ragdoll corpse:   has %s: %s (%s)", KINDS[k], oname(cmp, a, sizeof a), cname(cmp, c, sizeof c));
+        }
+        if (sk) log_mesh(sk, "corpse");
+    }
+    if (!mode_on || !corpse_phys) return;
+    if (!sk) { if (detail) LOG("ragdoll corpse: no skeletal mesh on %s: can't give it physics", oname(o, a, sizeof a)); return; }
+    int ok = ragdoll_mesh(sk);
+    if (ok) n_corpse_phys++;
+    if (detail) {
+        LOG("ragdoll corpse: physics on %s: %s", oname(o, a, sizeof a), ok ? "simulating" : "NOT simulating");
+        log_mesh(sk, "corpse after");
+        watch_start(o, sk);
+    }
+}
+
 // ---- the ragdoll ----
 static int apply(Tracked *t) {
     char a[160], c[160];
     UObject *mesh = ue_get_ptr(t->a, "Mesh"), *cap = ue_get_ptr(t->a, "CapsuleComponent");
     if (!mesh) { LOG("ragdoll: %s has no mesh", oname(t->a, a, sizeof a)); return -1; }
     int detail = detail_left > 0;
+    note_corpse_class(t->a);
     UObject *ai = ue_get_ptr(mesh, "AnimScriptInstance"), *pac = comp_of(t->a, "PhysicalAnimationComponent");
     if (detail) {
         detail_left--;
@@ -546,7 +625,7 @@ static int apply(Tracked *t) {
 
     int sim = call_bool(mesh, "IsSimulatingPhysics");
     if (detail) {
-        watch_start(t->a, mesh);
+        if (detail_left >= DETAIL_LOGS - 2) watch_start(t->a, mesh);
         log_mesh(mesh, "after");
         LOG("ragdoll after:   montage playing %d", ai ? call_bool(ai, "IsAnyMontagePlaying") : -1);
     }
@@ -590,7 +669,7 @@ void ragdoll_tick(float dt) {
     tick_n++;
     if (!mode_on && !tracing && !any_ragdolled()) return;
     if (tracing && now_s() > trace_end) trace_stop("time up");
-    if (!world_check()) { for (int i = 0; i < 3; i++) if (watches[i].actor) watch_end(&watches[i]); return; }
+    if (!world_check()) { for (int i = 0; i < 6; i++) if (watches[i].actor) watch_end(&watches[i]); return; }
     watch_tick();
     scan_step();
     double t = now_s();
@@ -618,17 +697,24 @@ void ragdoll_tick(float dt) {
 void ragdoll_slash(char *rest, Out *o) {
     char *verb = rest ? strtok(rest, " ") : NULL, *arg = verb ? strtok(NULL, " ") : NULL;
     if (!verb || !strcmp(verb, "status")) {
-        out_printf(o, "/ragdoll: %s%s, %d Ridden tracked, %d deaths seen, %d ragdolled, %d failed, %d came back%s%s\n",
+        out_printf(o, "/ragdoll: %s%s, %d Ridden tracked, %d deaths seen, %d ragdolled, %d failed, %d came back; "
+                      "corpses: %d seen, %d given physics (%s)%s%s\n",
                    mode_on ? "on" : "off", mode_on && delay_s > 0 ? " (after the game's animation)" : "", ntr, n_deaths,
-                   n_applied, n_failed, n_revived, tracing ? ", tracing" : "", n_overflow ? ", tracking list full" : "");
+                   n_applied, n_failed, n_revived, n_corpses, n_corpse_phys, corpse_phys ? "corpse physics on" : "corpse physics off",
+                   tracing ? ", tracing" : "", n_overflow ? ", tracking list full" : "");
     } else if (!strcmp(verb, "on")) {
         float d = arg ? (float)atof(arg) : 0.f;
         delay_s = d < 0 ? 0 : d > 10 ? 10 : d;
         mode_on = 1;
         detail_left = DETAIL_LOGS;
+        corpse_detail_left = 3;
         LOG("ragdoll: on, delay %.2f s", delay_s);
         out_printf(o, "/ragdoll on: Ridden that die from now on fall as ragdolls%s (this machine only)\n",
                    delay_s > 0 ? " after the game's death animation starts" : "");
+    } else if (!strcmp(verb, "corpse")) {
+        if (arg && !strcmp(arg, "off")) corpse_phys = 0; else if (arg && !strcmp(arg, "on")) corpse_phys = 1;
+        corpse_detail_left = 3;
+        out_printf(o, "/ragdoll corpse: physics for the game's corpse stand-ins %s\n", corpse_phys ? "on" : "off");
     } else if (!strcmp(verb, "off")) {
         mode_on = 0;
         LOG("ragdoll: off");
@@ -644,7 +730,7 @@ void ragdoll_slash(char *rest, Out *o) {
         if (tracing) trace_stop("restarted");
         if (trace_start(s, o) == 0) out_printf(o, "/ragdoll trace: %.0f s, kill a few Ridden now (log: \"ragdoll trace\" lines)\n", s);
     } else {
-        out_printf(o, "usage: /ragdoll [on [delay]|off|status|probe|trace [secs]]\n");
+        out_printf(o, "usage: /ragdoll [on [delay]|off|corpse on|off|status|probe|trace [secs]]\n");
     }
 }
 
