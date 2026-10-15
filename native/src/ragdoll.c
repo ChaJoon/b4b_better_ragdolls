@@ -12,7 +12,9 @@
 //   /ragdoll probe           the nearest living Ridden: its mesh, physics asset, collision, and the death-related
 //                            functions/properties of its classes, into the log (discovery)
 //   /ragdoll trace [secs]    log the game's function calls on Ridden (default 30 s): every new class.function once,
-//                            plus each death's calls just before and after it (discovery: how the game kills a Ridden)
+//                            plus each death's calls just before and after it (discovery: how the game kills a Ridden).
+//                            Also logs native call stacks ("ragdoll stack" lines) of the corpse swap (the stand-in's
+//                            construction) and of the deletion (UnPossessed / EndPlay / Destroyed on a dead Ridden)
 //
 // Detection: an incremental scan of the object array finds living Ridden (GobiCharacters that aren't heroes; see
 // cheats.c cmd_killall), then their LifeStateComponent's IsAlive is polled each tick. Bosses are left alone.
@@ -64,7 +66,16 @@ static int call_prep(Call *c, UObject *obj, const char *fname) {
     return 1;
 }
 static void *carg(Call *c, const char *name) { FField *f = ue_find_prop(c->fn, name); return f ? c->p + FP_OFFSET(f) : NULL; }
-static void call_go(Call *c) { ue_process_event(c->obj, c->fn, c->p); }
+// Our own calls (and whatever the game runs inside them) are left out of /ragdoll trace and its stacks: only the game
+// thread makes them, so a depth counter plus that thread's id tells the ProcessEvent hook which calls are ours.
+static volatile DWORD own_tid;
+static volatile int own_depth;
+static void call_go(Call *c) {
+    if (!own_depth++) own_tid = GetCurrentThreadId();
+    ue_process_event(c->obj, c->fn, c->p);
+    own_depth--;
+}
+static int own_call(void) { return own_depth && own_tid == GetCurrentThreadId(); }
 #define SET(c, name, type, v) do { void *_a = carg(c, name); if (_a) *(type *)_a = (v); } while (0)
 static UObject *call_obj(UObject *o, const char *fn) {
     Call c; if (!call_prep(&c, o, fn)) return NULL;
@@ -128,6 +139,7 @@ typedef struct {
     uint8_t done;     // ragdolled, or left alone
     uint8_t ragdolled, cap_coll;           // what apply() changed, to undo it if the actor comes back (reuse)
     uint8_t kept;                          // times the game's corpse swap was undone: the real body stays
+    uint8_t stacked;                       // deletion stacks already logged for this body (1 << kind)
     double standin_until;                  // still looking for the stand-in to remove (it can appear a frame later)
     UObject *mesh;
     FName prof;
@@ -195,6 +207,227 @@ typedef struct { UObject *actor; double from, until; int lines; } Focus;
 #define FOCUS_SECS 8.0
 static Focus focus[8];
 
+// ---- stacks (discovery, part of /ragdoll trace): which native code swaps and deletes a dead Ridden ----
+// Neither the corpse swap nor the deletion is a ProcessEvent call of its own, so they are found from their effects:
+//   spawn      the stand-in (RagdollComponent.VFXCorpseActorType) is constructed: StaticConstructObject_Internal hook
+//   unpossess  GameplayActionsComponent.OnUnPossessed on a Ridden we saw die (the first sign of its deletion)
+//   endplay    the first ReceiveEndPlay on that Ridden or one of its components
+//   destroyed  ReceiveDestroyed on it
+//   corpse     the stand-in's first event (UserConstructionScript / ReceiveBeginPlay): a second view of the spawn
+// Each logs the call stack (RtlCaptureStackBackTrace: the x64 unwind data in the exe) as static VAs, every frame with
+// its function's start (RtlLookupFunctionEntry, chained entries followed) and, once per function, that function's
+// first 24 bytes, for a signature check like every other hook here. Frames are labelled when the function is a
+// UFunction's native exec thunk ("exec Actor.K2_DestroyActor": a Blueprint called it) or the Blueprint VM
+// (UObject::ProcessInternal, the Func of every script function), so a Blueprint-driven swap shows up as such.
+enum { ST_SPAWN, ST_UNPOSSESS, ST_ENDPLAY, ST_DESTROYED, ST_CORPSE, ST_N };
+static const char *const ST_TAG[ST_N] = {"spawn", "unpossess", "endplay", "destroyed", "corpse"};
+#define STACKS_PER_KIND 3
+#define STACK_FRAMES    48
+#define STACK_BYTES     24
+static volatile LONG stack_budget[ST_N], stack_id;
+static volatile DWORD game_tid;
+static FName nm_unpossessed, nm_endplay, nm_destroyed, nm_ucs, nm_beginplay;
+
+// StaticConstructObject_Internal (as in cheats.c; 4.25 argument list). Hooked only while a trace runs. cheats.c checks
+// these bytes before it creates the engine CheatManager, so /size /freecam /slomo /freeze, used for the first time
+// during a trace, answer "not available" (logged "signature mismatch"); they work again once the trace ends.
+#define ADDR_SCO VA(0x1426E4840ull)
+static const uint8_t SIG_SCO[] = {0x4c,0x89,0x44,0x24,0x18,0x53,0x55,0x56,0x57,0x41,0x54,0x41,0x55,0x41,0x56,0x41,
+                                  0x57,0x48,0x81,0xec,0xa8,0x01,0x00,0x00};
+typedef UObject *(*ScoFn)(UClass *, UObject *, FName, uint32_t, uint32_t, UObject *, uint8_t, void *, uint8_t);
+static ScoFn orig_sco;
+static int sco_state;   // 0 not tried, 1 hooked, -1 signature mismatch or hook failed
+
+#define UFN_FUNC(o) (*(uintptr_t *)((char *)(o) + 0xE0))   // UFunction::Func (tools/sdkdump.py)
+typedef struct { uintptr_t at; UFunction *fn; } Native;
+static Native *natives;
+static int n_natives;
+static uintptr_t bp_vm;   // UObject::ProcessInternal
+
+static uintptr_t exe_lo, exe_hi, self_lo, self_hi;
+
+static int native_cmp(const void *a, const void *b) {
+    uintptr_t x = ((const Native *)a)->at, y = ((const Native *)b)->at;
+    return x < y ? -1 : x > y;
+}
+
+static void module_range(HMODULE m, uintptr_t *lo, uintptr_t *hi) {
+    IMAGE_DOS_HEADER *d = (IMAGE_DOS_HEADER *)m;
+    IMAGE_NT_HEADERS64 *nt = (IMAGE_NT_HEADERS64 *)((char *)m + d->e_lfanew);
+    *lo = (uintptr_t)m;
+    *hi = *lo + nt->OptionalHeader.SizeOfImage;
+}
+
+// game thread, once: every native UFunction's exec thunk, and the Blueprint VM entry (the Func most script
+// functions share; a majority vote, since script functions all point at UObject::ProcessInternal)
+static void natives_build(void) {
+    if (natives) return;
+    HMODULE self = NULL;
+    module_range(GetModuleHandleW(NULL), &exe_lo, &exe_hi);
+    if (GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                           (LPCWSTR)(void *)natives_build, &self)) module_range(self, &self_lo, &self_hi);
+    UClass *fc = ue_find_class("Function");
+    int cap = 1 << 15;
+    natives = malloc(cap * sizeof *natives);
+    if (!fc || !natives) { LOG("ragdoll stack: can't index native functions (%s)", fc ? "no memory" : "no Function class"); return; }
+    uintptr_t cand = 0;
+    int votes = 0;
+    for (int32_t i = 0, n = ue_num_objects(); i < n; i++) {
+        UObject *o = ue_object_at(i);
+        if (!o || U_CLASS(o) != fc) continue;
+        uintptr_t f = UFN_FUNC(o);
+        if (f < exe_lo || f >= exe_hi) continue;
+        if (!(UFN_FLAGS(o) & 0x400)) {   // FUNC_Native not set: a script function
+            if (!votes) { cand = f; votes = 1; } else votes += cand == f ? 1 : -1;
+            continue;
+        }
+        if (n_natives == cap) {
+            Native *bigger = realloc(natives, 2 * cap * sizeof *natives);
+            if (!bigger) break;
+            natives = bigger; cap *= 2;
+        }
+        natives[n_natives++] = (Native){f, o};
+    }
+    bp_vm = cand;
+    qsort(natives, n_natives, sizeof *natives, native_cmp);
+    LOG("ragdoll stack: %d native functions indexed, Blueprint VM (ProcessInternal) at 0x%llx", n_natives,
+        bp_vm ? (unsigned long long)(bp_vm - g_base_delta) : 0ull);
+}
+
+static uintptr_t fn_start(uintptr_t pc) {   // start of the function holding pc, following chained unwind entries
+    DWORD64 base = 0;
+    PRUNTIME_FUNCTION rf = RtlLookupFunctionEntry((DWORD64)pc, &base, NULL);
+    for (int guard = 0; rf && guard < 8; guard++) {
+        if (rf->UnwindData & 1) { rf = (PRUNTIME_FUNCTION)(base + (rf->UnwindData & ~1u)); continue; }   // indirect entry
+        const uint8_t *ui = (const uint8_t *)(base + rf->UnwindData);
+        if (!((ui[0] >> 3) & UNW_FLAG_CHAININFO)) break;
+        rf = (PRUNTIME_FUNCTION)(ui + 4 + 2 * ((ui[2] + 1u) & ~1u));   // the parent entry, after the unwind codes
+    }
+    return rf ? (uintptr_t)(base + rf->BeginAddress) : 0;
+}
+
+static const char *fn_label(uintptr_t f, char *out, size_t n) {
+    char a[96], b[96];
+    out[0] = 0;
+    if (!f) return out;
+    if (f == ADDR_PROCESSEVENT) snprintf(out, n, "  [UObject::ProcessEvent]");
+    else if (f == ADDR_SCO) snprintf(out, n, "  [StaticConstructObject_Internal]");
+    else if (f == ADDR_GAMEENGINETICK) snprintf(out, n, "  [UGameEngine::Tick]");
+    else if (bp_vm && f == bp_vm) snprintf(out, n, "  [UObject::ProcessInternal: Blueprint VM]");
+    else if (n_natives) {
+        Native key = {f, NULL}, *hit = bsearch(&key, natives, n_natives, sizeof *natives, native_cmp);
+        if (hit) snprintf(out, n, "  [exec %s.%s]", oname(U_OUTER(hit->fn), a, sizeof a), ue_obj_name(hit->fn, b, sizeof b));
+    }
+    return out;
+}
+
+static void stack_log(int kind, const char *what) {
+    if (InterlockedDecrement(&stack_budget[kind]) < 0) return;
+    void *fr[STACK_FRAMES];
+    USHORT n = RtlCaptureStackBackTrace(1, STACK_FRAMES, fr, NULL);   // skip this function
+    LONG id = InterlockedIncrement(&stack_id);
+    LOG("ragdoll stack #%ld %s: %s (thread %lu%s, +%.2fs, %u frames)", id, ST_TAG[kind], what, GetCurrentThreadId(),
+        GetCurrentThreadId() == game_tid ? ", game thread" : "", now_s() - trace_t0, n);
+    uintptr_t shown[STACK_FRAMES];
+    int n_shown = 0;
+    for (int i = 0; i < n; i++) {
+        uintptr_t pc = (uintptr_t)fr[i];
+        if (!pc) break;   // Wine ends the walk at the stack base with zero entries
+        char lab[200], hex[STACK_BYTES * 3 + 8], mod[MAX_PATH];
+        if (pc >= exe_lo && pc < exe_hi) {
+            uintptr_t f = fn_start(pc - 1);   // pc - 1: a call that ends a function returns past its end
+            hex[0] = 0;
+            int seen = 0;
+            for (int k = 0; k < n_shown; k++) if (shown[k] == f) seen = 1;
+            if (f && !seen) {
+                shown[n_shown++] = f;
+                char *p = hex + sprintf(hex, "  bytes");
+                for (int k = 0; k < STACK_BYTES; k++) p += sprintf(p, " %02x", ((const uint8_t *)f)[k]);
+            }
+            if (f) LOG("ragdoll stack #%ld %2d 0x%llx = fn 0x%llx+0x%llx%s%s", id, i, (unsigned long long)(pc - g_base_delta),
+                       (unsigned long long)(f - g_base_delta), (unsigned long long)(pc - f), fn_label(f, lab, sizeof lab), hex);
+            else LOG("ragdoll stack #%ld %2d 0x%llx = fn ? (no unwind entry: leaf)", id, i, (unsigned long long)(pc - g_base_delta));
+        } else if (pc >= self_lo && pc < self_hi) {
+            LOG("ragdoll stack #%ld %2d b4bcoop+0x%llx", id, i, (unsigned long long)(pc - self_lo));
+        } else {
+            HMODULE m = NULL;
+            mod[0] = 0;
+            if (GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                                   (LPCSTR)pc, &m) && m) GetModuleFileNameA(m, mod, sizeof mod);
+            const char *base = strrchr(mod, '\\');
+            LOG("ragdoll stack #%ld %2d %s+0x%llx", id, i, mod[0] ? (base ? base + 1 : mod) : "?",
+                (unsigned long long)(m ? pc - (uintptr_t)m : pc));
+        }
+    }
+    if (n < 4) LOG("ragdoll stack #%ld: the walk stopped early (a frame without unwind data)", id);
+}
+
+static int is_corpse_class(UClass *c) { for (int k = 0; k < n_corpse_cls; k++) if (c == corpse_cls[k]) return 1; return 0; }
+
+static UObject *sco_detour(UClass *c, UObject *outer, FName name, uint32_t fl, uint32_t ifl, UObject *tmpl, uint8_t copy,
+                           void *graph, uint8_t arch) {
+    UObject *r = orig_sco(c, outer, name, fl, ifl, tmpl, copy, graph, arch);
+    if (tracing && c && r && !(fl & LIVE_FLAGS) && is_corpse_class(c) && !own_call()) {
+        char a[160], b[160], w[360];
+        snprintf(w, sizeof w, "%s constructed (%s)", oname(r, a, sizeof a), oname(c, b, sizeof b));
+        stack_log(ST_SPAWN, w);
+    }
+    return r;
+}
+
+static Tracked *dead_tracked(UObject *a) {   // game thread only: tr[] belongs to it
+    for (int i = 0; i < ntr; i++) if (tr[i].a == a) return tr[i].died_at ? &tr[i] : NULL;
+    return NULL;
+}
+
+static int same_name(UFunction *fn, FName n) { return n.idx && U_NAME(fn).idx == n.idx && U_NAME(fn).num == n.num; }
+
+// from trace_call, for calls on a Ridden or a stand-in that aren't ours
+static void stack_check(UObject *o, UObject *actor, UFunction *fn, void *params) {
+    char a[160], b[160], c[160], w[360];
+    if (n_corpse_cls && is_corpse(actor)) {
+        if (same_name(fn, nm_ucs) || same_name(fn, nm_beginplay)) {
+            static UObject *last;
+            if (actor == last) return;   // one stack per stand-in
+            last = actor;
+            snprintf(w, sizeof w, "%s.%s on %s", cname(o, a, sizeof a), ue_obj_name(fn, b, sizeof b), oname(actor, c, sizeof c));
+            stack_log(ST_CORPSE, w);
+        }
+        return;
+    }
+    int kind = same_name(fn, nm_unpossessed) ? ST_UNPOSSESS : same_name(fn, nm_endplay) ? ST_ENDPLAY :
+               same_name(fn, nm_destroyed) ? ST_DESTROYED : -1;
+    if (kind < 0 || GetCurrentThreadId() != game_tid) return;
+    Tracked *x = dead_tracked(actor);
+    if (!x || (x->stacked & (1u << kind))) return;
+    x->stacked |= 1u << kind;
+    int n = snprintf(w, sizeof w, "%s.%s on %s, %.2f s after death, %s", cname(o, a, sizeof a), ue_obj_name(fn, b, sizeof b),
+                     oname(actor, c, sizeof c), now_s() - x->died_at, x->kept ? "a kept body" : x->ragdolled ? "ragdolled" : "game's own death");
+    if (kind == ST_ENDPLAY && params && n > 0 && n < (int)sizeof w)
+        snprintf(w + n, sizeof w - n, ", reason %u", *(uint8_t *)params);   // 0 Destroyed, 1 LevelTransition, 3 RemovedFromWorld
+    stack_log(kind, w);
+}
+
+static void stacks_arm(void) {   // game thread, from trace_start
+    natives_build();
+    if (!nm_unpossessed.idx) {
+        nm_unpossessed = fname_of(L"OnUnPossessed"); nm_endplay = fname_of(L"ReceiveEndPlay");
+        nm_destroyed = fname_of(L"ReceiveDestroyed"); nm_ucs = fname_of(L"UserConstructionScript");
+        nm_beginplay = fname_of(L"ReceiveBeginPlay");
+    }
+    for (int k = 0; k < ST_N; k++) InterlockedExchange(&stack_budget[k], STACKS_PER_KIND);
+    if (!sco_state) {
+        if (memcmp((void *)ADDR_SCO, SIG_SCO, sizeof SIG_SCO)) { sco_state = -1; LOG("ragdoll stack: StaticConstructObject signature mismatch, no spawn stacks"); }
+        else if (MH_CreateHook((void *)ADDR_SCO, (void *)sco_detour, (void **)&orig_sco) != MH_OK) { sco_state = -1; LOG("ragdoll stack: StaticConstructObject hook failed"); }
+        else sco_state = 1;
+    }
+    if (sco_state == 1 && MH_EnableHook((void *)ADDR_SCO) != MH_OK) LOG("ragdoll stack: StaticConstructObject hook couldn't be enabled");
+    LOG("ragdoll stack: armed (%d each: spawn%s, unpossess, endplay, destroyed, corpse); corpse classes known: %d",
+        STACKS_PER_KIND, sco_state == 1 ? "" : " OFF", n_corpse_cls);
+}
+
+static void stacks_disarm(void) { if (sco_state == 1) MH_DisableHook((void *)ADDR_SCO); }
+
 static UObject *owner_actor(UObject *o) {
     static UClass *ac, *cc, *ai;
     if (!ac) { ac = cls("Actor"); cc = cls("ActorComponent"); ai = cls("AnimInstance"); }
@@ -213,6 +446,7 @@ static int per_frame(const char *fn) {   // left out of the death sequences (sti
 static void trace_call(UObject *o, UFunction *fn, void *params) {
     UObject *actor = owner_actor(o);
     if (!actor || !(is_ridden_fast(actor) || (n_corpse_cls && is_corpse(actor)))) return;
+    stack_check(o, actor, fn, params);
     double t = now_s();
     char cb[128], fb[128], ab[128];
     EnterCriticalSection(&tcs);
@@ -244,7 +478,7 @@ static void trace_call(UObject *o, UFunction *fn, void *params) {
 }
 
 static void pe_detour(UObject *o, UFunction *fn, void *params) {
-    if (tracing && o && fn) trace_call(o, fn, params);
+    if (tracing && o && fn && !own_call()) trace_call(o, fn, params);
     orig_pe(o, fn, params);
 }
 
@@ -286,7 +520,9 @@ static int trace_start(double secs, Out *o) {
     trace_t0 = now_s();
     trace_end = trace_t0 + secs;
     LeaveCriticalSection(&tcs);
+    game_tid = GetCurrentThreadId();   // chat commands run on the game thread
     if (MH_EnableHook((void *)ADDR_PROCESSEVENT) != MH_OK) { out_printf(o, "/ragdoll trace: hook failed\n"); return -1; }
+    stacks_arm();
     InterlockedExchange(&tracing, 1);
     LOG("ragdoll trace: started for %.0f s (Ridden tracked: %d)", secs, ntr);
     return 0;
@@ -296,6 +532,7 @@ static void trace_stop(const char *why) {
     if (!tracing) return;
     InterlockedExchange(&tracing, 0);
     MH_DisableHook((void *)ADDR_PROCESSEVENT);
+    stacks_disarm();
     LOG("ragdoll trace: stopped (%s): %d calls on Ridden, %d distinct class.function, %d deaths seen", why, n_calls, npairs, n_deaths);
 }
 
@@ -770,7 +1007,7 @@ void ragdoll_tick(float dt) {
             if (call_bool(x->ls, "IsAlive") == 1) continue;
             x->died_at = t;
             n_deaths++;
-            if (tracing) trace_on_death(x->a);
+            if (tracing) { note_corpse_class(x->a); trace_on_death(x->a); }   // the stand-in class, for spawn stacks
         }
         if (!mode_on) { x->done = 1; continue; }
         if (t - x->died_at < delay_s) continue;
@@ -784,10 +1021,11 @@ void ragdoll_slash(char *rest, Out *o) {
     char *verb = rest ? strtok(rest, " ") : NULL, *arg = verb ? strtok(NULL, " ") : NULL;
     if (!verb || !strcmp(verb, "status")) {
         out_printf(o, "/ragdoll: %s%s, %d Ridden tracked, %d deaths seen, %d ragdolled, %d failed, %d came back; "
-                      "corpses: %d seen, %d given physics (%s); kept bodies: %d (%s), %d stand-ins removed, %d deleted by the game%s%s\n",
+                      "corpses: %d seen, %d given physics (%s); kept bodies: %d (%s), %d stand-ins removed, %d deleted by the game; "
+                      "%ld stacks logged%s%s\n",
                    mode_on ? "on" : "off", mode_on && delay_s > 0 ? " (after the game's animation)" : "", ntr, n_deaths,
                    n_applied, n_failed, n_revived, n_corpses, n_corpse_phys, corpse_phys ? "corpse physics on" : "corpse physics off",
-                   n_kept, keep_bodies ? "keep on" : "keep off", n_standins_removed, n_kept_deleted,
+                   n_kept, keep_bodies ? "keep on" : "keep off", n_standins_removed, n_kept_deleted, stack_id,
                    tracing ? ", tracing" : "", n_overflow ? ", tracking list full" : "");
     } else if (!strcmp(verb, "on")) {
         float d = arg ? (float)atof(arg) : 0.f;
