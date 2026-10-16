@@ -358,6 +358,7 @@ These act on the whole mission (only during a mission).
 | `/horde` | Triggers a horde now. | `/horde` |
 | `/director calm\|build\|peak\|fade\|recover` | Forces the AI director's pacing phase: calm (no pressure), build (build-up), peak, peak fade, recover. | `/director peak` |
 | `/spawn <type> [1-10]` | Spawns ridden in front of you. Types: `tallboy crusher bruiser reeker exploder retch stinger stalker hocker hag snitcher breaker ogre common`. | `/spawn crusher 2` |
+| `/spawnprop <name> [#]` | (Fork build.) Spawns a prop on the floor 3 m in front of you, of a class this map has loaded (a gas can, a red barrel...): lists the matching classes with their paths and spawns the first, or match `#`. A full class path from that list works in any map. | `/spawnprop gascan` |
 | `/killall` | Kills every ridden in the map (common ridden, specials, mutations). Never players, bots or allies. | `/killall` |
 | `/freeze` | Freezes the world except the players (ridden and bots stop). Again to resume. | `/freeze` |
 | `/slomo <0.1-5>` | Game speed for everyone (1 = normal). | `/slomo 0.5` |
