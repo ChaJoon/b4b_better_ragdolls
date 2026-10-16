@@ -8,8 +8,8 @@ Only want an add-on outfit or weapon look? The `~` window is easier: tab **Add-o
 survivors' outfits and Fort Hope NPC bodies.
 
 Nothing about `/model` is saved: your profile, your unlocked outfits and your campaign runs stay as they are. Quit
-the game (or `/model reset`) and you look like before. (Add-on outfits picked in the game's customization screen are
-kept: see [below](#add-on-outfits-on-the-games-customization-screen).)
+the game (or `/model reset`) and you look like before. (Add-on outfits picked with the `~` window's **Wear** or in the game's
+customization screen are kept: see [below](#add-on-outfits-on-the-games-customization-screen).)
 
 ## Commands
 
@@ -55,7 +55,7 @@ kept: see [below](#add-on-outfits-on-the-games-customization-screen).)
 Your add-on outfits are also in the game's own wardrobe (the customization screen in Fort Hope), for every survivor,
 at the end of the outfit list, unlocked, with the add-on's name (no picture). Pick one there like any outfit: unlike
 `/model` it is **kept** for that survivor, also after a restart, in every mission and cutscene, until you pick another
-outfit for them.
+outfit for them. The `~` window's **Wear** makes the same choice without the screen ([below](#the--window-add-ons-tab)).
 
 - Your Back 4 Blood profile never stores it: the profile keeps that survivor's previous outfit, and b4b-coop remembers
   the add-on outfit in `b4bcoop-outfits.txt` (next to `b4bcoop.ini`). Without b4b-coop, or without that add-on, the
@@ -63,13 +63,16 @@ outfit for them.
 - Players with the same add-on see it on you; everyone else sees your survivor (their base head, torso and legs).
 - `/model reset` brings back this saved look. A host with `/models off` or `addons_policy=none` refuses it: you then wear
   your profile's outfit in that game.
-- `outfits_screen=0` in `b4bcoop.ini` keeps add-on outfits out of the customization screen (`/model` still works).
+- `outfits_screen=0` in `b4bcoop.ini` keeps add-on outfits out of the customization screen and turns **Wear** off
+  (`/model` still works).
 
 ## The `~` window: Add-ons tab
 
 The `~` window has no lists of looks: the commands above are typed in chat. Its **Add-ons** tab has one button per
-add-on look: an add-on outfit's **Wear** opens your survivor's customization screen with the outfit on (Fort Hope),
-an add-on weapon look's **Use** / **Stop** puts it on your weapon of that type or takes it off. **Model swaps allowed**
+add-on look: an add-on outfit's **Wear** puts it on your survivor at once and keeps it for that survivor (the same
+saved choice as the customization screen above; **Wear** on another outfit swaps, **Take off** brings back the
+survivor's own outfit; in Fort Hope or a mission, as host or in someone's session), an add-on weapon look's **Use** /
+**Stop** puts it on your weapon of that type or takes it off. **Model swaps allowed**
 (`/models on|off`, host) is under **Host rules** at the bottom of that tab (greyed out on a client).
 
 `/model list holly` shows names without the survivor in front: `elite_04` there is `/model holly_elite_04`.

@@ -245,7 +245,8 @@ int addons_join_refused(const char *target, char *msg, size_t mn) {
 // host's policy as we know it from this join (its rich presence or its login refusal; nothing known = it didn't ask,
 // i.e. any, or an older host reached by IP, which doesn't check) decides, the same way it would decide our next join.
 // 1 = allowed; 0 = not (msg: why, for our own player).
-int addons_session_allows(int gameplay, char *msg, size_t mn) {
+// quiet: no log line (the ~ window asks every frame: an outfit row's Wear)
+static int session_allows(int gameplay, char *msg, size_t mn, int quiet) {
     msg[0] = 0;
     if (!admin_is_client()) return 1;
     const char *t = cmds_last_join_target();
@@ -257,9 +258,11 @@ int addons_session_allows(int gameplay, char *msg, size_t mn) {
     if (pol == POL_NONE) snprintf(msg, mn, "this host allows no add-ons");
     else if (pol == POL_UNKNOWN) snprintf(msg, mn, "this host uses an add-on rule this b4bcoop doesn't know");
     else snprintf(msg, mn, "this host allows %s", pol == POL_COSMETIC ? "only cosmetic add-ons" : "only its own gameplay add-ons");
-    LOG("addons: not loading an add-on now: %s (policy %s, as announced for %s)", msg, pol < POL_UNKNOWN ? POLICY_NAMES[pol] : "unknown", first);
+    if (!quiet) LOG("addons: not loading an add-on now: %s (policy %s, as announced for %s)", msg, pol < POL_UNKNOWN ? POLICY_NAMES[pol] : "unknown", first);
     return 0;
 }
+int addons_session_allows(int gameplay, char *msg, size_t mn) { return session_allows(gameplay, msg, mn, 0); }
+int addons_session_allows_quiet(int gameplay, char *msg, size_t mn) { return session_allows(gameplay, msg, mn, 1); }
 
 // cmds.c: appended to the join URL: "?b4bcoopaddonsok=<policy>" once we know the host's policy and pass it
 const char *addons_login_option(const char *target) {

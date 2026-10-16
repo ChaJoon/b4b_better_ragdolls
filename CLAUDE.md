@@ -74,7 +74,7 @@ Detailed engine findings (addresses, obfuscated layouts, class names): `docs/NOT
     `addonlist.txt` on/off + load order (later wins, read order 1000+; edited by hand or `/addons on|off`, no order UI),
     embedded `b4bcoop-addoninfo.txt`, index SHA1 checked, conflicts (same file; "mixed" = one package from two add-ons)
     logged + one chat notice; chat `/addons [on|off|info <#>]` (off/order: next start; on: loaded at once when safe);
-    rows of the `~` Add-ons tab (`addons_info`, `addons_look_buttons`: Wear = `models_open_screen` / Use / Stop;
+    rows of the `~` Add-ons tab (`addons_info`, `addons_look_buttons`: Wear / Take off = `models_wear` / Use / Stop;
     addons.md §8). Packer `modkit/addon.py pack|info|check`. `addons_mp.c` (#22, private
     #35): nothing about a player's add-ons is sent; the host announces `addons_policy` (presence ` addons:<policy>`,
     else a login refusal ending `[addons:<policy>]`), the joiner checks itself, declines locally or logs in with
@@ -182,9 +182,10 @@ Detailed engine findings (addresses, obfuscated layouts, class names): `docs/NOT
     0x141B75B90: heroes, cutscene stand-ins, lineup mannequins, #37). Customization screen (#33, new-assets.md §11):
     real rows `b4bcoop.outfit.<name>` inserted into every `<Hero>_Customization_DT` on this machine; the profile never
     stores them (equip hook keeps the previous look, choice in `b4bcoop-outfits.txt`, GetProfileCustomization hook
-    answers with it); ini `outfits_screen=0`. The Add-ons tab's Wear opens that screen with the outfit on
-    (`models_open_screen`, Fort Hope; `tick_screen` leaves the customization view and puts the view back on the hero
-    when it closes). Dev `mdl ...` (`mdl screen`, `mdl cs open|list|equip|close`, `mdl standins`). `weaponlooks.c`: add-on weapon looks (addoninfo `weapon=`,
+    answers with it); ini `outfits_screen=0`. The Add-ons tab's Wear makes the same choice without the screen
+    (`models_wear`: `b4bcoop-outfits.txt` line + the game's re-init from the profile, at once, Fort Hope or mission,
+    host or client; Take off = `models_wear(NULL)`; row state `models_wearing`). Dev `mdl ...` (`mdl screen`, `mdl cs
+    open|list|equip|close`: the screen without walking there, `tick_screen` leaves its view; `mdl standins`). `weaponlooks.c`: add-on weapon looks (addoninfo `weapon=`,
     `b4bmod weapon --as`), made-up skin row `b4bcoop.weapon.<name>` in the weapon's replicated
     `ItemMeshManagementComponent.CustomizationRow`, meshes swapped by every machine with the add-on, others see the
     default weapon; a dropped weapon keeps its look on the floor (pickup's `3P_<Code>_SM`; the host pairs it by
@@ -419,10 +420,10 @@ covers `<game>/b4bcoop-update/`.
 a throwaway key on 127.0.0.1, own `addons_dir=`; the list fetched by itself in Fort Hope (bad signature refused),
 Refresh, damaged/truncated downloads refused, the Add-ons table (installed first, A-Z / Z-A, time installed both ways,
 filter, search; row order through `overlay locate`), Add outfit in Fort Hope mounted at once and worn through the
-row's Wear (the customization screen, Esc twice: view back on the hero), weapon look in a mission (Use / Stop), a
+row's Wear (at once, the window stays open, saved; Take off; also in a mission), weapon look in a mission (Use / Stop), a
 replacement of a loaded asset after restart, Remove at the next start, an Update loaded at once / one in use at the
-next start, Turn on at once, Add + Wear as a client (host with the add-on sees it, a client without sees the
-survivor), a host with `addons_policy=none` keeps the client's Add for the next start; ~65 checks, ~12 min;
+next start, Wear over a `/model` wish kept after a restart, host Wear swap between two outfits + Take off, Add + Wear
+as a client (host with the add-on sees it, a client without sees the survivor), a host with `addons_policy=none` keeps the client's Add for the next start; ~75 checks, ~12 min;
 `B4B_LANE=2 B4B_STEAM=flatpak B4B_GPU=4090 tools/shop-test.py [--no-lock]`; test paks in
 `~/.local/share/b4b-coop/shop-test/src/`, never committed).
 **Launch choice co-op / Online (#47): `tools/online-test.py`** (live, test instance 1 on its own prefix and ini, never

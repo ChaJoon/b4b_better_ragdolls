@@ -15,7 +15,7 @@ shop's rows of today's Add-ons tab.
   **Refresh** (until 2026-10-13 only on a click); shown with thumbnail, name and size (author, license, description as
   a tooltip), search, filter (All / Installed / Available) and sort. **Add** downloads the pak, checks size + SHA-256 against the signed list,
   puts it into `b4bcoop-addons\<id>.pak`, appends it to `addonlist.txt` and mounts it **right away** when that is
-  safe; the row then offers **Wear** (the customization screen with the outfit on) / **Use**. **Remove** (any add-on)
+  safe; the row then offers **Wear** (the outfit on your survivor at once, saved for it) / **Use**. **Remove** (any add-on)
   switches it off and deletes it at the next start. **Update** (newer file in the list) is swapped in at the next
   start, and loaded at once when nothing of the old version is in memory. `shop=0`: no list, no downloads (the tab
   shows the installed add-ons).

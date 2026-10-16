@@ -87,8 +87,8 @@ and examples: [docs/COMMANDS.md](docs/COMMANDS.md#b4bcoopini-options).
   port forwarding (UDP 7777) and triggers the Windows Firewall prompt. Everyone in the game needs it.
 
 **Add-ons** (new outfits, weapon looks, textures): press `~`, tab **Add-ons**. It lists the free add-ons from the
-add-on shop and the ones you have: **Add** downloads one (most are ready at once), **Wear** puts on an outfit (in
-Fort Hope it opens the game's customization screen), **Use** / **Stop** a weapon look, **Update**, **Remove**. Or put
+add-on shop and the ones you have: **Add** downloads one (most are ready at once), **Wear** / **Take off** an outfit
+(on your survivor at once, kept for that survivor), **Use** / **Stop** a weapon look, **Update**, **Remove**. Or put
 an add-on's `.pak` file in a `b4bcoop-addons` folder next to `Back4Blood.exe` and restart the game. Only you see your
 add-ons, and nobody learns which ones you have; friends with the same add-on see your outfit, the others your normal
 survivor. By default hosts let in players with any add-ons; a host can allow cosmetic ones only, or none
@@ -182,7 +182,7 @@ Making your own add-ons: see the modkit ([modkit/README.md](modkit/README.md), `
 
 **Add-ons**
 - One **Add-ons** tab in the `~` window: the free add-ons of the signed add-on shop and the ones you have, in one
-  list. **Add** (most are ready at once, no restart), **Wear** (an outfit, on the game's customization screen),
+  list. **Add** (most are ready at once, no restart), **Wear** (an outfit, at once, kept for that survivor),
   **Use** (a weapon look), **Update**, **Remove**; search, filter and sort. The shop's list loads by itself when you
   reach Fort Hope.
 - Or drop `.pak` add-ons into `b4bcoop-addons`: textures, custom outfits and weapon looks (up to 512 add-ons and 512

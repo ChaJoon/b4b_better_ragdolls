@@ -83,8 +83,8 @@ command has a control (checklist below); the chat commands stay.
 | `/addons [list]`, `/addons info <#>` (anyone) | Add-ons: a row per add-on in the folder (name, size, installed / off / loads at restart / can't load); details as a tooltip on the name; chat only (Dan, 2026-10-13: no details view, no conflicts list): `/addons info`, `/addons` |
 | `/addons on\|off <#>` (anyone) | Add-ons: **Turn on** on a row that is off (runs `/addons on <file>`); **Remove** (any add-on: off now, deleted at the next start, `.shop\pending.txt`) + **Undo**; chat only: `/addons off` (no on/off toggle, no load order in the window: Dan, 2026-10-13) |
 | `/addons policy` (host) | Add-ons > Host rules (bottom): "Who may join with add-ons" combo (`addons_policy`, saved + live via `addons_live`); greyed on a client. (`/addons players` and the players' table are gone since #35: add-ons stay private) |
-| `/model`, `/model list [<survivor>\|npc\|outfits\|weapons]` (anyone) | chat only since 2026-10-13 (the Wear lists were dropped: Dan wants outfits worn from the game's customization screen) |
-| `/model <name>`, `/model reset` (anyone) | Add-ons rows: an add-on outfit's **Wear** (the customization screen with it on, `models_open_screen`), a weapon look's **Use** (`/model <name>`) / **Stop** (`wlooks_reset_code`); other survivors' outfits and NPC bodies: chat only |
+| `/model`, `/model list [<survivor>\|npc\|outfits\|weapons]` (anyone) | chat only since 2026-10-13 (the Wear lists were dropped: add-on outfits are worn with a row's **Wear** or the game's customization screen) |
+| `/model <name>`, `/model reset` (anyone) | Add-ons rows: an add-on outfit's **Wear** / **Take off** (`models_wear`: the survivor's saved choice, as the customization screen makes it), a weapon look's **Use** (`/model <name>`) / **Stop** (`wlooks_reset_code`); other survivors' outfits and NPC bodies: chat only |
 | `/model <player> <name>\|reset` (host) | chat only since 2026-10-13 |
 | `/models [on\|off]` (host) | Add-ons > Host rules: "Model swaps allowed" checkbox (client: greyed, shows the host's last announced state; `/models` for the state) |
 | add-on shop (no chat command; ini `shop`) | Add-ons (`shop=0`: installed rows only): the list fetched by itself on the first arrival in Fort Hope, Refresh, thumbnails, Add (progress bar), Update, Undo, search, filter All / Installed / Available, sort name / installed on, both ways |
@@ -154,17 +154,37 @@ space". Now one **Add-ons** tab (order 60), one table:
   height, 3 log lines)`: overlay.cpp `track_size` switches the window to it when the tab is shown and back to the
   usual size for the other tabs, keeping the player's resizing per side; the log under the tabs is 3 lines on this
   tab, 6 elsewhere).
-- **Wear** (an add-on outfit): `models_open_screen(name)` (models.c, both builds; was dev `mdl cs open`):
-  `EnterCharacterCustomization(player state)` on Fort Hope's `CharacterCustomizationManager`, `OpenScreen
-  CharacterCustomization 0` (a GameInstance exec), `SetCharacter(current hero row)`, then `EquipCustomization(Outfit,
-  b4bcoop.outfit.<name>)` so the mannequin wears it; the overlay closes. The game's Back (Esc) goes to its Cleaners menu,
-  a second Back to Fort Hope; the screen's own close stores the choice (#33: `<hero> now wears <name> on the
-  customization screen`, profile keeps its look). The usable that normally leads there restores the view; ours doesn't,
-  so `tick_screen` (models_tick, 0.5 s) watches the screen (`UIScreen::IsOpen`) and when it closes calls
-  `ExitCharacterCustomization` and, if the view target is still the screen's camera (`Character_CineCameraActor`),
-  `SetViewTargetWithBlend(pawn)` (without it the camera stayed in the customization tent). Outside Fort Hope (no
-  manager) or with `outfits_screen=0` the button is disabled with "Wear it from the character customization screen in
-  Fort Hope." (resp. the ini reason). Several outfits in one add-on: a Wear per outfit ("Wear <title>").
+- **Wear** / **Take off** (an add-on outfit; 2026-10-16, Dan: "I don't like having to go back to the character's
+  outfit menu every time I click Wear"): `models_wear(name)` (models.c) puts it on the current survivor at once and the
+  window stays open on the tab. It is the customization screen's choice (#33, new-assets.md §11) without the screen:
+  the survivor's line in `b4bcoop-outfits.txt` (`pick_set`), then the game's own re-init of our look from the profile
+  (`ClientInitCustomizationRowForSelectedCharacter` on our player state; runs on our machine, host or client, as
+  `/model reset` does), whose `GetProfileCustomization` answer (`getprof_detour`) is the outfit's row; it leaves with
+  `ServerSelectCustomizationSet` like any look, so host rules apply (`selectset_detour`), others with the add-on see
+  it, and it comes back at every map change and after a restart. The profile is never touched (no equip). A `/model`
+  wish is dropped first (it would put itself back). **Take off** (`models_wear(NULL)`): the line removed, the same
+  re-init, i.e. the profile's own look. One outfit per survivor: Wear on another row replaces the line. The row's
+  Installed cell says `wearing` (`models_wearing`: the current survivor's saved outfit; `wearing (paused)` dim, with a
+  tooltip, while model swaps are off or the host refused it: `models_wear_held`) and the button is **Take off**.
+  Wear is greyed (`models_wear_why_not`) without a survivor ("Works once you have a survivor: in Fort Hope, or in a
+  mission after the character select."), with `outfits_screen=0` (or the profile hooks off), after a host refusal, with
+  model swaps off (Host rules), and as a client when the host's announced add-on policy doesn't allow it
+  (`addons_session_allows_quiet`, no log line per frame); Take off is never greyed where there is a survivor. Works in
+  missions (verified live: Wear / Take off mid-mission as host and client, 3P body and FP arms). Several outfits in one
+  add-on: a Wear per outfit ("Wear <title>"), the cell says which one is worn.
+  Live (2026-10-16, lane 2 / Flatpak Proton, `B4B_GPU=4090`, dev build, `multi.sh 2`, `casual_joe.pak` +
+  `undertaker.pak` via `addons_dir=`): host Doc Wear Casual Joe -> on at once in 3P, window still open, row "wearing" +
+  Take off; Wear The Undertaker -> swapped (one line `doc undertaker`); Take off -> Doc's lab coat, line gone; client
+  Karlee Wear Casual Joe -> host logs `selects ... outfit=b4bcoop.outfit.casual_joe`, shows the mesh; character select
+  in a mission: Wear greyed; in the mission (host Evangelo, client Walker) Wear / Take off at once, 3P body and FP arms;
+  restart -> the client's Karlee still in Casual Joe (host sees it); host `/models off` -> client's look reset, its
+  Take off still enabled; `/models on` -> worn again (the "wearing (paused)" label came after: not seen live). `tools/shop-test.py` **75/75**
+  (/tmp/b4b-shop-20261016-040641), `tools/e2e.py --quick` 14/14 (/tmp/b4b-e2e-l2-20261016-041552).
+  Before (2026-10-13 to 0.9.9): Wear opened the game's customization screen with the outfit on (`models_open_screen`:
+  `EnterCharacterCustomization` on Fort Hope's `CharacterCustomizationManager`, `OpenScreen CharacterCustomization
+  0`, `SetCharacter`, `EquipCustomization(Outfit, b4bcoop.outfit.<name>)`; Esc twice back to Fort Hope, `tick_screen`
+  then left the customization view and put the view back on the hero); Fort Hope only. That path is dev-only now
+  (`mdl cs open [outfit]`, shop-test opens the screen before an Add with it).
 - **Use / Stop** (a weapon look): `/model <name>` / `wlooks_reset_code(code)`; `wlooks_current(code)` tells which.
 - The Wear mode's lists (other survivors' outfits and pieces, NPC bodies, "Change the look of", "Everyone's look") are
   gone; those stay chat commands (`/model`, `/model <player> <name>`). Base-survivor text ("made on mom") is no longer

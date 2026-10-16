@@ -33,7 +33,7 @@ of the window, and also in your chat.
 | **Camera** | Third person on/off, start the game in third person, its key, sliders for distance, side, height and FOV (Ctrl+click a slider to type a number), Swap shoulder, Reset camera, aim correction, free look on/off | `/thirdperson ...`; ini `thirdperson*` |
 | **Flashlight** | Your light (Toggle, On, Off; host: Automatic), its key, sticky mode; **Beam (your view)**: sliders for width, range and brightness, Reset beam | `/flashlight ...`; ini `flashlight_key`, `flashlight_sticky`, `flashlight_width`, `flashlight_range`, `flashlight_brightness` |
 | **Cheats** | Host: **Cheats on**, a player picker (`me`, everyone, a player) for the buttons marked `*`, then every cheat: god, heal, revive, infinite ammo, copper, cards, fly, noclip, walk, teleport, free camera, size, horde, kill all ridden, freeze, director phases, spawn, game speed, win, lose, and your own save's supply points / skull totems / burn cards / unlock all (everyone, while the host has cheats on). Also (host, no cheats needed): **Bots open pinged toolkit doors**, **Bots heal you on request** | every `/cheats` command; ini `bot_toolkit_doors`, `bot_heal_requests` |
-| **Add-ons** | One table of every add-on: the add-on shop's and the ones you have (see [Add-ons](#the--windows-add-ons-tab) below): picture, name and size, installed (version, update available), **Add**, **Update**, **Wear** (an outfit: the customization screen) / **Use** / **Stop** (a weapon look), **Remove**, **Undo**, **Turn on**; a search box, All / Installed / Available, sort by name or by when installed (**A-Z** / **Z-A**, **Newest** / **Oldest**), **Refresh**; **Load add-ons**; **Host rules**: **Model swaps allowed**, who may join with add-ons (`addons_policy`; greyed on a client) | `/addons ...`, `/models on\|off`; ini `addons`, `addons_policy`, `shop` |
+| **Add-ons** | One table of every add-on: the add-on shop's and the ones you have (see [Add-ons](#the--windows-add-ons-tab) below): picture, name and size, installed (version, update available), **Add**, **Update**, **Wear** / **Take off** (an outfit) / **Use** / **Stop** (a weapon look), **Remove**, **Undo**, **Turn on**; a search box, All / Installed / Available, sort by name or by when installed (**A-Z** / **Z-A**, **Newest** / **Oldest**), **Refresh**; **Load add-ons**; **Host rules**: **Model swaps allowed**, who may join with add-ons (`addons_policy`; greyed on a client) | `/addons ...`, `/models on\|off`; ini `addons`, `addons_policy`, `shop` |
 | **Settings** | The window's text size and key, the flashlight, third-person and heal-request keys; **Game start**: ask co-op or online every time, always b4bcoop co-op, always online (see [Co-op or online](#co-op-or-online-at-the-game-start)) | ini `overlay_scale`, `overlay_key`, `flashlight_key`, `thirdperson_key`, `bot_heal_key`, `launch` |
 | **Updates** | Your version; **Check for updates** (the latest release: version, protocol, short notes); **Download and install on next start**; the host's version after a "same version" refusal (**Check** it); **Go back to** the previous version. See [Updates](#updates) | ini `updates` (no chat command) |
 | **Help** | Your version, a box to run any chat command (without the `/`) | `/help` |
@@ -51,9 +51,11 @@ you are in Fort Hope after starting the game; **Refresh** gets it again. Columns
 can do:
 
 - **Add**: downloads it; most add-ons are ready at once, others after a restart ("loads at restart").
-- **Wear** (an outfit): opens your survivor's customization screen with the outfit on; keep it there (any survivor
-  can wear it, and the screen remembers it per survivor). Back (Esc) twice returns to Fort Hope. Outside Fort Hope,
-  wear outfits from the character customization screen there.
+- **Wear** (an outfit): puts it on your survivor right away; the window stays open. Any survivor can wear it, one
+  outfit per survivor (**Wear** on another one swaps), and it stays on that survivor (next maps, after a restart),
+  just like picking it in the game's customization screen. The row then says "wearing"; **Take off** brings back the
+  survivor's own outfit. Works in Fort Hope and in a mission (after the character select), also in someone else's
+  session if its host allows add-ons; "wearing (paused)": model swaps are off (or the host refused it) right now.
 - **Use** / **Stop** (a weapon look): your weapon of that type shows it (also every one you pick up later) / your own
   skin again.
 - **Update**: the shop has a newer file.
@@ -181,8 +183,8 @@ Join Game, it keeps trying for 3 minutes if the host doesn't answer yet (for exa
 - Joining by IP address (`/join 1.2.3.4`) works only with `host_ip=1` (advanced, see below). Without it the reply
   is `Joining by IP address is off. Join through Steam instead: ...`.
 
-**`/model`**: for add-on outfits and weapon looks the `~` window is easier (**Add-ons** tab: **Wear** opens the
-game's customization screen with the outfit on, **Use** / **Stop** for a weapon look). The rest is chat only: wear
+**`/model`**: for add-on outfits and weapon looks the `~` window is easier (**Add-ons** tab: **Wear** / **Take
+off** for an outfit, **Use** / **Stop** for a weapon look). The rest is chat only: wear
 another survivor's outfit (`/model walker_elite_07`), a whole survivor's look (`/model holly`), single pieces
 (`/model holly_head_03`), a Fort Hope NPC (`/model vanessa`) or an outfit one of your add-ons adds
 (`/model list outfits`), or put an add-on's model on your weapon (`/model list weapons`, e.g. `/model ak47` for your
@@ -408,7 +410,7 @@ mostly ready at once ([Add-ons from the shop](#add-ons-from-the-shop)). Add-ons 
 don't need them and don't see them. If you have a survivor skin add-on, you see it on every survivor wearing that
 outfit; players without it see the normal outfit.
 Some add-ons **add** outfits instead of replacing one: they are in the game's customization screen for every survivor
-(**Wear** in the Add-ons tab opens it; kept for that survivor, your profile keeps its previous outfit), and
+(or **Wear** in the Add-ons tab; kept for that survivor, your profile keeps its previous outfit), and
 `/model list outfits` lists them, `/model <name>` puts one on for the session; players with the same add-on see it on
 you, the others your survivor. A host with `addons_policy=none` refuses them.
 
@@ -508,9 +510,9 @@ add-ons you have.
    damaged or changed file is deleted: "Nothing was changed"), and puts it into your add-ons folder as `<name>.pak`,
    switched on.
    - **New looks** (added outfits, weapon looks) are ready at once, in Fort Hope, in the middle of a mission and in
-     someone else's session: an outfit's **Wear** opens the game's customization screen with it on (in Fort Hope; it
-     is there for every survivor, also if you opened the screen before), a weapon look's **Use** puts it on your
-     weapon; `/model <name>` works too. Players with the same add-on see it on you, the others your survivor.
+     someone else's session: an outfit's **Wear** puts it on your survivor (it is also in the game's
+     customization screen for every survivor, also if you opened the screen before), a weapon look's **Use** puts it
+     on your weapon; `/model <name>` works too. Players with the same add-on see it on you, the others your survivor.
    - **Replacements** (an add-on that changes something of the game, e.g. a survivor's textures) are ready at once too
      when the game isn't using what they replace right now; otherwise the row says "loads at restart" (hover for why)
      and it loads the next time the game starts.
@@ -739,7 +741,7 @@ join=steam:7656119XXXXXXXXXX
 | `steam_p2p` | `1` | `0`: no joins through Steam at all (then only `host_ip=1` joins work) |
 | `bot_toolkit_doors` | `1` | Host (`~` Cheats tab, works without cheats): when anyone pings a locked supply-stash door (the ones that need a toolkit), the nearest bot carrying a toolkit (up to 40 m away) goes and opens it, also when the ping hit a teammate in front of the door. `0`: bots answer such pings only as in the original game (only from close by, and only a clean ping on the door) |
 | `bot_heal_requests` | `0` | Host (`~` Cheats tab, works without cheats): `1` = a player's heal key sends the nearest bot with a healing item to heal them. `0`: the game's own healing only; a client's request gets `The host has heal requests off.`, the host's own key says how to turn it on |
-| `outfits_screen` | `1` | `0`: add-on outfits are not offered in the game's customization screen (only `/model`); restart to apply |
+| `outfits_screen` | `1` | `0`: add-on outfits are not offered in the game's customization screen and the Add-ons tab's **Wear** is off (only `/model`); restart to apply |
 | `presence_addr` | your LAN address | With `host_ip=1`: the address friends' **Join Game** connects to, e.g. `presence_addr=203.0.113.5:7777` (your public IP) |
 | `netguard_eos` | `1` | `0`: don't switch off the Epic Online Services network layer (troubleshooting only) |
 | `netguard_allow` | none | With `netguard=block`: host names to let through anyway, comma-separated, `*.example.com` for a whole domain (troubleshooting only) |
