@@ -146,6 +146,7 @@ typedef struct {
     UObject *mesh, *rc;                    // its mesh and RagdollComponent (the settle check's `this`)
     const struct BodyList *bodies;         // its physics bodies' bone names (settle test), NULL = root body only
     float last_v;                          // fastest body at the last settle check, cm/s
+    uint8_t spared;                        // times the corpse budget's delete was skipped for it
     FName prof;
     float rel_loc[3], rel_rot[3];
 } Tracked;
@@ -861,7 +862,7 @@ static void undo(Tracked *t) {
     if (cap && call_prep(&k, cap, "SetCollisionEnabled")) { SET(&k, "NewType", uint8_t, t->cap_coll); call_go(&k); }
     n_revived++;
     LOG("ragdoll: WARNING %s came back alive after its ragdoll (the game reuses Ridden actors): physics undone", oname(t->a, a, sizeof a));
-    t->ragdolled = 0; t->done = 0; t->died_at = 0; t->rest = 0; t->released = 0; t->checks = 0;
+    t->ragdolled = 0; t->done = 0; t->died_at = 0; t->rest = 0; t->released = 0; t->checks = 0; t->spared = 0;
 }
 
 // ---- settle hold: the game swaps a ragdoll for its stand-in only once the body is at rest ----
@@ -973,6 +974,56 @@ static void settle_detour(UObject *rc) {   // game thread: timers run inside the
     orig_settle(rc);
 }
 
+// ---- corpse budget: the game's UCorpseManager may not delete a body the settle hold still holds ----
+// From the second code dump (ragdoll-findings.md, "Corpse budget"): UCorpseManager::RegisterCorpse (0x14142FAA0)
+// appends each dead Ridden to a list (+0x38, 20-byte entries: weak pointer, registered at, last hit at, flag) and binds
+// its OnCorpseHit / OnCorpseDestroyed. Every frame its tick (0x1414306E0, an engine "tickable") removes entries past
+// both time limits and then, while the list is longer than the maximum (game settings, per quality level), the
+// entries at its front (not by age: removals swap the last entry in). Both go through 0x141430490 (unbind the two
+// delegates, then AActor::Destroy), and both drop the entry from the list whatever that function does. A body the
+// hold keeps alive longer counts against that maximum for longer, so hordes lost falling bodies (build 9: 30 of 164).
+// The hook skips the destroy for bodies still held: the manager's list loses them as usual (its budget stays right
+// for the rest), and the game's own swap and 1 s delete end them once they are at rest. Their two delegates stay
+// bound; the handlers look the body up in the list, where it no longer is (not seen in code: logged if it comes back).
+#define ADDR_CORPSE_DESTROY VA(0x141430490ull)
+static const uint8_t SIG_CORPSE_DESTROY[] = {0x48,0x89,0x5c,0x24,0x08,0x48,0x89,0x74,0x24,0x18,0x55,0x57,0x41,0x54,
+                                             0x41,0x56,0x41,0x57,0x48,0x8b,0xec,0x48,0x83,0xec};
+typedef void (*CorpseDestroyFn)(UObject *manager, UObject *corpse, uint8_t net_force);
+static CorpseDestroyFn orig_corpse_destroy;
+static int corpse_state, n_spared, n_spared_again;
+
+static void corpse_destroy_detour(UObject *manager, UObject *corpse, uint8_t net_force) {   // game thread (its tick)
+    Tracked *x = NULL;
+    for (int i = 0; corpse && i < ntr; i++) if (tr[i].a == corpse) { x = &tr[i]; break; }
+    if (x && x->ragdolled && !x->released) {
+        char a[160];
+        if (x->spared++) n_spared_again++;   // its entry should be gone after the first time: the game re-added it
+        n_spared++;
+        if (n_spared <= 40 || x->spared > 1)
+            LOG("ragdoll budget: spared %s from the corpse budget %.1f s after death (fastest %.0f cm/s at the last check)%s",
+                oname(corpse, a, sizeof a), now_s() - x->died_at, x->last_v, x->spared > 1 ? ", AGAIN: re-registered" : "");
+        return;
+    }
+    orig_corpse_destroy(manager, corpse, net_force);
+}
+
+static void corpse_arm(void) {
+    if (corpse_state) return;
+    if (memcmp((void *)ADDR_CORPSE_DESTROY, SIG_CORPSE_DESTROY, sizeof SIG_CORPSE_DESTROY)) {
+        corpse_state = -1;
+        LOG("ragdoll budget: signature mismatch at the corpse manager's delete: falling bodies can still be deleted");
+        return;
+    }
+    if (MH_CreateHook((void *)ADDR_CORPSE_DESTROY, (void *)corpse_destroy_detour, (void **)&orig_corpse_destroy) != MH_OK ||
+        MH_EnableHook((void *)ADDR_CORPSE_DESTROY) != MH_OK) {
+        corpse_state = -1;
+        LOG("ragdoll budget: hook failed: falling bodies can still be deleted");
+        return;
+    }
+    corpse_state = 1;
+    LOG("ragdoll budget: hooked; the corpse manager no longer deletes bodies the settle hold holds");
+}
+
 static void settle_arm(void) {   // game thread, at /ragdoll on; the hook stays (it only acts on bodies we ragdolled)
     if (settle_state) return;
     if (memcmp((void *)ADDR_SETTLE_CHECK, SIG_SETTLE, sizeof SIG_SETTLE)) {
@@ -987,8 +1038,9 @@ static void settle_arm(void) {   // game thread, at /ragdoll on; the hook stays 
         return;
     }
     settle_state = 1;
-    LOG("ragdoll settle: hooked; at rest = root body under %.0f cm/s or all asleep for %d checks, cap %.0f s",
+    LOG("ragdoll settle: hooked; at rest = every body under %.0f cm/s or all asleep for %d checks, cap %.0f s",
         SETTLE_SPEED, SETTLE_CHECKS, SETTLE_CAP);
+    corpse_arm();   // only with the hold: without it bodies leave the budget the game's way
 }
 
 void ragdoll_tick(float dt) {
@@ -1040,11 +1092,13 @@ void ragdoll_slash(char *rest, Out *o) {
         int released = n_at_rest + n_capped;
         out_printf(o, "/ragdoll: %s%s, %d Ridden tracked, %d deaths seen, %d ragdolled, %d failed, %d came back; "
                       "settle hold %s: %d held, %d at rest + %d at the %.0f s cap (avg %.1f s, max %.1f s after death), "
-                      "%d deleted while held; %ld stacks logged%s%s\n",
+                      "%d deleted while held; corpse budget %s: %d spared (%d again); %ld stacks logged%s%s\n",
                    mode_on ? "on" : "off", mode_on && delay_s > 0 ? " (after the game's animation)" : "", ntr, n_deaths,
                    n_applied, n_failed, n_revived,
                    settle_state == 1 ? "on" : settle_state ? "OFF (see log)" : "not armed yet", n_held, n_at_rest, n_capped,
-                   SETTLE_CAP, released ? settle_sum / released : 0.0, settle_max, n_held_gone, stack_id,
+                   SETTLE_CAP, released ? settle_sum / released : 0.0, settle_max, n_held_gone,
+                   corpse_state == 1 ? "hook on" : corpse_state ? "hook OFF (see log)" : "not armed yet", n_spared,
+                   n_spared_again, stack_id,
                    tracing ? ", tracing" : "", n_overflow ? ", tracking list full" : "");
     } else if (!strcmp(verb, "on")) {
         float d = arg ? (float)atof(arg) : 0.f;
