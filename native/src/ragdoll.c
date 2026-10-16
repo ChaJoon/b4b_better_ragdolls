@@ -792,20 +792,30 @@ static void bag_arm(void) {   // game thread, at /ragdoll on; the hook stays (it
 }
 
 // A spared blood bag may have been hidden by the explosion code before its destroy: shown again before the ragdoll.
+// Build 26: only what is actually hidden, and never its children. Builds 21-25 unhid the mesh with
+// bPropagateToChildren, which also turned on Damage_Capsule (a CapsuleComponent attached to the mesh, hidden in game
+// like every collision shape): the engine then draws its outline, the "dark red/pink spherical arcs" that stuck to
+// spared bodies until the swap (Joon, 16 Oct; they started with build 21). Every log since build 21 says the explosion
+// code never hides the body (actor hidden 0, mesh visible 1), so normally nothing is changed here at all.
+static int comp_hidden_in_game(UObject *c) {
+    FField *f = c ? ue_find_prop(U_CLASS(c), "bHiddenInGame") : NULL;
+    return f ? bool_at(f, (const uint8_t *)c) : -1;
+}
+
 static void bag_unhide(Tracked *t, UObject *mesh) {
     char a[160];
     Call k;
-    int vis = call_bool(mesh, "IsVisible");
+    int vis = call_bool(mesh, "IsVisible"), mhid = comp_hidden_in_game(mesh);
     int32_t ho = ue_prop_offset(t->a, "bHidden");
     FField *hf = ho >= 0 ? ue_find_prop(U_CLASS(t->a), "bHidden") : NULL;
     int hidden = hf ? bool_at(hf, (const uint8_t *)t->a) : -1;
-    if (call_prep(&k, t->a, "SetActorHiddenInGame")) { SET(&k, "bNewHidden", uint8_t, 0); call_go(&k); }
-    if (call_prep(&k, mesh, "SetHiddenInGame")) { SET(&k, "NewHidden", uint8_t, 0); SET(&k, "bPropagateToChildren", uint8_t, 1); call_go(&k); }
-    if (call_prep(&k, mesh, "SetVisibility")) { SET(&k, "bNewVisibility", uint8_t, 1); SET(&k, "bPropagateToChildren", uint8_t, 1); call_go(&k); }
+    if (hidden == 1 && call_prep(&k, t->a, "SetActorHiddenInGame")) { SET(&k, "bNewHidden", uint8_t, 0); call_go(&k); }
+    if (mhid == 1 && call_prep(&k, mesh, "SetHiddenInGame")) { SET(&k, "NewHidden", uint8_t, 0); SET(&k, "bPropagateToChildren", uint8_t, 0); call_go(&k); }
+    if (vis == 0 && call_prep(&k, mesh, "SetVisibility")) { SET(&k, "bNewVisibility", uint8_t, 1); SET(&k, "bPropagateToChildren", uint8_t, 0); call_go(&k); }
     if (bag_logs < 40) {
         bag_logs++;
-        LOG("ragdoll bloodbag: %s spared: actor hidden %d, mesh visible %d -> %d (shown before the ragdoll)", oname(t->a, a, sizeof a),
-            hidden, vis, call_bool(mesh, "IsVisible"));
+        LOG("ragdoll bloodbag: %s spared: actor hidden %d, mesh hidden in game %d, mesh visible %d -> %d%s", oname(t->a, a, sizeof a),
+            hidden, mhid, vis, call_bool(mesh, "IsVisible"), hidden == 1 || mhid == 1 || vis == 0 ? " (shown before the ragdoll)" : " (nothing to show)");
     }
 }
 
@@ -937,8 +947,8 @@ static void fx_probe(Tracked *t, double dt) {   // game thread
             UObject *x = ((UObject **)ch->data)[i];
             if (!x) continue;
             UObject *own = COMP_OWNER(x);
-            LOG("ragdoll fxprobe %s:   child %s (%s), owner %s, visible %d", who, oname(x, a, sizeof a), cname(x, b, sizeof b),
-                oname(own, c, sizeof c), call_bool(x, "IsVisible"));
+            LOG("ragdoll fxprobe %s:   child %s (%s), owner %s, visible %d, hidden in game %d", who, oname(x, a, sizeof a),
+                cname(x, b, sizeof b), oname(own, c, sizeof c), call_bool(x, "IsVisible"), comp_hidden_in_game(x));
         }
     }
     // materials: a dynamic one, or a swapped one, with its parameters
