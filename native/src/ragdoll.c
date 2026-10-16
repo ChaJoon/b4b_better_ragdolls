@@ -10,7 +10,7 @@
 //                            first (default 0 = physics at once)
 //   /ragdoll off
 //   /ragdoll mass [x]        every body's mass x the scale (0.1-10, default 1), for bodies that die from now on
-//   /ragdoll gravity [x]     gravity on our ragdolls x the scale (0-5, default 1), at once, bodies in flight included
+//   /ragdoll gravity [x]     gravity on our ragdolls x the scale (0-5, default 2.5), at once, bodies in flight included
 //   /ragdoll deadline [s]    every ragdoll still there s seconds after death is removed (12-120, default 15)
 //   /ragdoll probe           the nearest living Ridden: its mesh, physics asset, collision, and the death-related
 //                            functions/properties of its classes, into the log (discovery)
@@ -175,7 +175,8 @@ static int n_body_lists;
 // difference is added as a force every frame: AddForceToAllBodiesBelow from the root body (BoneName None) down,
 // (scale - 1) x the world's gravity, as an acceleration (bAccelChange: mass has no effect, like gravity itself). Only
 // while the settle hold holds the body; the game swaps it for its frozen stand-in within ~1 s of the release.
-static float mass_scale = 1.f, grav_scale = 1.f;
+#define GRAV_DEFAULT 2.5f   // Joon's pick from the build 12 runs (16 Oct): heavier, punchier falls than the world's 1x
+static float mass_scale = 1.f, grav_scale = GRAV_DEFAULT;
 static float world_gz;   // the world's gravity, cm/s^2, read once per map; 0 = not read yet
 static int n_grav_fail;
 
@@ -1266,7 +1267,7 @@ void ragdoll_slash(char *rest, Out *o) {
             grav_scale = g < 0.f ? 0.f : g > 5.f ? 5.f : g;
             LOG("ragdoll tune: gravity x%.2f", grav_scale);
         }
-        out_printf(o, "/ragdoll gravity: x%.2f (0-5, default 1) on ragdolls still falling, from now on%s\n", grav_scale,
+        out_printf(o, "/ragdoll gravity: x%.2f (0-5, default %.1f) on ragdolls still falling, from now on%s\n", grav_scale, GRAV_DEFAULT,
                    n_grav_fail ? "; NO EFFECT in this game (see log)" : "");
     } else if (!strcmp(verb, "deadline")) {
         if (arg) {
