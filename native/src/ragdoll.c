@@ -13,11 +13,15 @@
 //   /ragdoll gravity [x]     gravity on our ragdolls x the scale (0-5, default 2.5), at once, bodies in flight included
 //   /ragdoll deadline [s]    every ragdoll still there s seconds after death is removed (12-120, default 15)
 //   /ragdoll probe           the nearest living Ridden: its mesh, physics asset, collision, and the death-related
-//                            functions/properties of its classes, into the log (discovery)
+//                            functions/properties of its classes, into the log (discovery). Also (step 2 discovery):
+//                            every setting that could push a body (mesh, movement, actor), all its components (hit,
+//                            reaction and physics ones in full), and every loaded damage type's impulse settings
 //   /ragdoll trace [secs]    log the game's function calls on Ridden (default 30 s): every new class.function once,
 //                            plus each death's calls just before and after it (discovery: how the game kills a Ridden).
 //                            Also logs native call stacks ("ragdoll stack" lines) of the corpse swap (the stand-in's
-//                            construction) and of the deletion (UnPossessed / EndPlay / Destroyed on a dead Ridden)
+//                            construction) and of the deletion (UnPossessed / EndPlay / Destroyed on a dead Ridden).
+//                            Calls named like hit/damage/impact/... are logged with their parameters ("ragdoll hit"
+//                            on Ridden and corpses, "ragdoll hit-other" elsewhere: weapons, heroes, projectiles)
 //
 // Detection: an incremental scan of the object array finds living Ridden (GobiCharacters that aren't heroes; see
 // cheats.c cmd_killall), then their LifeStateComponent's IsAlive is polled each tick. Bosses are left alone.
@@ -55,10 +59,10 @@ static double now_s(void) {
 }
 
 static UClass *cls(const char *name) {
-    static struct { const char *name; UClass *c; } cache[16];
-    for (int i = 0; i < 16 && cache[i].name; i++) if (!strcmp(cache[i].name, name)) return cache[i].c;
+    static struct { const char *name; UClass *c; } cache[32];
+    for (int i = 0; i < 32 && cache[i].name; i++) if (!strcmp(cache[i].name, name)) return cache[i].c;
     UClass *c = ue_find_class(name);
-    for (int i = 0; i < 16 && c; i++) if (!cache[i].name) { cache[i].name = name; cache[i].c = c; break; }
+    for (int i = 0; i < 32 && c; i++) if (!cache[i].name) { cache[i].name = name; cache[i].c = c; break; }
     return c;
 }
 
@@ -221,9 +225,20 @@ static int hook_made;
 static volatile LONG tracing;
 static double trace_t0, trace_end;
 static CRITICAL_SECTION tcs;
-typedef struct { UClass *oc; UFunction *fn; } Pair;
+typedef struct { UClass *oc; UFunction *fn; int dumps; } Pair;
 static Pair pairs[4096];
 static int npairs, n_calls;
+// Hit discovery: calls whose name says hit/damage/impact... are logged with their parameters ("ragdoll hit" on a
+// Ridden or corpse, "ragdoll hit-other" on anything else: the weapon, the hero, a projectile, the game state).
+static const char *const HIT_KEYS[] = {"damage", "hit", "impact", "impulse", "react", "shot", "explo", "radial",
+                                       "bullet", "projectile", "wound", "dismember", "gib", "stagger", "knock",
+                                       "flinch", "force", "momentum", NULL};
+#define HIT_LINES        400   // per trace, on Ridden / corpses
+#define HIT_PER_FN       40    // per class.function (a calm test: 5 Ridden, a few shots each, killing hits included)
+#define OTHER_LINES      200   // per trace, everything else
+#define OTHER_PER_FN     6
+static Pair other_pairs[1024];
+static int n_other_pairs, n_hit_lines, n_other_lines;
 typedef struct { double t; UObject *actor; UClass *oc; UFunction *fn; } RingE;
 static RingE ring[512];
 static int ring_at;
@@ -453,6 +468,97 @@ static void stacks_arm(void) {   // game thread, from trace_start
 
 static void stacks_disarm(void) { if (sco_state == 1) MH_DisableHook((void *)ADDR_SCO); }
 
+// ---- hit discovery (build 14): does the game push bodies when it hits them, and what does a hit carry? ----
+// Values of any reflected property, for function parameters (trace) and settings (probe). Layouts after FProperty
+// (0x78 here, as tools/sdkdump.py reads subtypes at 0x78): StructProperty / ObjectProperty: UScriptStruct / class at
+// 0x78; BoolProperty (stock 4.25 order): FieldSize 0x78, ByteOffset 0x79, ByteMask 0x7A, FieldMask 0x7B. A bool whose
+// bytes don't look like that is printed raw with them, so a wrong guess shows in the log instead of a wrong value.
+#define FP_SUB(f)       (*(UObject **)((char *)(f) + 0x78))
+#define FBP_SIZE(f)     (*((uint8_t *)(f) + 0x78))
+#define FBP_BYTEOFF(f)  (*((uint8_t *)(f) + 0x79))
+#define FBP_MASK(f)     (*((uint8_t *)(f) + 0x7B))
+#define CPF_PARM_       0x80ull
+#define CPF_OUTPARM_    0x100ull
+#define CPF_RETURNPARM_ 0x400ull
+#define CPF_CONSTPARM_  0x2ull
+static int name_has(const char *s, const char *const *keys);
+
+static int bool_at(FField *p, const uint8_t *container) {   // -1: not a layout we know
+    if (FBP_SIZE(p) != 1 || !FBP_MASK(p)) return -1;
+    return (container[FP_OFFSET(p) + FBP_BYTEOFF(p)] & FBP_MASK(p)) != 0;
+}
+
+static void fmt_prop(FField *p, const uint8_t *container, char *out, size_t n, int depth) {
+    char t[64], b[128];
+    ue_name(*(FName *)FF_CLASS(p), t, sizeof t);
+    const uint8_t *a = container + FP_OFFSET(p);
+    out[0] = 0;
+    if (!strcmp(t, "BoolProperty")) {
+        int v = bool_at(p, container);
+        if (v >= 0) snprintf(out, n, "%d", v);
+        else snprintf(out, n, "byte %u (bool bytes %u/%u/%u?)", *a, FBP_SIZE(p), FBP_BYTEOFF(p), FBP_MASK(p));
+    } else if (!strcmp(t, "FloatProperty")) snprintf(out, n, "%g", *(const float *)a);
+    else if (!strcmp(t, "DoubleProperty")) snprintf(out, n, "%g", *(const double *)a);
+    else if (!strcmp(t, "IntProperty")) snprintf(out, n, "%d", *(const int32_t *)a);
+    else if (!strcmp(t, "Int64Property")) snprintf(out, n, "%lld", (long long)*(const int64_t *)a);
+    else if (!strcmp(t, "ByteProperty") || !strcmp(t, "EnumProperty")) snprintf(out, n, "%u", *a);
+    else if (!strcmp(t, "NameProperty")) snprintf(out, n, "%s", ue_name(*(const FName *)a, b, sizeof b));
+    else if (!strcmp(t, "ObjectProperty") || !strcmp(t, "ClassProperty")) {
+        UObject *o = *(UObject *const *)a;
+        if (!o) snprintf(out, n, "None");
+        else { char c[96]; snprintf(out, n, "%s (%s)", ue_obj_name(o, b, sizeof b), cname(o, c, sizeof c)); }
+    } else if (!strcmp(t, "WeakObjectProperty")) {
+        UObject *o = ue_weak_get(a);
+        snprintf(out, n, "%s", o ? ue_obj_name(o, b, sizeof b) : "None");
+    } else if (!strcmp(t, "StrProperty")) {
+        const FString *s = (const FString *)a;
+        size_t k = 0;
+        for (int i = 0; s->data && i < s->num && s->data[i] && k + 2 < n && k < 80; i++)
+            out[k++] = (s->data[i] >= 32 && s->data[i] < 127) ? (char)s->data[i] : '?';
+        out[k] = 0;
+    } else if (!strcmp(t, "ArrayProperty")) snprintf(out, n, "%d entries", ((const TArray *)a)->num);
+    else if (!strcmp(t, "StructProperty")) {
+        UObject *ss = FP_SUB(p);
+        ue_obj_name(ss, b, sizeof b);
+        // Vector, Vector_NetQuantize*, Rotator: 3 floats. Other structs: their fields, one level deep.
+        if (!strncmp(b, "Vector", 6) && strcmp(b, "Vector2D") && strcmp(b, "Vector4"))
+            snprintf(out, n, "(%.1f %.1f %.1f)", ((const float *)a)[0], ((const float *)a)[1], ((const float *)a)[2]);
+        else if (!strcmp(b, "Rotator"))
+            snprintf(out, n, "(p %.1f y %.1f r %.1f)", ((const float *)a)[0], ((const float *)a)[1], ((const float *)a)[2]);
+        else if (depth <= 0) snprintf(out, n, "<%s>", b);
+        else {
+            size_t k = (size_t)snprintf(out, n, "%s{", b);
+            for (UStruct *st = (UStruct *)ss; st && k + 8 < n; st = US_SUPER(st))
+                for (FField *f = US_CHILDPROPS(st); f && k + 8 < n; f = FF_NEXT(f)) {
+                    char fn[64], fv[160];
+                    fmt_prop(f, a, fv, sizeof fv, depth - 1);
+                    k += (size_t)snprintf(out + k, n - k, "%s=%s ", ue_name(FF_NAME(f), fn, sizeof fn), fv);
+                }
+            if (k + 2 < n) { if (out[k - 1] == ' ') k--; out[k++] = '}'; out[k] = 0; }
+        }
+    } else snprintf(out, n, "<%s>", t);
+}
+
+// One line per call: every input parameter with its value. Out parameters aren't filled in yet when the call starts
+// (and may hold garbage pointers), so only their names are listed.
+static void log_params(const char *tag, double t, UObject *actor, UObject *o, UFunction *fn, const uint8_t *params) {
+    char line[3072], ab[128], cb[128], fb[128], pn[64], pv[1024];
+    size_t k = (size_t)snprintf(line, sizeof line, "ragdoll %s +%.3fs %s %s.%s:", tag, t, actor ? ue_obj_name(actor, ab, sizeof ab) : "-",
+                                cname(o, cb, sizeof cb), ue_obj_name(fn, fb, sizeof fb));
+    for (FField *p = US_CHILDPROPS(fn); p && k + 16 < sizeof line; p = FF_NEXT(p)) {
+        uint64_t fl = FP_FLAGS(p);
+        if (!(fl & CPF_PARM_) || (fl & CPF_RETURNPARM_)) continue;
+        ue_name(FF_NAME(p), pn, sizeof pn);
+        // const T& inputs (e.g. a const FHitResult&) carry OutParm + ConstParm and are real inputs; other out
+        // parameters (pure outs, non-const refs) are results, not filled in yet: name only.
+        if ((fl & CPF_OUTPARM_) && !(fl & CPF_CONSTPARM_)) { k += (size_t)snprintf(line + k, sizeof line - k, " %s=(out)", pn); continue; }
+        if (!params) { k += (size_t)snprintf(line + k, sizeof line - k, " %s=?", pn); continue; }
+        fmt_prop(p, params, pv, sizeof pv, 1);
+        k += (size_t)snprintf(line + k, sizeof line - k, " %s=%s", pn, pv);
+    }
+    LOG("%s", line);
+}
+
 static UObject *owner_actor(UObject *o) {
     static UClass *ac, *cc, *ai;
     if (!ac) { ac = cls("Actor"); cc = cls("ActorComponent"); ai = cls("AnimInstance"); }
@@ -468,9 +574,26 @@ static int per_frame(const char *fn) {   // left out of the death sequences (sti
            !strncmp(fn, "BlueprintThreadSafe", 19) || !strncmp(fn, "BlueprintPostEvaluate", 21);
 }
 
+static void trace_other(UObject *o, UObject *actor, UFunction *fn, void *params) {   // not on a Ridden or corpse
+    if (n_other_lines >= OTHER_LINES) return;
+    char fb[128];
+    ue_obj_name(fn, fb, sizeof fb);
+    if (per_frame(fb) || !name_has(fb, HIT_KEYS)) return;
+    UClass *oc = U_CLASS(o);
+    EnterCriticalSection(&tcs);
+    Pair *pr = NULL;
+    for (int i = 0; i < n_other_pairs; i++) if (other_pairs[i].oc == oc && other_pairs[i].fn == fn) { pr = &other_pairs[i]; break; }
+    if (!pr && n_other_pairs < (int)(sizeof other_pairs / sizeof other_pairs[0])) { pr = &other_pairs[n_other_pairs++]; *pr = (Pair){oc, fn, 0}; }
+    if (pr && pr->dumps < OTHER_PER_FN && n_other_lines < OTHER_LINES) {
+        pr->dumps++; n_other_lines++;
+        log_params("hit-other", now_s() - trace_t0, actor, o, fn, params);
+    }
+    LeaveCriticalSection(&tcs);
+}
+
 static void trace_call(UObject *o, UFunction *fn, void *params) {
     UObject *actor = owner_actor(o);
-    if (!actor || !(is_ridden_fast(actor) || (n_corpse_cls && is_corpse(actor)))) return;
+    if (!actor || !(is_ridden_fast(actor) || (n_corpse_cls && is_corpse(actor)))) { trace_other(o, actor, fn, params); return; }
     stack_check(o, actor, fn, params);
     double t = now_s();
     char cb[128], fb[128], ab[128];
@@ -479,12 +602,17 @@ static void trace_call(UObject *o, UFunction *fn, void *params) {
     UClass *oc = U_CLASS(o);
     ring[ring_at] = (RingE){t, actor, oc, fn};
     ring_at = (ring_at + 1) % (int)(sizeof ring / sizeof ring[0]);
-    int seen = 0;
-    for (int i = 0; i < npairs; i++) if (pairs[i].oc == oc && pairs[i].fn == fn) { seen = 1; break; }
-    if (!seen && npairs < (int)(sizeof pairs / sizeof pairs[0])) {
-        pairs[npairs++] = (Pair){oc, fn};
+    Pair *pr = NULL;
+    for (int i = 0; i < npairs; i++) if (pairs[i].oc == oc && pairs[i].fn == fn) { pr = &pairs[i]; break; }
+    if (!pr && npairs < (int)(sizeof pairs / sizeof pairs[0])) {
+        pr = &pairs[npairs++];
+        *pr = (Pair){oc, fn, 0};
         LOG("ragdoll trace +%.2fs new %s.%s (on %s)", t - trace_t0, ue_obj_name(oc, cb, sizeof cb),
             ue_obj_name(fn, fb, sizeof fb), ue_obj_name(actor, ab, sizeof ab));
+    }
+    if (pr && pr->dumps < HIT_PER_FN && n_hit_lines < HIT_LINES) {
+        ue_obj_name(fn, fb, sizeof fb);
+        if (!per_frame(fb) && name_has(fb, HIT_KEYS)) { pr->dumps++; n_hit_lines++; log_params("hit", t - trace_t0, actor, o, fn, params); }
     }
     for (int i = 0; i < 8; i++) {
         Focus *f = &focus[i];
@@ -540,6 +668,7 @@ static int trace_start(double secs, Out *o) {
     }
     EnterCriticalSection(&tcs);
     npairs = n_calls = 0;
+    n_other_pairs = n_hit_lines = n_other_lines = 0;
     memset(ring, 0, sizeof ring);
     memset(focus, 0, sizeof focus);
     trace_t0 = now_s();
@@ -558,7 +687,9 @@ static void trace_stop(const char *why) {
     InterlockedExchange(&tracing, 0);
     MH_DisableHook((void *)ADDR_PROCESSEVENT);
     stacks_disarm();
-    LOG("ragdoll trace: stopped (%s): %d calls on Ridden, %d distinct class.function, %d deaths seen", why, n_calls, npairs, n_deaths);
+    LOG("ragdoll trace: stopped (%s): %d calls on Ridden, %d distinct class.function, %d deaths seen; hit calls logged: %d "
+        "on Ridden/corpses (cap %d), %d elsewhere (cap %d)", why, n_calls, npairs, n_deaths, n_hit_lines, HIT_LINES,
+        n_other_lines, OTHER_LINES);
 }
 
 // ---- probe ----
@@ -584,7 +715,7 @@ static UObject *comp_of(UObject *actor, const char *class_name) {   // AActor::G
 }
 
 static void list_class(UClass *c, int all_funcs, int all_props, const char *what, UObject *inst) {
-    char b[160], t[64], v[48];
+    char b[160], t[64], v[1024];
     LOG("ragdoll probe: %s class chain:", what);
     for (UStruct *s = c; s; s = US_SUPER(s)) {
         LOG("ragdoll probe:   %s", ue_obj_name(s, b, sizeof b));
@@ -604,15 +735,7 @@ static void list_class(UClass *c, int all_funcs, int all_props, const char *what
             if (!all_props && !name_has(b, KEYS)) continue;
             ue_name(*(FName *)FF_CLASS(p), t, sizeof t);
             v[0] = 0;
-            if (inst) {
-                char *a = (char *)inst + FP_OFFSET(p);
-                if (!strcmp(t, "FloatProperty")) snprintf(v, sizeof v, " = %g", *(float *)a);
-                else if (!strcmp(t, "IntProperty")) snprintf(v, sizeof v, " = %d", *(int32_t *)a);
-                else if (!strcmp(t, "ByteProperty") || !strcmp(t, "EnumProperty") || !strcmp(t, "BoolProperty"))
-                    snprintf(v, sizeof v, " = byte %u", *(uint8_t *)a);
-                else if (!strcmp(t, "ObjectProperty")) { char on[96]; snprintf(v, sizeof v, " = %s", oname(*(UObject **)a, on, sizeof on)); }
-                else if (!strcmp(t, "ArrayProperty")) snprintf(v, sizeof v, " = %d entries", ((TArray *)a)->num);
-            }
+            if (inst) { v[0] = ' '; v[1] = '='; v[2] = ' '; fmt_prop(p, (const uint8_t *)inst, v + 3, sizeof v - 3, 1); }
             LOG("ragdoll probe:   prop %s.%s %s @0x%x%s", sn, b, t, FP_OFFSET(p), v);
         }
         if (top) break;
@@ -645,6 +768,97 @@ static void log_mesh(UObject *mesh, const char *tag) {
     if (call_prep(&k, mesh, "GetCollisionEnabled")) { call_go(&k); uint8_t *r = carg(&k, "ReturnValue"); cen = r ? *r : -1; }
     LOG("ragdoll %s:   collision profile %s, collision enabled %d (0 none, 1 query, 2 physics, 3 both), simulating %d, anim %s",
         tag, ue_name(collision_profile(mesh), b, sizeof b), cen, sim, cname(ue_get_ptr(mesh, "AnimScriptInstance"), a, sizeof a));
+}
+
+// Settings that could push a body: every property in o's whole class chain (engine classes included) whose name
+// says impulse/damage/momentum/..., with its value. On the mesh this shows the engine's bApplyImpulseOnDamage.
+static const char *const PUSH_KEYS[] = {"impulse", "damage", "momentum", "knock", "stagger", "force", "push",
+                                        "velocity", "strength", "ragdoll", NULL};
+static void log_push_settings(UObject *o, const char *what) {
+    char sn[128], pn[128], t[64], v[1024];
+    int n = 0;
+    if (!o) return;
+    for (UStruct *s = U_CLASS(o); s; s = US_SUPER(s)) {
+        ue_obj_name(s, sn, sizeof sn);
+        for (FField *p = US_CHILDPROPS(s); p; p = FF_NEXT(p)) {
+            ue_name(FF_NAME(p), pn, sizeof pn);
+            if (!name_has(pn, PUSH_KEYS)) continue;
+            ue_name(*(FName *)FF_CLASS(p), t, sizeof t);
+            if (strstr(t, "Delegate")) continue;   // OnTakeAnyDamage etc.: events, not settings
+            fmt_prop(p, (const uint8_t *)o, v, sizeof v, 1);
+            LOG("ragdoll probe:   %s: %s.%s = %s", what, sn, pn, v);
+            n++;
+        }
+    }
+    if (!n) LOG("ragdoll probe:   %s: no impulse/damage/force settings", what);
+}
+
+// Every component of the actor (class and name); the hit- and physics-related ones are listed in full.
+static void log_components(UObject *actor, UObject *const *done, int n_done) {
+    static const char *const COMP_KEYS[] = {"hit", "react", "impact", "damage", "procedural", "physic", "ragdoll",
+                                            "health", "dismember", "gib", "wound", NULL};
+    UClass *ac = cls("ActorComponent");
+    Call k;
+    if (!ac || !call_prep(&k, actor, "K2_GetComponentsByClass")) { LOG("ragdoll probe: no K2_GetComponentsByClass"); return; }
+    SET(&k, "ComponentClass", UClass *, ac);
+    call_go(&k);
+    TArray *r = carg(&k, "ReturnValue");
+    if (!r || !r->data) { LOG("ragdoll probe: components: none returned"); return; }
+    char a[160], c[160];
+    LOG("ragdoll probe: %d components:", r->num);
+    for (int i = 0; i < r->num && i < 96; i++) {
+        UObject *comp = ((UObject **)r->data)[i];
+        if (!comp) continue;
+        cname(comp, c, sizeof c);
+        LOG("ragdoll probe:   component %s (%s)", oname(comp, a, sizeof a), c);
+    }
+    for (int i = 0; i < r->num && i < 96; i++) {
+        UObject *comp = ((UObject **)r->data)[i];
+        if (!comp) continue;
+        int skip = 0;
+        for (int j = 0; j < n_done; j++) if (done[j] == comp) skip = 1;
+        if (skip || !name_has(cname(comp, c, sizeof c), COMP_KEYS)) continue;
+        snprintf(a, sizeof a, "component %s (everything)", c);
+        list_class(U_CLASS(comp), 1, 1, a, comp);
+    }
+}
+
+// Every damage type class loaded right now (weapons load theirs with them: probe after shooting and throwing
+// things), with the engine's impulse settings from its default object: DamageImpulse (point and radial damage push
+// bodies by this much when the damage goes through the engine and the component allows it), bRadialDamageVelChange,
+// bScaleMomentumByMass, DestructibleImpulse, plus any of the game's own settings with a push-like name.
+static void log_damage_types(void) {
+    UClass *dt = cls("DamageType"), *cc = cls("Class");
+    if (!dt || !cc) { LOG("ragdoll probe: damage types: no DamageType class"); return; }
+    int n = 0, n_push = 0;
+    char b[160], pn[96], t[64], v[256];
+    for (int32_t i = 0; i < ue_num_objects() && n < 200; i++) {
+        UObject *o = ue_object_at(i);
+        if (!o || !ue_is_a(o, cc)) continue;
+        int is_dt = 0;
+        for (UStruct *s = (UStruct *)o; s; s = US_SUPER(s)) if ((UClass *)s == dt) { is_dt = 1; break; }
+        UObject *cdo = is_dt ? UC_CDO(o) : NULL;
+        if (!cdo) continue;
+        n++;
+        char line[1536];
+        size_t k = (size_t)snprintf(line, sizeof line, "ragdoll probe: damage type %s:", ue_obj_name(o, b, sizeof b));
+        int pushes = 0;
+        for (UStruct *s = (UStruct *)o; s && k + 16 < sizeof line; s = US_SUPER(s)) {
+            for (FField *p = US_CHILDPROPS(s); p && k + 16 < sizeof line; p = FF_NEXT(p)) {
+                ue_name(FF_NAME(p), pn, sizeof pn);
+                if (!name_has(pn, PUSH_KEYS) && strcmp(pn, "bScaleMomentumByMass") && strcmp(pn, "bRadialDamageVelChange")) continue;
+                ue_name(*(FName *)FF_CLASS(p), t, sizeof t);
+                if (strstr(t, "Delegate")) continue;
+                fmt_prop(p, (const uint8_t *)cdo, v, sizeof v, 1);
+                if (!strcmp(pn, "DamageImpulse") && atof(v) != 0) pushes = 1;
+                k += (size_t)snprintf(line + k, sizeof line - k, " %s=%s", pn, v);
+            }
+            if ((UClass *)s == dt) break;
+        }
+        n_push += pushes;
+        LOG("%s", line);
+    }
+    LOG("ragdoll probe: %d damage types loaded%s, %d with a DamageImpulse other than 0", n, n >= 200 ? " (first 200)" : "", n_push);
 }
 
 static void cmd_probe(Out *o) {
@@ -683,6 +897,14 @@ static void cmd_probe(Out *o) {
         if (ai) list_class(U_CLASS(ai), 1, 0, "anim instance (all functions)", ai);
     }
     if (cap) LOG("ragdoll probe: capsule %s, collision profile %s", oname(cap, a, sizeof a), ue_name(collision_profile(cap), c, sizeof c));
+    // Hit discovery (build 14): what could push a body, and from where.
+    LOG("ragdoll probe: ---- push settings (build 14) ----");
+    log_push_settings(mesh, "mesh");
+    log_push_settings(ue_get_ptr(best, "CharacterMovement"), "movement");
+    log_push_settings(best, "actor");
+    UObject *done[3] = {dr, hr, rc};
+    log_components(best, done, 3);
+    log_damage_types();
     LOG("ragdoll probe: ---- end ----");
     out_printf(o, "/ragdoll probe: %s, %.0f m away: details in the b4bcoop log\n", cname(best, c, sizeof c),
                have_me ? sqrtf(bd) / 100.f : -1.f);
