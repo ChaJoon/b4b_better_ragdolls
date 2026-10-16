@@ -11,6 +11,7 @@
 //   /ragdoll off
 //   /ragdoll mass [x]        every body's mass x the scale (0.1-10, default 1), for bodies that die from now on
 //   /ragdoll gravity [x]     gravity on our ragdolls x the scale (0-5, default 1), at once, bodies in flight included
+//   /ragdoll deadline [s]    every ragdoll still there s seconds after death is removed (12-120, default 15)
 //   /ragdoll probe           the nearest living Ridden: its mesh, physics asset, collision, and the death-related
 //                            functions/properties of its classes, into the log (discovery)
 //   /ragdoll trace [secs]    log the game's function calls on Ridden (default 30 s): every new class.function once,
@@ -150,6 +151,7 @@ typedef struct {
     float last_v;                          // fastest body at the last settle check, cm/s
     uint8_t spared;                        // times the corpse budget's delete was skipped for it
     uint8_t mass_set;                      // apply() changed its mass scale (undone if the actor comes back)
+    uint8_t ended;                         // removed by the deadline (hidden, physics off, destroy asked)
     FName prof;
     float rel_loc[3], rel_rot[3];
 } Tracked;
@@ -864,6 +866,16 @@ static int apply(Tracked *t) {
     if (!mesh) { LOG("ragdoll: %s has no mesh", oname(t->a, a, sizeof a)); return -1; }
     int detail = detail_left > 0;
     note_corpse_class(t->a);
+    static UClass *kinds[16];   // each kind of Ridden once: its body, and whether the game's corpse path applies to it
+    UClass *kc = U_CLASS(t->a);
+    int k_seen = 0, k_n = 0;
+    for (; k_n < 16 && kinds[k_n]; k_n++) if (kinds[k_n] == kc) k_seen = 1;
+    if (!k_seen && k_n < 16) {
+        kinds[k_n] = kc;
+        UObject *rc0 = ue_get_ptr(t->a, "RagdollComponent");
+        LOG("ragdoll kind: %s, RagdollComponent %s", cname(t->a, c, sizeof c), rc0 ? oname(rc0, a, sizeof a) : "NONE");
+        log_mesh(mesh, "kind");
+    }
     UObject *ai = ue_get_ptr(mesh, "AnimScriptInstance"), *pac = comp_of(t->a, "PhysicalAnimationComponent");
     if (detail) {
         detail_left--;
@@ -938,9 +950,13 @@ static void undo(Tracked *t) {
         }
     }
     if (cap && call_prep(&k, cap, "SetCollisionEnabled")) { SET(&k, "NewType", uint8_t, t->cap_coll); call_go(&k); }
+    if (t->ended) {   // the deadline hid it and its destroy was refused (client): show it again
+        if (call_prep(&k, t->a, "SetActorHiddenInGame")) { SET(&k, "bNewHidden", uint8_t, 0); call_go(&k); }
+        if (call_prep(&k, t->a, "SetActorEnableCollision")) { SET(&k, "bNewActorEnableCollision", uint8_t, 1); call_go(&k); }
+    }
     n_revived++;
     LOG("ragdoll: WARNING %s came back alive after its ragdoll (the game reuses Ridden actors): physics undone", oname(t->a, a, sizeof a));
-    t->ragdolled = 0; t->done = 0; t->died_at = 0; t->rest = 0; t->released = 0; t->checks = 0; t->spared = 0;
+    t->ragdolled = 0; t->done = 0; t->died_at = 0; t->rest = 0; t->released = 0; t->checks = 0; t->spared = 0; t->ended = 0;
 }
 
 // ---- settle hold: the game swaps a ragdoll for its stand-in only once the body is at rest ----
@@ -1121,6 +1137,45 @@ static void settle_arm(void) {   // game thread, at /ragdoll on; the hook stays 
     corpse_arm();   // only with the hold: without it bodies leave the budget the game's way
 }
 
+// ---- deadline: every ragdoll is gone a fixed time after death, whatever the game does ----
+// The 10 s cap above is only looked at inside the game's settle check, so a body whose RagdollComponent never starts
+// that timer (seen: Retches, 16 Oct, never removed at any gravity) was held forever, and so was its extra gravity.
+// This one runs in our own tick from the moment of death. At the deadline the body is hidden, its physics stopped
+// (no more cost, no jitter) and the actor destroyed, as the game's own delete does (AActor::Destroy). A client may
+// not be allowed to destroy a replicated actor; it stays hidden until the host's copy goes. Bodies the game handled
+// the normal way (swap + delete about 1-2 s after the release) are long gone by then. The log line says what the
+// game had done with the body, to find out why it never got there.
+static float deadline_s = 15.f;   // s after death; above SETTLE_CAP plus the game's swap and 1 s delete
+static int n_ended, n_ended_unchecked, deadline_logs;
+
+static void end_body(Tracked *x, double age) {
+    char a[160], c[160], s[160];
+    Call k;
+    n_ended++;
+    if (!x->checks) n_ended_unchecked++;
+    if (deadline_logs < 40) {
+        deadline_logs++;
+        UObject *rc = x->rc;
+        int32_t off = rc ? ue_prop_offset(rc, "VFXCorpseActorType") : -1;
+        UClass *sc = off >= 0 ? *(UClass **)((char *)rc + off) : NULL;
+        LOG("ragdoll deadline: %s (%s) removed %.1f s after death: %d settle checks of the game seen%s, %s, last fastest "
+            "%.0f cm/s, RagdollComponent %s, stand-in class %s, IsInPhysicalizedDeath %d",
+            oname(x->a, a, sizeof a), cname(x->a, c, sizeof c), age, x->checks,
+            x->checks ? "" : " (the game never started its settle check)",
+            x->released ? "released by the hold" : "still held", x->last_v, rc ? "yes" : "NONE",
+            sc ? ue_obj_name(sc, s, sizeof s) : "none", call_bool(x->a, "IsInPhysicalizedDeath"));
+    }
+    x->ended = 1;
+    if (!x->released) { x->released = 1; x->rest = 0; }   // the game's own check and the budget may act on it now
+    if (call_prep(&k, x->a, "SetActorHiddenInGame")) { SET(&k, "bNewHidden", uint8_t, 1); call_go(&k); }
+    if (x->mesh) {
+        if (call_prep(&k, x->mesh, "SetAllBodiesSimulatePhysics")) { SET(&k, "bNewSimulate", uint8_t, 0); call_go(&k); }
+        if (call_prep(&k, x->mesh, "SetSimulatePhysics")) { SET(&k, "bSimulate", uint8_t, 0); call_go(&k); }
+    }
+    if (call_prep(&k, x->a, "SetActorEnableCollision")) { SET(&k, "bNewActorEnableCollision", uint8_t, 0); call_go(&k); }
+    call_void(x->a, "K2_DestroyActor");
+}
+
 void ragdoll_tick(float dt) {
     (void)dt;
     tick_n++;
@@ -1147,6 +1202,7 @@ void ragdoll_tick(float dt) {
             continue;
         }
         if (x->done) {
+            if (x->ragdolled && !x->ended && t - x->died_at >= deadline_s) { end_body(x, t - x->died_at); continue; }
             if (x->ragdolled && !x->released && x->mesh && grav_scale != 1.f && !n_grav_fail) extra_gravity(x);
             if (x->ragdolled && (tick_n % 15) == 0 && call_bool(x->ls, "IsAlive") == 1) undo(x);
             continue;
@@ -1171,14 +1227,14 @@ void ragdoll_slash(char *rest, Out *o) {
         int released = n_at_rest + n_capped;
         out_printf(o, "/ragdoll: %s%s, %d Ridden tracked, %d deaths seen, %d ragdolled, %d failed, %d came back; "
                       "settle hold %s: %d held, %d at rest + %d at the %.0f s cap (avg %.1f s, max %.1f s after death), "
-                      "%d deleted while held; corpse budget %s: %d spared (%d again); mass x%.2f, gravity x%.2f%s; "
-                      "%ld stacks logged%s%s\n",
+                      "%d deleted while held; corpse budget %s: %d spared (%d again); deadline %.0f s: %d removed "
+                      "(%d never got the game's settle check); mass x%.2f, gravity x%.2f%s; %ld stacks logged%s%s\n",
                    mode_on ? "on" : "off", mode_on && delay_s > 0 ? " (after the game's animation)" : "", ntr, n_deaths,
                    n_applied, n_failed, n_revived,
                    settle_state == 1 ? "on" : settle_state ? "OFF (see log)" : "not armed yet", n_held, n_at_rest, n_capped,
                    SETTLE_CAP, released ? settle_sum / released : 0.0, settle_max, n_held_gone,
                    corpse_state == 1 ? "hook on" : corpse_state ? "hook OFF (see log)" : "not armed yet", n_spared,
-                   n_spared_again, mass_scale, grav_scale, n_grav_fail ? " (NO EFFECT: see log)" : "", stack_id,
+                   n_spared_again, deadline_s, n_ended, n_ended_unchecked, mass_scale, grav_scale, n_grav_fail ? " (NO EFFECT: see log)" : "", stack_id,
                    tracing ? ", tracing" : "", n_overflow ? ", tracking list full" : "");
     } else if (!strcmp(verb, "on")) {
         float d = arg ? (float)atof(arg) : 0.f;
@@ -1212,6 +1268,15 @@ void ragdoll_slash(char *rest, Out *o) {
         }
         out_printf(o, "/ragdoll gravity: x%.2f (0-5, default 1) on ragdolls still falling, from now on%s\n", grav_scale,
                    n_grav_fail ? "; NO EFFECT in this game (see log)" : "");
+    } else if (!strcmp(verb, "deadline")) {
+        if (arg) {
+            float s = (float)atof(arg);
+            deadline_s = s < 12.f ? 12.f : s > 120.f ? 120.f : s;
+            deadline_logs = 0;
+            LOG("ragdoll deadline: %.0f s", deadline_s);
+        }
+        out_printf(o, "/ragdoll deadline: every ragdoll still there %.0f s after death is removed (12-120, default 15)\n",
+                   deadline_s);
     } else if (!strcmp(verb, "probe")) {
         world_check();
         if (!mode_on && !tracing) for (int k = 0; k < 64; k++) scan_step();   // not scanning in the background: a full pass now
@@ -1223,7 +1288,7 @@ void ragdoll_slash(char *rest, Out *o) {
         if (tracing) trace_stop("restarted");
         if (trace_start(s, o) == 0) out_printf(o, "/ragdoll trace: %.0f s, kill a few Ridden now (log: \"ragdoll trace\" lines)\n", s);
     } else {
-        out_printf(o, "usage: /ragdoll [on [delay]|off|status|mass [x]|gravity [x]|probe|trace [secs]]\n");
+        out_printf(o, "usage: /ragdoll [on [delay]|off|status|mass [x]|gravity [x]|deadline [s]|probe|trace [secs]]\n");
     }
 }
 
