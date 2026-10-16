@@ -144,6 +144,8 @@ typedef struct {
     uint8_t rest, released;                // settle hold: checks at rest in a row; the game's own check runs again
     uint16_t checks;                       // settle checks of the game seen on this body
     UObject *mesh, *rc;                    // its mesh and RagdollComponent (the settle check's `this`)
+    const struct BodyList *bodies;         // its physics bodies' bone names (settle test), NULL = root body only
+    float last_v;                          // fastest body at the last settle check, cm/s
     FName prof;
     float rel_loc[3], rel_rot[3];
 } Tracked;
@@ -153,10 +155,16 @@ static int mode_on;
 static float delay_s;
 static int n_applied, n_failed, n_deaths, detail_left;
 
+// The bone names of a physics asset's bodies (USkeletalBodySetup.BoneName), for the settle test: one list per asset
+#define MAX_BODIES 32
+typedef struct BodyList { UObject *pa; int n; FName bone[MAX_BODIES]; } BodyList;
+static BodyList body_lists[8];
+static int n_body_lists;
+
 static int world_check(void) {   // new map: every old pointer is gone
     static UObject *last_w;
     UObject *w = ue_world();
-    if (w != last_w) { last_w = w; ntr = 0; scan_at = 0; }
+    if (w != last_w) { last_w = w; ntr = 0; scan_at = 0; n_body_lists = 0; }
     return w != NULL;
 }
 
@@ -396,7 +404,8 @@ static void stack_check(UObject *o, UObject *actor, UFunction *fn, void *params)
                same_name(fn, nm_destroyed) ? ST_DESTROYED : -1;
     if (kind < 0 || GetCurrentThreadId() != game_tid) return;
     Tracked *x = dead_tracked(actor);
-    if (!x || (x->stacked & (1u << kind))) return;
+    // a ragdoll the settle hold released goes the known way (swap, delete 1 s later): only the others are of interest
+    if (!x || x->released || (x->stacked & (1u << kind))) return;
     x->stacked |= 1u << kind;
     int n = snprintf(w, sizeof w, "%s.%s on %s, %.2f s after death, %s", cname(o, a, sizeof a), ue_obj_name(fn, b, sizeof b),
                      oname(actor, c, sizeof c), now_s() - x->died_at, x->ragdolled ? "ragdolled" : "game's own death");
@@ -866,43 +875,82 @@ static void undo(Tracked *t) {
 //                              a PoseableMesh copy of the pose), hides the real body, and sets a 1.0 s one-shot timer:
 //   delete 0x141B6F380         AActor::Destroy on the Ridden.
 // The growing limit passes a body still sliding at a few m/s, so ragdolls froze mid-fall. For bodies we ragdolled the
-// hook skips the game's check until our own test says the body is at rest (or the cap); from then on the game's
-// check, swap, stand-in and deletion run unchanged, in the body's final pose. The deletion needs no hook: only the
-// swap starts its timer.
+// hook skips the game's check until our own test says the body is at rest (or the cap): every body under the speed
+// limit (build 8 tested the pelvis only, which passed a kneeling body whose torso was still tipping over). From then on
+// the game's check, swap, stand-in and deletion run unchanged, in the body's final pose. The deletion needs no hook:
+// only the swap starts its timer.
 #define ADDR_SETTLE_CHECK VA(0x141B6FD00ull)
 static const uint8_t SIG_SETTLE[] = {0x40,0x55,0x53,0x57,0x48,0x8d,0x6c,0x24,0xb9,0x48,0x81,0xec,0x90,0x00,0x00,0x00,
                                      0x48,0x8b,0xb9,0xd8,0x00,0x00,0x00,0x48};
-#define SETTLE_SPEED   15.f   // cm/s: the root body (pelvis) slower than this, or every body asleep, is at rest
+#define SETTLE_SPEED   15.f   // cm/s: every body slower than this (the fastest one under it), or all asleep, is at rest
 #define SETTLE_CHECKS  2      // settle checks at rest in a row (0.5 s apart) before the game's own check runs
 #define SETTLE_CAP     10.0   // s after death: the game's check runs however the body moves
-#define SETTLE_LOGS    40     // check lines logged per /ragdoll on
+#define SETTLE_LOGS    40     // "hold" lines logged per /ragdoll on (releases and deletions are always logged)
 typedef void (*SettleFn)(UObject *ragdoll_component);
 static SettleFn orig_settle;
 static int settle_state;   // 0 not tried, 1 hooked, -1 signature mismatch or hook failed
 static int n_held, n_at_rest, n_capped, n_held_gone, settle_logs;
 static double settle_sum, settle_max;
 
-static float root_speed(UObject *mesh) {   // cm/s, -1 if unknown
+// the mesh's physics asset's bodies, read once per asset (Common Ridden: 3P_Common_PA, 20 bodies)
+static const BodyList *bodies_of(UObject *mesh) {
+    char a[160];
+    UObject *pa = ue_get_ptr(mesh, "PhysicsAssetOverride");
+    if (!pa) { UObject *sk = ue_get_ptr(mesh, "SkeletalMesh"); pa = sk ? ue_get_ptr(sk, "PhysicsAsset") : NULL; }
+    if (!pa) return NULL;
+    for (int i = 0; i < n_body_lists; i++) if (body_lists[i].pa == pa) return body_lists[i].n ? &body_lists[i] : NULL;
+    if (n_body_lists == (int)(sizeof body_lists / sizeof body_lists[0])) return NULL;   // 8 kinds of body in one map
+    BodyList *bl = &body_lists[n_body_lists++];
+    memset(bl, 0, sizeof *bl);
+    bl->pa = pa;
+    int32_t off = ue_prop_offset(pa, "SkeletalBodySetups");
+    TArray *arr = off >= 0 ? (TArray *)((char *)pa + off) : NULL;
+    for (int i = 0; arr && i < arr->num && bl->n < MAX_BODIES; i++) {
+        UObject *bs = ((UObject **)arr->data)[i];
+        int32_t bo = bs ? ue_prop_offset(bs, "BoneName") : -1;
+        if (bo >= 0) bl->bone[bl->n++] = *(FName *)((char *)bs + bo);
+    }
+    LOG("ragdoll settle: physics asset %s: %d bodies in the rest test%s", oname(pa, a, sizeof a), bl->n,
+        bl->n ? "" : " (none readable: the root body only)");
+    return bl->n ? bl : NULL;
+}
+
+// cm/s of the fastest body (bone name into `bone`), -1 if unknown
+static float max_speed(Tracked *x, char *bone, size_t n) {
     Call k;
-    if (!mesh || !call_prep(&k, mesh, "GetPhysicsLinearVelocity")) return -1;
-    call_go(&k);   // BoneName left None: the root body
+    snprintf(bone, n, "root");
+    if (!call_prep(&k, x->mesh, "GetPhysicsLinearVelocity")) return -1;
+    FName *bn = carg(&k, "BoneName");
     float *v = carg(&k, "ReturnValue");
-    return v ? sqrtf(v[0] * v[0] + v[1] * v[1] + v[2] * v[2]) : -1;
+    if (!v) return -1;
+    int nb = x->bodies && bn ? x->bodies->n : 0;
+    float best = -1;
+    int at = -1;
+    for (int i = nb ? 0 : -1; i < nb; i++) {   // no list: once, BoneName None = the root body
+        if (i >= 0) *bn = x->bodies->bone[i];
+        call_go(&k);
+        float s = sqrtf(v[0] * v[0] + v[1] * v[1] + v[2] * v[2]);
+        if (s > best) { best = s; at = i; }
+    }
+    if (at >= 0) ue_name(x->bodies->bone[at], bone, n);
+    return best;
 }
 
 // 1 = hold (skip the game's check this time), 0 = let it run, from now on for this body
 static int settle_hold(Tracked *x) {
-    char a[160];
+    char a[160], bone[64];
     double age = now_s() - x->died_at;
-    float v = root_speed(x->mesh);
+    if (!x->checks) x->bodies = bodies_of(x->mesh);
+    float v = max_speed(x, bone, sizeof bone);
     int awake = call_bool(x->mesh, "IsAnyRigidBodyAwake");
+    x->last_v = v;
     x->rest = (awake == 0 || (v >= 0 && v < SETTLE_SPEED)) ? x->rest + 1 : 0;
     if (!x->checks++) n_held++;
     const char *why = x->rest >= SETTLE_CHECKS ? "at rest" : age >= SETTLE_CAP ? "time cap" : NULL;
-    if (settle_logs < SETTLE_LOGS) {
-        settle_logs++;
-        LOG("ragdoll settle %s +%.2fs: root %.0f cm/s, awake %d -> %s", oname(x->a, a, sizeof a), age, v, awake,
-            why ? why : "hold");
+    if (why || settle_logs < SETTLE_LOGS) {
+        if (!why) settle_logs++;
+        LOG("ragdoll settle %s +%.2fs: fastest %s %.0f cm/s, awake %d -> %s", oname(x->a, a, sizeof a), age, bone, v,
+            awake, why ? why : "hold");
     }
     if (!why) return 1;
     x->released = 1;
@@ -957,8 +1005,13 @@ void ragdoll_tick(float dt) {
         if (!ue_object_usable(x->a, x->ai) || !ue_object_usable(x->ls, x->lsi)) {
             // gone before the hold let the game swap it: not the game's swap + delete (on a client: the host's delete?)
             if (x->ragdolled && x->checks && !x->released) {
+                // a budget or population cleanup would show as many bodies in flight / many Ridden alive at the time
+                int flying = 0, alive = 0;
+                for (int k = 0; k < ntr; k++) { flying += tr[k].ragdolled && !tr[k].released; alive += !tr[k].died_at; }
                 n_held_gone++;
-                LOG("ragdoll settle: a held body was deleted %.1f s after death, before it was at rest", t - x->died_at);
+                LOG("ragdoll settle: a held body was deleted %.1f s after death, before it was at rest (last check: "
+                    "fastest %.0f cm/s after %d checks; now %d bodies in flight incl. this one, %d Ridden alive)",
+                    t - x->died_at, x->last_v, x->checks, flying, alive);
             }
             tr[i--] = tr[--ntr];
             continue;
