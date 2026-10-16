@@ -972,7 +972,7 @@ static void log_push_settings(UObject *o, const char *what) {
 // Every component of the actor (class and name); the hit- and physics-related ones are listed in full.
 static void log_components(UObject *actor, UObject *const *done, int n_done) {
     static const char *const COMP_KEYS[] = {"hit", "react", "impact", "damage", "procedural", "physic", "ragdoll",
-                                            "health", "dismember", "gib", "wound", NULL};
+                                            "health", "dismember", "gib", "wound", "mutilat", NULL};   // mutilat: limbs off
     UClass *ac = cls("ActorComponent");
     Call k;
     if (!ac || !call_prep(&k, actor, "K2_GetComponentsByClass")) { LOG("ragdoll probe: no K2_GetComponentsByClass"); return; }
