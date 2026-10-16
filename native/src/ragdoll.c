@@ -751,6 +751,31 @@ static void bag_unhide(Tracked *t, UObject *mesh) {
         LOG("ragdoll bloodbag: %s spared: actor hidden %d, mesh visible %d -> %d (shown before the ragdoll)", oname(t->a, a, sizeof a),
             hidden, vis, call_bool(mesh, "IsVisible"));
     }
+    // Discovery (build 22): Joon sees dark red arcs around spared bodies until their swap: likely the blood-bag gore
+    // effect, started on a body that was meant to vanish. The effect components of the first 3 spared bodies, with
+    // their assets, so the next build can switch off just those.
+    static int fx_logs;
+    if (fx_logs >= 3) return;
+    fx_logs++;
+    UClass *ac = cls("ActorComponent");
+    if (!ac || !call_prep(&k, t->a, "K2_GetComponentsByClass")) return;
+    SET(&k, "ComponentClass", UClass *, ac);
+    call_go(&k);
+    TArray *r = carg(&k, "ReturnValue");
+    static const char *const FX_KEYS[] = {"particle", "niagara", "fx", "decal", "emitter", "blood", "gore", "ribbon", "cable", NULL};
+    int n = 0;
+    for (int i = 0; r && r->data && i < r->num && i < 128; i++) {
+        UObject *comp = ((UObject **)r->data)[i];
+        char cn[128], on[128], an[160];
+        if (!comp || !name_has(cname(comp, cn, sizeof cn), FX_KEYS)) continue;
+        UObject *asset = ue_get_ptr(comp, "Template");
+        if (!asset) asset = ue_get_ptr(comp, "Asset");
+        if (!asset) asset = ue_get_ptr(comp, "DecalMaterial");
+        n++;
+        LOG("ragdoll bloodbag:   %s effect %s (%s), asset %s, active %d, visible %d", oname(t->a, a, sizeof a), oname(comp, on, sizeof on),
+            cn, asset ? ue_obj_name(asset, an, sizeof an) : "-", call_bool(comp, "IsActive"), call_bool(comp, "IsVisible"));
+    }
+    LOG("ragdoll bloodbag: %s: %d effect components of %d components", oname(t->a, a, sizeof a), n, r ? r->num : -1);
 }
 
 static void pe_detour(UObject *o, UFunction *fn, void *params) {
@@ -1258,7 +1283,7 @@ static void extra_gravity(Tracked *x) {
 typedef struct { char key[24]; float n; uint8_t radial; } PushKind;
 static PushKind push_tab[48] = {   // first guesses (x the scale, default 4); a Common weighs 133 kg by GetBoneMass
     {"HG", 6000, 0},  {"SMG", 7000, 0}, {"AR", 9000, 0}, {"LMG", 11000, 0}, {"SG", 25000, 0},
-    {"FragGrenade", 40000, 1}, {"PipeBomb", 40000, 1}, {"Grenade", 40000, 1}, {"Explosi", 40000, 1},
+    {"FragGrenade", 60000, 1},   // frags and pipe bombs (both FragGrenade_DamageType_C); Joon's pick (16 Oct) {"PipeBomb", 40000, 1}, {"Grenade", 40000, 1}, {"Explosi", 40000, 1},
     {"Propane", 40000, 1}, {"Stumble", 0, 0}, {"default", 8000, 0},
     {"Sni", 25000, 0},   // snipers (Sni01_DamageType_C) as strong as the shotgun (Joon, 16 Oct)
 };
