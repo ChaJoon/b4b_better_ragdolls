@@ -14,7 +14,7 @@
 //   /ragdoll deadline [s]    every ragdoll still there s seconds after death is removed (12-120, default 15)
 //   /ragdoll push [x]        the killing hit throws the body (step 2): overall strength x (0-10, default 4, off = 0);
 //   /ragdoll push <kind> <n> one weapon kind's strength in kg cm/s (HG, SMG, AR, LMG, SG, Sni, FragGrenade, default, ...)
-//   /ragdoll bloodbag [on|off] off (default): commons an explosion would burst stay bodies (ragdolled, pushed)
+//   /ragdoll bloodbag [on|off] off (default): Ridden an explosion would burst stay bodies (ragdolled, pushed)
 //   /ragdoll probe           the nearest living Ridden: its mesh, physics asset, collision, and the death-related
 //                            functions/properties of its classes, into the log (discovery). Also (step 2 discovery):
 //                            every setting that could push a body (mesh, movement, actor), all its components (hit,
@@ -159,6 +159,7 @@ typedef struct {
     float last_v;                          // fastest body at the last settle check, cm/s
     uint8_t spared;                        // times the corpse budget's delete was skipped for it
     uint8_t mass_set;                      // apply() changed its mass scale (undone if the actor comes back)
+    uint8_t bag;                           // an explosion's destroy (the blood bag) was refused for it
     uint8_t ended;                         // removed by the deadline (hidden, physics off, destroy asked)
     FName prof;
     float rel_loc[3], rel_rot[3];
@@ -644,84 +645,119 @@ static void trace_call(UObject *o, UFunction *fn, void *params) {
     LeaveCriticalSection(&tcs);
 }
 
-// ---- no blood bags: explosions keep the bodies (Joon, 16 Oct) ----
+// ---- blast centres (for the blast push) ----
 // An explosion's ExplosionComponent.Multicast_ExplodeFromSeed(Seed, PhysMat, VFXCharacters, VFXCharacterLocations,
-// NumJuiced, LocationOverride) is its effects, sent to every machine after the damage is done (build 18 trace: the
-// OnDamage events come first). Of VFXCharacters, NumJuiced are "juiced": the blood bag, the actor destroyed in the same
-// frame, before our tick ever sees the death, so they were never ragdolled or pushed (frag grenade: 7 characters, 4
-// juiced). The rest play a Zom_Death_Gib_* death. With blood bags off (the default while /ragdoll is on), the hook on
-// ProcessEvent sets NumJuiced to 0 before the game runs the call, on this machine and in what it sends: those bodies
-// die normally, and the ragdoll and the blast push take them. /ragdoll bloodbag on = the game's own.
+// NumJuiced, LocationOverride) is its effects, sent to every machine after the damage. LocationOverride = the blast
+// point (checked against a frag's ImpactPoint - ImpactDirection in build 14). The hit record's source is often the
+// thrower, so blast pushes aim from the nearest recorded blast. The call is left as it is (builds 19-20 edited NumJuiced
+// and the character lists to stop the blood bags: no effect on them, see "blood bags" below).
 static UFunction *explode_fn;
-static FField *juice_f, *blast_loc_f, *vfx_chars_f, *vfx_locs_f;
-// recent explosions' centres (LocationOverride, = the blast point: checked against a frag's ImpactPoint - ImpactDirection
-// in build 14), for the blast push: the hit record's source is often the thrower, not the grenade
+static FField *blast_loc_f;
 typedef struct { double t; float at[3]; } Blast;
 static Blast blasts[8];
 static int blast_at;
 static double last_blast_t(void) { double t = 0; for (int i = 0; i < 8; i++) if (blasts[i].t > t) t = blasts[i].t; return t ? t : -1e9; }
-static int bloodbag_on;      // 1 = the game's blood bags
-static int n_unjuiced, n_unjuiced_calls, juice_logs, juice_state;   // juice_state: 0 not looked up, 1 ok, -1 missing
+static int juice_state;   // blast lookup: 0 not looked up, 1 ok, -1 missing
 
 static void juice_resolve(void) {
-    char t[64];
+    char t[64], sn[64];
     if (juice_state) return;
     juice_state = -1;
     UClass *ec = cls("ExplosionComponent");
     UFunction *fn = ec ? ue_find_function(ec, "Multicast_ExplodeFromSeed") : NULL;
-    FField *f = fn ? ue_find_prop(fn, "NumJuiced") : NULL;
-    if (!f) { LOG("ragdoll bloodbag: no ExplosionComponent.Multicast_ExplodeFromSeed(NumJuiced): blood bags stay"); return; }
-    ue_name(*(FName *)FF_CLASS(f), t, sizeof t);
-    if (strcmp(t, "IntProperty") && strcmp(t, "ByteProperty")) { LOG("ragdoll bloodbag: NumJuiced is a %s, not a number: blood bags stay", t); return; }
-    juice_f = f;
+    FField *lf = fn ? ue_find_prop(fn, "LocationOverride") : NULL;
+    if (!lf || strcmp(ue_name(*(FName *)FF_CLASS(lf), t, sizeof t), "StructProperty") || strncmp(ue_obj_name(FP_SUB(lf), sn, sizeof sn), "Vector", 6)) {
+        LOG("ragdoll push: no ExplosionComponent.Multicast_ExplodeFromSeed(LocationOverride): blast pushes aim from the hit's source");
+        return;
+    }
     explode_fn = fn;
-    LOG("ragdoll bloodbag: found ExplosionComponent.Multicast_ExplodeFromSeed, NumJuiced %s at +0x%x", t, FP_OFFSET(f));
-    char lt[64], sn[64];
-    FField *lf = ue_find_prop(fn, "LocationOverride");
-    if (lf && !strcmp(ue_name(*(FName *)FF_CLASS(lf), lt, sizeof lt), "StructProperty") && !strncmp(ue_obj_name(FP_SUB(lf), sn, sizeof sn), "Vector", 6))
-        blast_loc_f = lf;
-    else LOG("ragdoll bloodbag: no LocationOverride vector: blast pushes aim from the hit's source");
-    // build 19 showed NumJuiced 0 doesn't stop the blood bags: the effect lists are emptied too (test of whether the
-    // effects code ends the listed characters)
-    FField *vc = ue_find_prop(fn, "VFXCharacters"), *vl = ue_find_prop(fn, "VFXCharacterLocations");
-    if (vc && !strcmp(ue_name(*(FName *)FF_CLASS(vc), lt, sizeof lt), "ArrayProperty")) vfx_chars_f = vc;
-    if (vl && !strcmp(ue_name(*(FName *)FF_CLASS(vl), lt, sizeof lt), "ArrayProperty")) vfx_locs_f = vl;
-    LOG("ragdoll bloodbag: effect lists VFXCharacters %s, VFXCharacterLocations %s", vfx_chars_f ? "found" : "MISSING",
-        vfx_locs_f ? "found" : "MISSING");
+    blast_loc_f = lf;
     juice_state = 1;
 }
 
-static void unjuice(UObject *o, uint8_t *params) {
-    char t[64], a[160];
-    ue_name(*(FName *)FF_CLASS(juice_f), t, sizeof t);
-    uint8_t *v = params + FP_OFFSET(juice_f);
-    int n = !strcmp(t, "IntProperty") ? *(int32_t *)v : *v;
-    TArray *vc = vfx_chars_f ? (TArray *)(params + FP_OFFSET(vfx_chars_f)) : NULL;
-    TArray *vl = vfx_locs_f ? (TArray *)(params + FP_OFFSET(vfx_locs_f)) : NULL;
-    int chars = vc ? vc->num : 0;
-    if (n <= 0 && chars <= 0) return;
-    if (!strcmp(t, "IntProperty")) *(int32_t *)v = 0; else *v = 0;
-    // num 0 only: the data and capacity stay, so the caller frees them as usual (pointers and vectors: no destructors)
-    if (vc) vc->num = 0;
-    if (vl) vl->num = 0;
-    n_unjuiced += chars;
-    n_unjuiced_calls++;
-    if (juice_logs < 20) {
-        juice_logs++;
-        UObject *owner = owner_actor(o);
-        LOG("ragdoll bloodbag: explosion of %s: effect list of %d characters emptied (NumJuiced was %d)",
-            oname(owner ? owner : o, a, sizeof a), chars, n);
+// ---- blood bags: explosions keep the bodies (Joon, 16 Oct) ----
+// The blood bag is not the effects call: build 20's traces show every one ending in the server's explosion code,
+// before the effects are sent: BaseProjectile.OnHitCallback -> ExplosionComponent.Explode (exec 0x142060280) ->
+// 0x141756980 +0x305 -> 0x141756C90 +0xF4C -> AActor::Destroy (0x143A00C10) on the Ridden, in the frame it dies. A hook
+// on AActor::Destroy refuses exactly that call (its return address) for Ridden (not bosses) while /ragdoll is on and
+// /ragdoll bloodbag is off: the body stays, our tick sees it dead and ragdolls and pushes it like any blast victim.
+// Every other destroy passes untouched. The bytes of both functions and the call itself are checked before hooking.
+#define ADDR_ACTOR_DESTROY  VA(0x143A00C10ull)
+#define ADDR_JUICE_FN       VA(0x141756C90ull)
+#define ADDR_JUICE_RET      VA(0x141757BDCull)   // 0x141756C90 +0xF4C: right after its call to AActor::Destroy
+static const uint8_t SIG_ACTOR_DESTROY[] = {0x48,0x89,0x5c,0x24,0x08,0x48,0x89,0x74,0x24,0x10,0x57,0x48,0x83,0xec,0x40,0x33,
+                                            0xff,0x0f,0xb6,0xf2,0xf6,0x41,0x64,0x04};
+static const uint8_t SIG_JUICE_FN[] = {0x40,0x55,0x53,0x56,0x48,0x8d,0xac,0x24,0x70,0xfd,0xff,0xff,0x48,0x81,0xec,0x90,
+                                       0x03,0x00,0x00,0x0f,0x29,0xb4,0x24,0x70};
+typedef uint8_t (*ActorDestroyFn)(UObject *actor, uint8_t net_force, uint8_t modify_level);
+static ActorDestroyFn orig_actor_destroy;
+static int bloodbag_on;     // 1 = the game's blood bags
+static int bag_state;       // 0 not tried, 1 hooked, -1 bytes don't match or hook failed
+static int n_bags_spared, bag_logs;
+static Tracked *any_tracked(UObject *a);
+
+static uint8_t actor_destroy_detour(UObject *actor, uint8_t net_force, uint8_t modify_level) {   // game thread
+    if ((uintptr_t)__builtin_return_address(0) == ADDR_JUICE_RET && mode_on && !bloodbag_on && actor &&
+        is_ridden_fast(actor) && !is_boss(actor)) {
+        n_bags_spared++;
+        Tracked *x = any_tracked(actor);
+        if (x) x->bag = 1;
+        if (bag_logs < 20) {
+            char a[160], c[160];
+            bag_logs++;
+            LOG("ragdoll bloodbag: %s (%s): the explosion's destroy refused, the body stays%s", oname(actor, a, sizeof a),
+                cname(actor, c, sizeof c), x ? "" : " (not in our list: it won't be ragdolled)");
+        }
+        return 0;
+    }
+    return orig_actor_destroy(actor, net_force, modify_level);
+}
+
+static void bag_arm(void) {   // game thread, at /ragdoll on; the hook stays (it acts only while on and blood bags off)
+    if (bag_state) return;
+    bag_state = -1;
+    const uint8_t *call = (const uint8_t *)(ADDR_JUICE_RET - 5);
+    uintptr_t target = call[0] == 0xE8 ? ADDR_JUICE_RET + (uintptr_t)(intptr_t)*(const int32_t *)(call + 1) : 0;
+    if (memcmp((void *)ADDR_ACTOR_DESTROY, SIG_ACTOR_DESTROY, sizeof SIG_ACTOR_DESTROY) ||
+        memcmp((void *)ADDR_JUICE_FN, SIG_JUICE_FN, sizeof SIG_JUICE_FN) || target != ADDR_ACTOR_DESTROY) {
+        LOG("ragdoll bloodbag: game code differs (AActor::Destroy bytes %s, explosion code bytes %s, the call %s): blood bags stay",
+            memcmp((void *)ADDR_ACTOR_DESTROY, SIG_ACTOR_DESTROY, sizeof SIG_ACTOR_DESTROY) ? "differ" : "ok",
+            memcmp((void *)ADDR_JUICE_FN, SIG_JUICE_FN, sizeof SIG_JUICE_FN) ? "differ" : "ok",
+            target == ADDR_ACTOR_DESTROY ? "ok" : "not a call to AActor::Destroy");
+        return;
+    }
+    if (MH_CreateHook((void *)ADDR_ACTOR_DESTROY, (void *)actor_destroy_detour, (void **)&orig_actor_destroy) != MH_OK ||
+        MH_EnableHook((void *)ADDR_ACTOR_DESTROY) != MH_OK) {
+        LOG("ragdoll bloodbag: hook on AActor::Destroy failed: blood bags stay");
+        return;
+    }
+    bag_state = 1;
+    LOG("ragdoll bloodbag: hooked AActor::Destroy; the explosion code's call (return 0x141757BDC) is refused for Ridden");
+}
+
+// A spared blood bag may have been hidden by the explosion code before its destroy: shown again before the ragdoll.
+static void bag_unhide(Tracked *t, UObject *mesh) {
+    char a[160];
+    Call k;
+    int vis = call_bool(mesh, "IsVisible");
+    int32_t ho = ue_prop_offset(t->a, "bHidden");
+    FField *hf = ho >= 0 ? ue_find_prop(U_CLASS(t->a), "bHidden") : NULL;
+    int hidden = hf ? bool_at(hf, (const uint8_t *)t->a) : -1;
+    if (call_prep(&k, t->a, "SetActorHiddenInGame")) { SET(&k, "bNewHidden", uint8_t, 0); call_go(&k); }
+    if (call_prep(&k, mesh, "SetHiddenInGame")) { SET(&k, "NewHidden", uint8_t, 0); SET(&k, "bPropagateToChildren", uint8_t, 1); call_go(&k); }
+    if (call_prep(&k, mesh, "SetVisibility")) { SET(&k, "bNewVisibility", uint8_t, 1); SET(&k, "bPropagateToChildren", uint8_t, 1); call_go(&k); }
+    if (bag_logs < 40) {
+        bag_logs++;
+        LOG("ragdoll bloodbag: %s spared: actor hidden %d, mesh visible %d -> %d (shown before the ragdoll)", oname(t->a, a, sizeof a),
+            hidden, vis, call_bool(mesh, "IsVisible"));
     }
 }
 
 static void pe_detour(UObject *o, UFunction *fn, void *params) {
-    if (fn == explode_fn && explode_fn && params && mode_on) {
-        if (blast_loc_f) {   // game thread: RPCs and their local runs are dispatched there
-            Blast *b = &blasts[blast_at++ % 8];
-            b->t = now_s();
-            memcpy(b->at, (uint8_t *)params + FP_OFFSET(blast_loc_f), sizeof b->at);
-        }
-        if (!bloodbag_on) unjuice(o, params);
+    if (fn == explode_fn && explode_fn && params && mode_on && blast_loc_f) {   // game thread
+        Blast *b = &blasts[blast_at++ % 8];
+        b->t = now_s();
+        memcpy(b->at, (uint8_t *)params + FP_OFFSET(blast_loc_f), sizeof b->at);
     }
     if (tracing && o && fn && !own_call()) trace_call(o, fn, params);
     orig_pe(o, fn, params);
@@ -731,7 +767,7 @@ static void pe_detour(UObject *o, UFunction *fn, void *params) {
 static int pe_enabled;
 static int pe_update(void) {
     juice_resolve();
-    int want = tracing || (mode_on && explode_fn);   // with the ragdoll on: blood bags and blast centres
+    int want = tracing || (mode_on && explode_fn);   // with the ragdoll on: blast centres
     if (want && !hook_made) {
         InitializeCriticalSection(&tcs);
         if (MH_CreateHook((void *)ADDR_PROCESSEVENT, (void *)pe_detour, (void **)&orig_pe) != MH_OK) {
@@ -1583,6 +1619,7 @@ static int apply(Tracked *t) {
         LOG("ragdoll kind: %s, RagdollComponent %s", cname(t->a, c, sizeof c), rc0 ? oname(rc0, a, sizeof a) : "NONE");
         log_mesh(mesh, "kind");
     }
+    if (t->bag) bag_unhide(t, mesh);
     UObject *ai = ue_get_ptr(mesh, "AnimScriptInstance"), *pac = comp_of(t->a, "PhysicalAnimationComponent");
     if (detail) {
         detail_left--;
@@ -1937,7 +1974,7 @@ void ragdoll_slash(char *rest, Out *o) {
                       "settle hold %s: %d held, %d at rest + %d at the %.0f s cap (avg %.1f s, max %.1f s after death), "
                       "%d deleted while held; corpse budget %s: %d spared (%d again); deadline %.0f s: %d removed "
                       "(%d never got the game's settle check); mass x%.2f, gravity x%.2f%s; push x%.2f: %d pushed (%d explosions), "
-                      "%d without a hit, %d failed; blood bags %s: %d characters taken off the effect lists of %d explosions; %ld stacks logged%s%s\n",
+                      "%d without a hit, %d failed; blood bags %s: %d spared; %ld stacks logged%s%s\n",
                    mode_on ? "on" : "off", mode_on && delay_s > 0 ? " (after the game's animation)" : "", ntr, n_deaths,
                    n_applied, n_left, n_failed, n_revived,
                    settle_state == 1 ? "on" : settle_state ? "OFF (see log)" : "not armed yet", n_held, n_at_rest, n_capped,
@@ -1945,7 +1982,8 @@ void ragdoll_slash(char *rest, Out *o) {
                    corpse_state == 1 ? "hook on" : corpse_state ? "hook OFF (see log)" : "not armed yet", n_spared,
                    n_spared_again, deadline_s, n_ended, n_ended_unchecked, mass_scale, grav_scale, n_grav_fail ? " (NO EFFECT: see log)" : "",
                    push_scale, n_pushed, n_push_radial, n_push_nohit, n_push_fail,
-                   bloodbag_on ? "on" : juice_state < 0 ? "off but NOT AVAILABLE" : "off", n_unjuiced, n_unjuiced_calls, stack_id,
+                   bloodbag_on ? "on" : bag_state < 0 ? "off but NOT AVAILABLE (see log)" : bag_state ? "off" : "off (not armed yet)",
+                   n_bags_spared, stack_id,
                    tracing ? ", tracing" : "", n_overflow ? ", tracking list full" : "");
     } else if (!strcmp(verb, "on")) {
         float d = arg ? (float)atof(arg) : 0.f;
@@ -1953,8 +1991,9 @@ void ragdoll_slash(char *rest, Out *o) {
         mode_on = 1;
         detail_left = DETAIL_LOGS;
         settle_logs = 0;
-        push_logs = hit_dumps = left_logs = juice_logs = 0;
+        push_logs = hit_dumps = left_logs = bag_logs = 0;
         settle_arm();
+        bag_arm();
         pe_update();
         LOG("ragdoll: on, delay %.2f s", delay_s);
         out_printf(o, "/ragdoll on: Ridden that die from now on fall as ragdolls%s and stay until they lie still (this machine only)%s\n",
@@ -1997,9 +2036,9 @@ void ragdoll_slash(char *rest, Out *o) {
             pe_update();
             LOG("ragdoll bloodbag: %s", bloodbag_on ? "on (the game's)" : "off (bodies kept)");
         }
-        out_printf(o, "/ragdoll bloodbag: %s (default off) while /ragdoll is on: commons near a blast %s%s\n",
+        out_printf(o, "/ragdoll bloodbag: %s (default off) while /ragdoll is on: Ridden near a blast %s%s\n",
                    bloodbag_on ? "on" : "off", bloodbag_on ? "burst like a blood bag (the game's)" : "stay bodies, ragdolled and pushed",
-                   juice_state < 0 ? "; NOT AVAILABLE (see log)" : "");
+                   bag_state < 0 ? "; NOT AVAILABLE (see log)" : !bag_state ? " (armed at /ragdoll on)" : "");
     } else if (!strcmp(verb, "push")) {
         char *arg2 = arg ? strtok(NULL, " ") : NULL;
         if (arg && !arg2 && (isdigit((unsigned char)arg[0]) || arg[0] == '.')) {   // /ragdoll push <x>: overall scale
