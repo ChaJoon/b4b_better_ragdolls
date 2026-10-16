@@ -1882,8 +1882,10 @@ static struct {
     FField *region, *type, *impulse, *point, *source, *p_region, *p_bone;
 } mi;
 
-// the names of an enum property's values (UE 4.25: FByteProperty::Enum at +0x78, FEnumProperty::Enum at +0x80;
-// UEnum::Names, TArray<TPair<FName, int64>>, at +0x40), so the log says what Type 2 means
+// the names of an enum property's values, so the log says what Type 2 means. Layout as tools/sdkdump.py (which dumped
+// all 1442 enums) and docs/NOTES.md: FByteProperty::Enum and FEnumProperty::UnderlyingProp at +0x78, FEnumProperty::Enum
+// at +0x80; UEnum::Names (TArray<TPair<FName, int64>>, 16-byte entries) at +0x48, stock 0x40 + 8 for this engine's
+// bigger UObject. (Build 27 read +0x40, CppType's length fields, as the array and crashed the game at the first body.)
 static void enum_names(FField *p, char *out, size_t n) {
     char t[64], b[96];
     out[0] = 0;
@@ -1892,9 +1894,13 @@ static void enum_names(FField *p, char *out, size_t n) {
     if (!e || U_INDEX(e) < 0 || U_INDEX(e) >= ue_num_objects() || ue_object_at(U_INDEX(e)) != e) { snprintf(out, n, "?"); return; }
     cname(e, b, sizeof b);
     if (strcmp(b, "Enum") && strcmp(b, "UserDefinedEnum")) { snprintf(out, n, "? (%s)", b); return; }
-    const TArray *names = (const TArray *)((const char *)e + 0x40);
+    const TArray *names = (const TArray *)((const char *)e + 0x48);
     size_t k = (size_t)snprintf(out, n, "%s:", ue_obj_name(e, b, sizeof b));
-    for (int i = 0; names->data && i < names->num && i < 40 && k + 8 < n; i++) {
+    if (!names->data || names->num <= 0 || names->num > 256 || names->max < names->num) {
+        snprintf(out + k, n - k, " ? (%d names)", names->num);
+        return;
+    }
+    for (int i = 0; i < names->num && i < 40 && k + 8 < n; i++) {
         const uint8_t *pr = (const uint8_t *)names->data + (size_t)i * 16;
         ue_name(*(const FName *)pr, b, sizeof b);
         const char *sh = strstr(b, "::");
