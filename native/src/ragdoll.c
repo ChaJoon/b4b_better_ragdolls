@@ -547,7 +547,8 @@ static void fmt_prop(FField *p, const uint8_t *container, char *out, size_t n, i
         UObject *ss = FP_SUB(p);
         ue_obj_name(ss, b, sizeof b);
         // Vector, Vector_NetQuantize*, Rotator: 3 floats. Other structs: their fields, one level deep.
-        if (!strncmp(b, "Vector", 6) && strcmp(b, "Vector2D") && strcmp(b, "Vector4"))
+        // (build 25: exact names; build 23 printed the material VectorParameterValue structs as 3 floats)
+        if (!strcmp(b, "Vector") || !strncmp(b, "Vector_NetQuantize", 18))
             snprintf(out, n, "(%.1f %.1f %.1f)", ((const float *)a)[0], ((const float *)a)[1], ((const float *)a)[2]);
         else if (!strcmp(b, "Rotator"))
             snprintf(out, n, "(p %.1f y %.1f r %.1f)", ((const float *)a)[0], ((const float *)a)[1], ((const float *)a)[2]);
@@ -840,11 +841,42 @@ static void log_array(const char *who, const char *what, UObject *o, const char 
     }
 }
 
+// Build 25: a component's own properties with values (its class chain down to ActorComponent, left out), and the
+// layout of an array property's struct (field:type@offset), for the drench and mutilation components.
+static void log_props(const char *who, const char *what, UObject *o) {
+    char b[128], pn[96], v[700];
+    for (UStruct *s = o ? (UStruct *)U_CLASS(o) : NULL; s; s = US_SUPER(s)) {
+        ue_obj_name(s, b, sizeof b);
+        if (!strcmp(b, "ActorComponent") || !strcmp(b, "SceneComponent") || !strcmp(b, "Object")) break;
+        for (FField *p = US_CHILDPROPS(s); p; p = FF_NEXT(p)) {
+            fmt_prop(p, (const uint8_t *)o, v, sizeof v, 2);
+            LOG("ragdoll fxprobe %s:   %s %s.%s = %s", who, what, b, ue_name(FF_NAME(p), pn, sizeof pn), v);
+        }
+    }
+}
+
+static void log_layout(const char *who, UObject *o, const char *prop) {
+    FField *ap = o ? ue_find_prop(U_CLASS(o), prop) : NULL;
+    FField *inner = ap ? *(FField **)((char *)ap + 0x78) : NULL;
+    if (!inner) return;
+    char t[64], b[96], fn[64], ft[64], line[1600];
+    ue_name(*(FName *)FF_CLASS(inner), t, sizeof t);
+    if (strcmp(t, "StructProperty")) { LOG("ragdoll fxprobe %s: %s = array of %s", who, prop, t); return; }
+    UStruct *st = (UStruct *)FP_SUB(inner);
+    size_t k = (size_t)snprintf(line, sizeof line, "ragdoll fxprobe %s: %s = array of %s (%d bytes):", who, prop,
+                                ue_obj_name((UObject *)st, b, sizeof b), FP_ELSIZE(inner));
+    for (UStruct *s2 = st; s2 && k + 80 < sizeof line; s2 = US_SUPER(s2))
+        for (FField *f = US_CHILDPROPS(s2); f && k + 80 < sizeof line; f = FF_NEXT(f))
+            k += (size_t)snprintf(line + k, sizeof line - k, " %s:%s@0x%x", ue_name(FF_NAME(f), fn, sizeof fn),
+                                  ue_name(*(FName *)FF_CLASS(f), ft, sizeof ft), FP_OFFSET(f));
+    LOG("%s", line);
+}
+
 static void fx_probe(Tracked *t, double dt) {   // game thread
     char who[200], a[160], b[160], c[160];
     snprintf(who, sizeof who, "%s +%.1fs (%s)", oname(t->a, a, sizeof a), dt,
              t->fxwho == 1 ? "spared blood bag" : "near-blast death, not a blood bag");
-    UObject *mesh = t->mesh;
+    UObject *mesh = t->mesh, *drench = NULL, *mut = NULL;
     Call k;
     // effect components on the actor, as build 22 did, now also later
     static const char *const FX_KEYS[] = {"particle", "niagara", "fx", "decal", "emitter", "blood", "gore", "ribbon", "cable", NULL};
@@ -857,7 +889,12 @@ static void fx_probe(Tracked *t, double dt) {   // game thread
         for (int i = 0; r && r->data && i < r->num && i < 128; i++) {
             UObject *comp = ((UObject **)r->data)[i];
             char cn[128];
-            if (!comp || !name_has(cname(comp, cn, sizeof cn), FX_KEYS)) continue;
+            if (!comp) continue;
+            cname(comp, cn, sizeof cn);
+            static const char *const DRENCH[] = {"drench", NULL}, *const MUT[] = {"mutilation", NULL};
+            if (name_has(cn, DRENCH)) drench = comp;
+            if (name_has(cn, MUT)) mut = comp;
+            if (!name_has(cn, FX_KEYS)) continue;
             UObject *asset = ue_get_ptr(comp, "Template");
             if (!asset) asset = ue_get_ptr(comp, "Asset");
             if (!asset) asset = ue_get_ptr(comp, "DecalMaterial");
@@ -866,6 +903,29 @@ static void fx_probe(Tracked *t, double dt) {   // game thread
                 oname(asset, c, sizeof c), call_bool(comp, "IsActive"), call_bool(comp, "IsVisible"));
         }
         LOG("ragdoll fxprobe %s: %d effect components of %d components", who, n, r ? r->num : -1);
+    }
+    // Build 23 log: an explosion gives its victims Drench_Blood_Explosion_GE (and the gibbed, not juiced ones
+    // Drench_Blood_Juice_GE): the Drench component starts ticking and the materials get a "Drench Bias". Its
+    // variables, to see whether the blood is drawn around a point in the world (the blast) that a thrown body leaves.
+    if (drench) log_props(who, "drench", drench);
+    else LOG("ragdoll fxprobe %s: no drench component", who);
+    // Dismemberment (build 23 probe): MutilationComponent has ExplodeState {bExploded, Impulse, ImpactPoint,
+    // SourceActor, PctToDismember, DismemberImpulse} (OnRep_ExplodeState) and MutilationState (OnRep_MutilationState):
+    // what the explosion wrote on a spared body, and the record layouts, so a build can dismember with them.
+    if (mut) {
+        log_props(who, "mutilation", mut);
+        static int layouts;
+        if (!layouts++) { log_layout(who, mut, "MutilationState"); log_layout(who, mut, "DismembermentMeshPieces"); }
+        if (dt < 0.1) { log_array(who, "mutilation", mut, "MutilationState", 8); log_array(who, "mutilation", mut, "DismembermentMeshPieces", 12); }
+    }
+    // the replicated flag a client hides a dead body by (LifeStateComponent.OnRep_NeedsToBeHiddenForDeath): set on a
+    // blood bag, a client would still hide the body we keep (co-op)
+    if (t->ls) {
+        FField *hp = ue_find_prop(U_CLASS(t->ls), "bNeedsToBeHiddenForDeath");
+        if (!hp) hp = ue_find_prop(U_CLASS(t->ls), "NeedsToBeHiddenForDeath");
+        char v[64];
+        if (hp) { fmt_prop(hp, (const uint8_t *)t->ls, v, sizeof v, 0); LOG("ragdoll fxprobe %s: life state %s = %s", who, ue_name(FF_NAME(hp), a, sizeof a), v); }
+        else LOG("ragdoll fxprobe %s: life state: no NeedsToBeHiddenForDeath property", who);
     }
     if (!mesh) return;
     // whatever is attached to the mesh, also things other actors own (an effect spawned attached to a bone)
