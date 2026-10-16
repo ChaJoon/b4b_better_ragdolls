@@ -13,7 +13,8 @@
 //   /ragdoll gravity [x]     gravity on our ragdolls x the scale (0-5, default 1.3), at once, bodies in flight included
 //   /ragdoll deadline [s]    every ragdoll still there s seconds after death is removed (12-120, default 15)
 //   /ragdoll push [x]        the killing hit throws the body (step 2): overall strength x (0-10, default 4, off = 0);
-//   /ragdoll push <kind> <n> one weapon kind's strength in kg cm/s (HG, SMG, AR, LMG, SG, FragGrenade, default, ...)
+//   /ragdoll push <kind> <n> one weapon kind's strength in kg cm/s (HG, SMG, AR, LMG, SG, Sni, FragGrenade, default, ...)
+//   /ragdoll bloodbag [on|off] off (default): commons an explosion would burst stay bodies (ragdolled, pushed)
 //   /ragdoll probe           the nearest living Ridden: its mesh, physics asset, collision, and the death-related
 //                            functions/properties of its classes, into the log (discovery). Also (step 2 discovery):
 //                            every setting that could push a body (mesh, movement, actor), all its components (hit,
@@ -633,9 +634,95 @@ static void trace_call(UObject *o, UFunction *fn, void *params) {
     LeaveCriticalSection(&tcs);
 }
 
+// ---- no blood bags: explosions keep the bodies (Joon, 16 Oct) ----
+// An explosion's ExplosionComponent.Multicast_ExplodeFromSeed(Seed, PhysMat, VFXCharacters, VFXCharacterLocations,
+// NumJuiced, LocationOverride) is its effects, sent to every machine after the damage is done (build 18 trace: the
+// OnDamage events come first). Of VFXCharacters, NumJuiced are "juiced": the blood bag, the actor destroyed in the same
+// frame, before our tick ever sees the death, so they were never ragdolled or pushed (frag grenade: 7 characters, 4
+// juiced). The rest play a Zom_Death_Gib_* death. With blood bags off (the default while /ragdoll is on), the hook on
+// ProcessEvent sets NumJuiced to 0 before the game runs the call, on this machine and in what it sends: those bodies
+// die normally, and the ragdoll and the blast push take them. /ragdoll bloodbag on = the game's own.
+static UFunction *explode_fn;
+static FField *juice_f, *blast_loc_f;
+// recent explosions' centres (LocationOverride, = the blast point: checked against a frag's ImpactPoint - ImpactDirection
+// in build 14), for the blast push: the hit record's source is often the thrower, not the grenade
+typedef struct { double t; float at[3]; } Blast;
+static Blast blasts[8];
+static int blast_at;
+static int bloodbag_on;      // 1 = the game's blood bags
+static int n_unjuiced, n_unjuiced_calls, juice_logs, juice_state;   // juice_state: 0 not looked up, 1 ok, -1 missing
+
+static void juice_resolve(void) {
+    char t[64];
+    if (juice_state) return;
+    juice_state = -1;
+    UClass *ec = cls("ExplosionComponent");
+    UFunction *fn = ec ? ue_find_function(ec, "Multicast_ExplodeFromSeed") : NULL;
+    FField *f = fn ? ue_find_prop(fn, "NumJuiced") : NULL;
+    if (!f) { LOG("ragdoll bloodbag: no ExplosionComponent.Multicast_ExplodeFromSeed(NumJuiced): blood bags stay"); return; }
+    ue_name(*(FName *)FF_CLASS(f), t, sizeof t);
+    if (strcmp(t, "IntProperty") && strcmp(t, "ByteProperty")) { LOG("ragdoll bloodbag: NumJuiced is a %s, not a number: blood bags stay", t); return; }
+    juice_f = f;
+    explode_fn = fn;
+    FField *lf = ue_find_prop(fn, "LocationOverride");
+    char sn[64];
+    if (lf && !strcmp(ue_name(*(FName *)FF_CLASS(lf), t, sizeof t), "StructProperty") && !strncmp(ue_obj_name(FP_SUB(lf), sn, sizeof sn), "Vector", 6))
+        blast_loc_f = lf;
+    else LOG("ragdoll bloodbag: no LocationOverride vector: blast pushes aim from the hit's source");
+    juice_state = 1;
+    LOG("ragdoll bloodbag: found ExplosionComponent.Multicast_ExplodeFromSeed, NumJuiced %s at +0x%x", t, FP_OFFSET(f));
+}
+
+static void unjuice(UObject *o, uint8_t *params) {
+    char t[64], a[160];
+    ue_name(*(FName *)FF_CLASS(juice_f), t, sizeof t);
+    uint8_t *v = params + FP_OFFSET(juice_f);
+    int n = !strcmp(t, "IntProperty") ? *(int32_t *)v : *v;
+    if (n <= 0) return;
+    if (!strcmp(t, "IntProperty")) *(int32_t *)v = 0; else *v = 0;
+    n_unjuiced += n;
+    n_unjuiced_calls++;
+    if (juice_logs < 20) {
+        juice_logs++;
+        UObject *owner = owner_actor(o);
+        LOG("ragdoll bloodbag: explosion of %s: %d blood bags kept as bodies (NumJuiced %d -> 0)", oname(owner ? owner : o, a, sizeof a), n, n);
+    }
+}
+
 static void pe_detour(UObject *o, UFunction *fn, void *params) {
+    if (fn == explode_fn && explode_fn && params && mode_on) {
+        if (blast_loc_f) {   // game thread: RPCs and their local runs are dispatched there
+            Blast *b = &blasts[blast_at++ % 8];
+            b->t = now_s();
+            memcpy(b->at, (uint8_t *)params + FP_OFFSET(blast_loc_f), sizeof b->at);
+        }
+        if (!bloodbag_on) unjuice(o, params);
+    }
     if (tracing && o && fn && !own_call()) trace_call(o, fn, params);
     orig_pe(o, fn, params);
+}
+
+// The ProcessEvent hook is on while a trace runs or while the ragdoll is on (one pointer compare per call).
+static int pe_enabled;
+static int pe_update(void) {
+    juice_resolve();
+    int want = tracing || (mode_on && explode_fn);   // with the ragdoll on: blood bags and blast centres
+    if (want && !hook_made) {
+        InitializeCriticalSection(&tcs);
+        if (MH_CreateHook((void *)ADDR_PROCESSEVENT, (void *)pe_detour, (void **)&orig_pe) != MH_OK) {
+            LOG("ragdoll: ProcessEvent hook could not be made");
+            return -1;
+        }
+        hook_made = 1;
+    }
+    if (want && !pe_enabled) {
+        if (MH_EnableHook((void *)ADDR_PROCESSEVENT) != MH_OK) { LOG("ragdoll: ProcessEvent hook could not be enabled"); return -1; }
+        pe_enabled = 1;
+    } else if (!want && pe_enabled) {
+        MH_DisableHook((void *)ADDR_PROCESSEVENT);
+        pe_enabled = 0;
+    }
+    return 0;
 }
 
 static void trace_on_death(UObject *actor) {   // game thread, from the tick that saw it die
@@ -678,9 +765,9 @@ static int trace_start(double secs, Out *o) {
     trace_end = trace_t0 + secs;
     LeaveCriticalSection(&tcs);
     game_tid = GetCurrentThreadId();   // chat commands run on the game thread
-    if (MH_EnableHook((void *)ADDR_PROCESSEVENT) != MH_OK) { out_printf(o, "/ragdoll trace: hook failed\n"); return -1; }
-    stacks_arm();
     InterlockedExchange(&tracing, 1);
+    if (pe_update()) { InterlockedExchange(&tracing, 0); out_printf(o, "/ragdoll trace: hook failed\n"); return -1; }
+    stacks_arm();
     LOG("ragdoll trace: started for %.0f s (Ridden tracked: %d)", secs, ntr);
     return 0;
 }
@@ -688,7 +775,7 @@ static int trace_start(double secs, Out *o) {
 static void trace_stop(const char *why) {
     if (!tracing) return;
     InterlockedExchange(&tracing, 0);
-    MH_DisableHook((void *)ADDR_PROCESSEVENT);
+    pe_update();   // stays on for the blood bags while the ragdoll is on
     stacks_disarm();
     LOG("ragdoll trace: stopped (%s): %d calls on Ridden, %d distinct class.function, %d deaths seen; hit calls logged: %d "
         "on Ridden/corpses (cap %d), %d elsewhere (cap %d)", why, n_calls, npairs, n_deaths, n_hit_lines, HIT_LINES,
@@ -1108,13 +1195,14 @@ static void extra_gravity(Tracked *x) {
 #define PUSH_LOGS    40      // pushes logged per /ragdoll on
 #define HIT_DUMPS    3       // deaths whose whole RecentDamageInfo is logged per /ragdoll on (array order, clients)
 typedef struct { char key[24]; float n; uint8_t radial; } PushKind;
-static PushKind push_tab[48] = {   // first guesses, to be tuned in game; a Common weighs roughly 70-90 kg
+static PushKind push_tab[48] = {   // first guesses (x the scale, default 4); a Common weighs 133 kg by GetBoneMass
     {"HG", 6000, 0},  {"SMG", 7000, 0}, {"AR", 9000, 0}, {"LMG", 11000, 0}, {"SG", 25000, 0},
     {"FragGrenade", 40000, 1}, {"PipeBomb", 40000, 1}, {"Grenade", 40000, 1}, {"Explosi", 40000, 1},
     {"Propane", 40000, 1}, {"Stumble", 0, 0}, {"default", 8000, 0},
+    {"Sni", 25000, 0},   // snipers (Sni01_DamageType_C) as strong as the shotgun (Joon, 16 Oct)
 };
-static int n_push_tab = 12;
-#define PUSH_DEFAULT 4.f   // Joon's pick (build 17, 16 Oct): x1 was too weak (bodies weigh ~700-800 kg by GetBoneMass)
+static int n_push_tab = 13;
+#define PUSH_DEFAULT 4.f   // Joon's pick (build 17, 16 Oct). GetBoneMass sums: Common 133 kg, Reeker family 710-790 kg
 static float push_scale = PUSH_DEFAULT;
 static int n_pushed, n_push_radial, n_push_nohit, n_push_fail, push_logs, hit_dumps;
 
@@ -1351,20 +1439,41 @@ static void push_body(Tracked *t, UObject *mesh) {
         for (int c = 0; c < 3; c++) org[c] = pt[c] - d[c];
         from = "the record";
     } else {
-        if (bone_loc(mesh, bone, pt) && actor_loc(t->a, pt)) { n_push_fail++; return; }
+        if (bone_loc(mesh, bone, pt) && actor_loc(t->a, pt)) {
+            n_push_fail++;
+            if (push_logs < PUSH_LOGS) { push_logs++; LOG("ragdoll push: %s: no place for bone %s: not pushed", oname(t->a, a, sizeof a), hb); }
+            return;
+        }
         const float *sl = dinfo.srcloc ? (const float *)(best + FP_OFFSET(dinfo.srcloc)) : NULL;
         UObject *src = dinfo.source ? obj_field(dinfo.source, best) : NULL;
         if (sl && (sl[0] != 0.f || sl[1] != 0.f || sl[2] != 0.f)) { memcpy(org, sl, sizeof org); from = "SourceLocation"; }
         else if (src && !actor_loc(owner_actor(src) ? owner_actor(src) : src, org)) from = "the source's place";
+        else if (kind->radial) { memcpy(org, pt, sizeof org); org[2] -= 50.f; from = "below the body (no source)"; }   // replaced by a blast below
         else {
             n_push_fail++;
             if (push_logs < PUSH_LOGS) { push_logs++; LOG("ragdoll push: %s: killing hit (%s) has no source location: not pushed", oname(t->a, a, sizeof a), tn); }
             return;
         }
     }
+    if (kind->radial) {   // the blast centre: the nearest explosion of the last second, if any within 20 m
+        double now = now_s();
+        float bd = 2000.f * 2000.f;
+        int bi = -1;
+        for (int i = 0; i < 8; i++) {
+            if (!blasts[i].t || now - blasts[i].t > 1.0) continue;
+            float d2 = 0;
+            for (int c = 0; c < 3; c++) d2 += (pt[c] - blasts[i].at[c]) * (pt[c] - blasts[i].at[c]);
+            if (d2 < bd) { bd = d2; bi = i; }
+        }
+        if (bi >= 0) { memcpy(org, blasts[bi].at, sizeof org); from = "the explosion"; }
+    }
     for (int c = 0; c < 3; c++) dr[c] = pt[c] - org[c];
     float len = sqrtf(dr[0] * dr[0] + dr[1] * dr[1] + dr[2] * dr[2]);
-    if (len < 1e-3f) { n_push_fail++; return; }
+    if (len < 1e-3f) {
+        n_push_fail++;
+        if (push_logs < PUSH_LOGS) { push_logs++; LOG("ragdoll push: %s: killing hit (%s) comes from the body's own place: not pushed", oname(t->a, a, sizeof a), tn); }
+        return;
+    }
     float mass = body_mass(mesh, bl);
     int log_it = push_logs < PUSH_LOGS;
     UObject *src = dinfo.source ? obj_field(dinfo.source, best) : NULL;
@@ -1414,7 +1523,8 @@ static void push_body(Tracked *t, UObject *mesh) {
 // timer for them, so they lay there until the deadline. So: at death, if the death montage the game just started is a
 // pop or an explosion, the death is the game's: no montage stop, no ragdoll, no push. Per death, by the montage, so a
 // Reeker that ever dies without popping still ragdolls, and other popping kinds need no list.
-static const char *const POP_KEYS[] = {"deathpop", "explode", "gib", NULL};
+// Not "gib": the Zom_Death_Gib_* deaths of commons near a blast (build 18 trace) are ragdolled and pushed (Joon, 16 Oct).
+static const char *const POP_KEYS[] = {"deathpop", "explode", NULL};
 static int n_left, left_logs;
 
 static int special_death(Tracked *t) {
@@ -1423,7 +1533,7 @@ static int special_death(Tracked *t) {
     UObject *mon = ai ? call_obj(ai, "GetCurrentActiveMontage") : NULL;
     if (!mon || !name_has(ue_obj_name(mon, m, sizeof m), POP_KEYS)) return 0;
     n_left++;
-    if (left_logs < 20) {
+    if (left_logs < 60) {
         left_logs++;
         LOG("ragdoll: %s (%s) left to the game: its death montage %s pops or explodes", oname(t->a, a, sizeof a),
             cname(t->a, c, sizeof c), m);
@@ -1802,14 +1912,15 @@ void ragdoll_slash(char *rest, Out *o) {
                       "settle hold %s: %d held, %d at rest + %d at the %.0f s cap (avg %.1f s, max %.1f s after death), "
                       "%d deleted while held; corpse budget %s: %d spared (%d again); deadline %.0f s: %d removed "
                       "(%d never got the game's settle check); mass x%.2f, gravity x%.2f%s; push x%.2f: %d pushed (%d explosions), "
-                      "%d without a hit, %d failed; %ld stacks logged%s%s\n",
+                      "%d without a hit, %d failed; blood bags %s: %d kept as bodies in %d explosions; %ld stacks logged%s%s\n",
                    mode_on ? "on" : "off", mode_on && delay_s > 0 ? " (after the game's animation)" : "", ntr, n_deaths,
                    n_applied, n_left, n_failed, n_revived,
                    settle_state == 1 ? "on" : settle_state ? "OFF (see log)" : "not armed yet", n_held, n_at_rest, n_capped,
                    SETTLE_CAP, released ? settle_sum / released : 0.0, settle_max, n_held_gone,
                    corpse_state == 1 ? "hook on" : corpse_state ? "hook OFF (see log)" : "not armed yet", n_spared,
                    n_spared_again, deadline_s, n_ended, n_ended_unchecked, mass_scale, grav_scale, n_grav_fail ? " (NO EFFECT: see log)" : "",
-                   push_scale, n_pushed, n_push_radial, n_push_nohit, n_push_fail, stack_id,
+                   push_scale, n_pushed, n_push_radial, n_push_nohit, n_push_fail,
+                   bloodbag_on ? "on" : juice_state < 0 ? "off but NOT AVAILABLE" : "off", n_unjuiced, n_unjuiced_calls, stack_id,
                    tracing ? ", tracing" : "", n_overflow ? ", tracking list full" : "");
     } else if (!strcmp(verb, "on")) {
         float d = arg ? (float)atof(arg) : 0.f;
@@ -1817,14 +1928,16 @@ void ragdoll_slash(char *rest, Out *o) {
         mode_on = 1;
         detail_left = DETAIL_LOGS;
         settle_logs = 0;
-        push_logs = hit_dumps = left_logs = 0;
+        push_logs = hit_dumps = left_logs = juice_logs = 0;
         settle_arm();
+        pe_update();
         LOG("ragdoll: on, delay %.2f s", delay_s);
         out_printf(o, "/ragdoll on: Ridden that die from now on fall as ragdolls%s and stay until they lie still (this machine only)%s\n",
                    delay_s > 0 ? " after the game's death animation starts" : "",
                    settle_state == 1 ? "" : "; settle hold OFF: they freeze at the game's time (see log)");
     } else if (!strcmp(verb, "off")) {
         mode_on = 0;
+        pe_update();
         LOG("ragdoll: off");
         out_printf(o, "/ragdoll off\n");
     } else if (!strcmp(verb, "mass")) {
@@ -1853,6 +1966,15 @@ void ragdoll_slash(char *rest, Out *o) {
         }
         out_printf(o, "/ragdoll deadline: every ragdoll still there %.0f s after death is removed (12-120, default 15)\n",
                    deadline_s);
+    } else if (!strcmp(verb, "bloodbag")) {
+        if (arg && (!strcmp(arg, "on") || !strcmp(arg, "off"))) {
+            bloodbag_on = !strcmp(arg, "on");
+            pe_update();
+            LOG("ragdoll bloodbag: %s", bloodbag_on ? "on (the game's)" : "off (bodies kept)");
+        }
+        out_printf(o, "/ragdoll bloodbag: %s (default off) while /ragdoll is on: commons near a blast %s%s\n",
+                   bloodbag_on ? "on" : "off", bloodbag_on ? "burst like a blood bag (the game's)" : "stay bodies, ragdolled and pushed",
+                   juice_state < 0 ? "; NOT AVAILABLE (see log)" : "");
     } else if (!strcmp(verb, "push")) {
         char *arg2 = arg ? strtok(NULL, " ") : NULL;
         if (arg && !arg2 && (isdigit((unsigned char)arg[0]) || arg[0] == '.')) {   // /ragdoll push <x>: overall scale
@@ -1893,7 +2015,7 @@ void ragdoll_slash(char *rest, Out *o) {
         if (tracing) trace_stop("restarted");
         if (trace_start(s, o) == 0) out_printf(o, "/ragdoll trace: %.0f s, kill a few Ridden now (log: \"ragdoll trace\" lines)\n", s);
     } else {
-        out_printf(o, "usage: /ragdoll [on [delay]|off|status|mass [x]|gravity [x]|deadline [s]|push [x|on|off|<kind> <n>]|probe|trace [secs]]\n");
+        out_printf(o, "usage: /ragdoll [on [delay]|off|status|mass [x]|gravity [x]|deadline [s]|push [x|on|off|<kind> <n>]|bloodbag [on|off]|probe|trace [secs]]\n");
     }
 }
 
