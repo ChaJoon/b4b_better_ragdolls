@@ -1116,34 +1116,83 @@ static int n_push_tab = 12;
 static float push_scale = 1.f;
 static int n_pushed, n_push_radial, n_push_nohit, n_push_fail, push_logs, hit_dumps;
 
-// FDamageInfo's fields, found by reflection once (HealthComponent.RecentDamageInfo's inner struct)
-static struct { int state; int32_t arr_off, elsize; FField *type, *comp, *point, *dir, *bone, *prev_hp, *damage; } dinfo;
+// The stored hit record's fields, found by reflection once. Build 15 assumed it was the same FDamageInfo the OnDamage
+// event carries; it isn't (no HitComponent of that type), so now only a hit point and a direction are required and
+// every other field is optional, under the names it may have. The record's full layout is logged once.
+static struct {
+    int state; int32_t arr_off, elsize; UStruct *st;
+    FField *point, *dir;                          // required: vectors
+    FField *type, *comp, *bone, *prev_hp, *stumble, *damage;   // optional
+} dinfo;
+
+static FField *field_of(UStruct *st, const char *const *names, const char *const *types, int vector) {
+    char t[64], sn[96];
+    for (int i = 0; names[i]; i++) {
+        FField *f = ue_find_prop(st, names[i]);
+        if (!f) continue;
+        ue_name(*(FName *)FF_CLASS(f), t, sizeof t);
+        for (int k = 0; types[k]; k++) {
+            if (strcmp(t, types[k])) continue;
+            if (vector && strncmp(ue_obj_name(FP_SUB(f), sn, sizeof sn), "Vector", 6)) continue;
+            return f;
+        }
+    }
+    return NULL;
+}
 
 static int dinfo_init(UObject *hc) {
     if (dinfo.state) return dinfo.state;
-    char t[64];
+    char sn[96], fn[64], t[64], line[2048];
     dinfo.state = -1;
     FField *arr = ue_find_prop(U_CLASS(hc), "RecentDamageInfo");
     FField *inner = arr ? *(FField **)((char *)arr + 0x78) : NULL;   // FArrayProperty::Inner
-    UStruct *st = inner ? (UStruct *)FP_SUB(inner) : NULL;
-    if (!st) { LOG("ragdoll push: no HealthComponent.RecentDamageInfo (or not an array of structs): pushes off"); return -1; }
+    char it[64] = "";
+    if (inner) ue_name(*(FName *)FF_CLASS(inner), it, sizeof it);
+    UStruct *st = inner && !strcmp(it, "StructProperty") ? (UStruct *)FP_SUB(inner) : NULL;
+    if (!st) { LOG("ragdoll push: HealthComponent.RecentDamageInfo %s: pushes off", !arr ? "missing" : "is not an array of structs"); return -1; }
+    dinfo.st = st;
     dinfo.arr_off = FP_OFFSET(arr);
     dinfo.elsize = FP_ELSIZE(inner);
-    struct { FField **f; const char *name, *type; } want[] = {
-        {&dinfo.type, "DamageType", "ObjectProperty"}, {&dinfo.comp, "HitComponent", "ObjectProperty"},
-        {&dinfo.point, "ImpactPoint", "StructProperty"}, {&dinfo.dir, "ImpactDirection", "StructProperty"},
-        {&dinfo.bone, "BoneName", "NameProperty"}, {&dinfo.prev_hp, "PreviousTotalHealth", "FloatProperty"},
-        {&dinfo.damage, "Damage", "FloatProperty"}};
-    for (size_t i = 0; i < sizeof want / sizeof want[0]; i++) {
-        FField *f = ue_find_prop(st, want[i].name);
-        if (!f || strcmp(ue_name(*(FName *)FF_CLASS(f), t, sizeof t), want[i].type)) {
-            LOG("ragdoll push: DamageInfo.%s missing or not a %s: pushes off", want[i].name, want[i].type);
-            return -1;
-        }
-        *want[i].f = f;
-    }
-    LOG("ragdoll push: HealthComponent.RecentDamageInfo at 0x%x, %d-byte DamageInfo entries", dinfo.arr_off, dinfo.elsize);
+    size_t k = (size_t)snprintf(line, sizeof line, "ragdoll push: RecentDamageInfo = array of %s (%d bytes):", ue_obj_name(st, sn, sizeof sn), dinfo.elsize);
+    for (UStruct *x = st; x && k + 64 < sizeof line; x = US_SUPER(x))
+        for (FField *f = US_CHILDPROPS(x); f && k + 64 < sizeof line; f = FF_NEXT(f))
+            k += (size_t)snprintf(line + k, sizeof line - k, " %s:%s@0x%x", ue_name(FF_NAME(f), fn, sizeof fn),
+                                  ue_name(*(FName *)FF_CLASS(f), t, sizeof t), FP_OFFSET(f));
+    LOG("%s", line);
+    static const char *const VEC[] = {"StructProperty", NULL}, *const OBJ[] = {"ObjectProperty", "WeakObjectProperty", "ClassProperty", NULL},
+                             *const NAM[] = {"NameProperty", NULL}, *const FLT[] = {"FloatProperty", NULL}, *const BOO[] = {"BoolProperty", NULL};
+    static const char *const N_POINT[] = {"ImpactPoint", "HitResultLocation", "HitLocation", "Location", NULL},
+                             *const N_DIR[] = {"ImpactDirection", "Direction", "ShotDirection", "HitDirection", "TraceDirection", NULL},
+                             *const N_TYPE[] = {"DamageType", "DamageTypeClass", NULL}, *const N_COMP[] = {"HitComponent", NULL},
+                             *const N_BONE[] = {"BoneName", "HitBoneName", "Bone", NULL},
+                             *const N_HP[] = {"PreviousTotalHealth", "PreviousHealth", NULL},
+                             *const N_STUMBLE[] = {"bStumbleEvent", NULL}, *const N_DMG[] = {"Damage", NULL};
+    dinfo.point = field_of(st, N_POINT, VEC, 1);
+    dinfo.dir = field_of(st, N_DIR, VEC, 1);
+    dinfo.type = field_of(st, N_TYPE, OBJ, 0);
+    dinfo.comp = field_of(st, N_COMP, OBJ, 0);
+    dinfo.bone = field_of(st, N_BONE, NAM, 0);
+    dinfo.prev_hp = field_of(st, N_HP, FLT, 0);
+    dinfo.stumble = field_of(st, N_STUMBLE, BOO, 0);
+    dinfo.damage = field_of(st, N_DMG, FLT, 0);
+    #define FNM(f) ((f) ? ue_name(FF_NAME(f), fn, sizeof fn) : "-")
+    LOG("ragdoll push: using point %s, direction %s", FNM(dinfo.point), dinfo.dir ? ue_name(FF_NAME(dinfo.dir), t, sizeof t) : "-");
+    LOG("ragdoll push: optional: type %s", FNM(dinfo.type));
+    LOG("ragdoll push: optional: hit component %s", FNM(dinfo.comp));
+    LOG("ragdoll push: optional: bone %s", FNM(dinfo.bone));
+    LOG("ragdoll push: optional: health before %s (none: the newest entry is taken as the last one)", FNM(dinfo.prev_hp));
+    LOG("ragdoll push: optional: stumble flag %s", FNM(dinfo.stumble));
+    #undef FNM
+    if (!dinfo.point || !dinfo.dir) { LOG("ragdoll push: the record has no hit point or no direction (field list above): pushes off"); return -1; }
     return dinfo.state = 1;
+}
+
+// an object field of a record: object, weak object or class property
+static UObject *obj_field(FField *f, const uint8_t *e) {
+    char t[64];
+    if (!f) return NULL;
+    ue_name(*(FName *)FF_CLASS(f), t, sizeof t);
+    return !strcmp(t, "WeakObjectProperty") ? ue_weak_get(e + FP_OFFSET(f)) : *(UObject *const *)(e + FP_OFFSET(f));
 }
 
 static PushKind *push_kind(const char *key, int add) {
@@ -1159,7 +1208,10 @@ static PushKind *push_kind(const char *key, int add) {
 // the damage type's class name -> the table entry
 static PushKind *kind_of(UObject *dtype, char *name, size_t n) {
     if (!dtype) { snprintf(name, n, "None"); return push_kind("default", 0); }
-    cname(dtype, name, n);
+    static UClass *class_cls;
+    if (!class_cls) class_cls = cls("Class");
+    if (class_cls && ue_is_a(dtype, class_cls)) ue_obj_name(dtype, name, n);   // a class (ClassProperty)
+    else cname(dtype, name, n);                                               // its default object
     char code[24], low[160], kl[24];
     size_t i = 0;
     for (; name[i] && i + 1 < sizeof code && ((name[i] >= 'A' && name[i] <= 'Z') || (name[i] >= 'a' && name[i] <= 'z')); i++) code[i] = name[i];
@@ -1206,13 +1258,14 @@ static float body_mass(UObject *mesh, const BodyList *bl) {
 }
 
 static void log_hit(const char *tag, int idx, const uint8_t *e) {
-    char tn[96], cn[96], bn[64];
-    const float *p = (const float *)(e + FP_OFFSET(dinfo.point)), *d = (const float *)(e + FP_OFFSET(dinfo.dir));
-    UObject *ty = *(UObject *const *)(e + FP_OFFSET(dinfo.type)), *hc = *(UObject *const *)(e + FP_OFFSET(dinfo.comp));
-    LOG("ragdoll push:   %s [%d] %s damage %g, health before %g, hit %s, bone %s, point (%.0f %.0f %.0f), direction (%.2f %.2f %.2f)",
-        tag, idx, ty ? cname(ty, tn, sizeof tn) : "None", *(const float *)(e + FP_OFFSET(dinfo.damage)),
-        *(const float *)(e + FP_OFFSET(dinfo.prev_hp)), hc ? oname(hc, cn, sizeof cn) : "None",
-        ue_name(*(const FName *)(e + FP_OFFSET(dinfo.bone)), bn, sizeof bn), p[0], p[1], p[2], d[0], d[1], d[2]);
+    char line[2048], fn[64], fv[256];
+    size_t k = (size_t)snprintf(line, sizeof line, "ragdoll push:   %s [%d]", tag, idx);
+    for (UStruct *x = dinfo.st; x && k + 32 < sizeof line; x = US_SUPER(x))
+        for (FField *f = US_CHILDPROPS(x); f && k + 32 < sizeof line; f = FF_NEXT(f)) {
+            fmt_prop(f, e, fv, sizeof fv, 0);
+            k += (size_t)snprintf(line + k, sizeof line - k, " %s=%s", ue_name(FF_NAME(f), fn, sizeof fn), fv);
+        }
+    LOG("%s", line);
 }
 
 static void push_body(Tracked *t, UObject *mesh) {
@@ -1227,15 +1280,21 @@ static void push_body(Tracked *t, UObject *mesh) {
     for (int i = 0; arr->data && i < arr->num && i < 16; i++) {
         const uint8_t *e = (const uint8_t *)arr->data + (size_t)i * dinfo.elsize;
         if (dump) log_hit("entry", i, e);
-        if (!*(UObject *const *)(e + FP_OFFSET(dinfo.comp))) continue;   // the stumble event: no hit component
-        if (!best || *(const float *)(e + FP_OFFSET(dinfo.prev_hp)) < *(const float *)(best + FP_OFFSET(dinfo.prev_hp))) best = e;
+        // the stumble event that comes with every hit: its flag, else no hit component, else a Stumble damage type
+        if (dinfo.stumble && bool_at(dinfo.stumble, e) == 1) continue;
+        if (dinfo.comp && !obj_field(dinfo.comp, e)) continue;
+        if (dinfo.type) { char sn[96]; PushKind *sk = kind_of(obj_field(dinfo.type, e), sn, sizeof sn); if (sk && !strcmp(sk->key, "Stumble")) continue; }
+        const float *d = (const float *)(e + FP_OFFSET(dinfo.dir));
+        if (d[0] == 0.f && d[1] == 0.f && d[2] == 0.f) continue;
+        // the killing hit: the lowest health before it if the record has that, else the newest (assumed: the last)
+        if (!best || (dinfo.prev_hp ? *(const float *)(e + FP_OFFSET(dinfo.prev_hp)) < *(const float *)(best + FP_OFFSET(dinfo.prev_hp)) : 1)) best = e;
     }
     if (!best) {
         n_push_nohit++;
-        if (push_logs < PUSH_LOGS) { push_logs++; LOG("ragdoll push: %s: no hit with a hit component in RecentDamageInfo (%d entries): not pushed", oname(t->a, a, sizeof a), arr->num); }
+        if (push_logs < PUSH_LOGS) { push_logs++; LOG("ragdoll push: %s: no usable hit in RecentDamageInfo (%d entries): not pushed", oname(t->a, a, sizeof a), arr->num); }
         return;
     }
-    PushKind *kind = kind_of(*(UObject *const *)(best + FP_OFFSET(dinfo.type)), tn, sizeof tn);
+    PushKind *kind = dinfo.type ? kind_of(obj_field(dinfo.type, best), tn, sizeof tn) : (snprintf(tn, sizeof tn, "unknown"), push_kind("default", 0));
     float strength = kind->n * push_scale;
     if (strength <= 0.f) return;
     const float *pt = (const float *)(best + FP_OFFSET(dinfo.point)), *dr = (const float *)(best + FP_OFFSET(dinfo.dir));
@@ -1267,7 +1326,7 @@ static void push_body(Tracked *t, UObject *mesh) {
         return;
     }
     // bullets and melee: the hit bone's body, or the nearest parent bone with a body
-    FName bone = *(const FName *)(best + FP_OFFSET(dinfo.bone));
+    FName bone = dinfo.bone ? *(const FName *)(best + FP_OFFSET(dinfo.bone)) : (FName){0, 0};
     ue_name(bone, hb, sizeof hb);
     for (int up = 0; bone.idx && bl && !has_body(bl, bone) && up < 8; up++) {
         if (!call_prep(&k, mesh, "GetParentBone")) { bone = (FName){0, 0}; break; }
@@ -1724,6 +1783,9 @@ void ragdoll_slash(char *rest, Out *o) {
         } else if (arg && !strcmp(arg, "off")) {
             push_scale = 0.f;
             LOG("ragdoll push: off");
+        } else if (arg && !strcmp(arg, "on")) {
+            push_scale = 1.f;
+            LOG("ragdoll push: on (x1)");
         } else if (arg && arg2) {   // /ragdoll push <key> <n>: one weapon kind
             float n = (float)atof(arg2);
             PushKind *k = push_kind(arg, 1);
@@ -1731,7 +1793,7 @@ void ragdoll_slash(char *rest, Out *o) {
             k->n = n < 0.f ? 0.f : n > 500000.f ? 500000.f : n;
             LOG("ragdoll push: %s = %.0f%s", k->key, k->n, k->radial ? " (explosion)" : "");
         } else if (arg) {
-            out_printf(o, "usage: /ragdoll push [<x> | off | <weapon kind> <strength>]\n");
+            out_printf(o, "usage: /ragdoll push [<x> | on | off | <weapon kind> <strength>]\n");
             return;
         }
         char line[1024];
@@ -1752,7 +1814,7 @@ void ragdoll_slash(char *rest, Out *o) {
         if (tracing) trace_stop("restarted");
         if (trace_start(s, o) == 0) out_printf(o, "/ragdoll trace: %.0f s, kill a few Ridden now (log: \"ragdoll trace\" lines)\n", s);
     } else {
-        out_printf(o, "usage: /ragdoll [on [delay]|off|status|mass [x]|gravity [x]|deadline [s]|push [x|off|<kind> <n>]|probe|trace [secs]]\n");
+        out_printf(o, "usage: /ragdoll [on [delay]|off|status|mass [x]|gravity [x]|deadline [s]|push [x|on|off|<kind> <n>]|probe|trace [secs]]\n");
     }
 }
 
