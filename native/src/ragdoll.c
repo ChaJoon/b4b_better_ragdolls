@@ -15,6 +15,8 @@
 //   /ragdoll push [x]        the killing hit throws the body (step 2): overall strength x (0-10, default 4, off = 0);
 //   /ragdoll push <kind> <n> one weapon kind's strength in kg cm/s (HG, SMG, AR, LMG, SG, Sni, FragGrenade, default, ...)
 //   /ragdoll bloodbag [on|off] off (default): Ridden an explosion would burst stay bodies (ragdolled, pushed)
+//   /ragdoll dismember [on|off|type <n>|impulse <n>]  experiment, off by default: blast victims lose 2 limbs through
+//                            the game's MutilationState (see "dismemberment")
 //   /ragdoll probe           the nearest living Ridden: its mesh, physics asset, collision, and the death-related
 //                            functions/properties of its classes, into the log (discovery). Also (step 2 discovery):
 //                            every setting that could push a body (mesh, movement, actor), all its components (hit,
@@ -162,6 +164,8 @@ typedef struct {
     uint8_t bag;                           // an explosion's destroy (the blood bag) was refused for it
     uint8_t ended;                         // removed by the deadline (hidden, physics off, destroy asked)
     uint8_t fxwho, fxp;                    // build 23 arcs probe: 1 spared, 2 control; probes done (bit per time)
+    uint8_t blast_ok;                      // build 27: pushed by a recorded explosion, from blast_at
+    float blast_at[3];
     FName prof;
     float rel_loc[3], rel_rot[3];
 } Tracked;
@@ -238,7 +242,7 @@ static int npairs, n_calls;
 // Ridden or corpse, "ragdoll hit-other" on anything else: the weapon, the hero, a projectile, the game state).
 static const char *const HIT_KEYS[] = {"damage", "hit", "impact", "impulse", "react", "shot", "explo", "radial",
                                        "bullet", "projectile", "wound", "dismember", "gib", "stagger", "knock",
-                                       "flinch", "force", "momentum", NULL};
+                                       "flinch", "force", "momentum", "mutil", NULL};   // mutil: build 27
 #define HIT_LINES        400   // per trace, on Ridden / corpses
 #define HIT_PER_FN       40    // per class.function (a calm test: 5 Ridden, a few shots each, killing hits included)
 #define OTHER_LINES      200   // per trace, everything else
@@ -686,7 +690,7 @@ static int fx_ring_at, fx_new_logs;
 static void fx_note(UClass *c, UObject *r, UObject *outer) {   // game thread, from the construction hook
     static const char *const NEW_KEYS[] = {"particle", "niagara", "fx", "decal", "emitter", "blood", "gore", "gib",
                                            "juice", "mutil", "limb", "dismember", "sever", "chunk",
-                                           "materialinstancedynamic", NULL};
+                                           "materialinstancedynamic", "staticmesh", NULL};   // staticmesh: gib pieces (build 27)
     if (fx_new_logs >= FX_NEW_LOGS) return;
     char cn[96], a[96], b[96], d[64], e[96];
     if (!name_has(ue_obj_name(c, cn, sizeof cn), NEW_KEYS)) return;
@@ -1797,7 +1801,7 @@ static void push_body(Tracked *t, UObject *mesh) {
             for (int c = 0; c < 3; c++) d2 += (pt[c] - blasts[i].at[c]) * (pt[c] - blasts[i].at[c]);
             if (d2 < bd) { bd = d2; bi = i; }
         }
-        if (bi >= 0) { memcpy(org, blasts[bi].at, sizeof org); from = "the explosion"; }
+        if (bi >= 0) { memcpy(org, blasts[bi].at, sizeof org); from = "the explosion"; memcpy(t->blast_at, org, sizeof org); t->blast_ok = 1; }
     }
     for (int c = 0; c < 3; c++) dr[c] = pt[c] - org[c];
     float len = sqrtf(dr[0] * dr[0] + dr[1] * dr[1] + dr[2] * dr[2]);
@@ -1844,6 +1848,178 @@ static void push_body(Tracked *t, UObject *mesh) {
             "(%.2f %.2f %.2f), body %.1f kg (~%.0f cm/s for the whole body)", oname(t->a, a, sizeof a), tn, kind->key, kind->n,
             push_scale, oname(src, sn, sizeof sn), cname(src, sc, sizeof sc), from, len, hb, bone.idx ? ue_name(bone, bn, sizeof bn) : "the root body",
             dr[0] / len, dr[1] / len, dr[2] / len, mass, mass > 0 ? strength / mass : -1.f);
+    }
+}
+
+// ---- dismemberment (build 27: discovery + an opt-in experiment) ----
+// MutilationComponent (builds 23-26 probes): `MutilationState`, a replicated array of MutilationInfo {Region, Type,
+// Impulse, ImpactPoint, SourceActor} (clients act on it in OnRep_MutilationState), and `DismembermentMeshPieces`, one
+// per limb region: a static mesh (Common_Gib_*_SM) at a bone with a blood spray. There is no callable "dismember"
+// function. So:
+//   1. every body we ragdoll: its MutilationState is logged when it isn't empty (first 30 bodies), and the trace logs
+//      the mutilation calls (ArmorComponent.OnMutilated ...) with their parameters: the game's own values (Type,
+//      Impulse) for a limb that came off (a Tallboy's arm);
+//   2. /ragdoll dismember on (off by default): a blast victim (spared blood bag or not) gets 2 random limb regions of
+//      its own pieces appended to MutilationState with the Type last seen on a real one, an impulse away from the
+//      blast, then OnRep_MutilationState is called here. Whether the game then hides the limb and throws the piece is
+//      what the run shows (and IsRegionDismembered after it). On the host the array also replicates to clients.
+#define ADDR_GMALLOC VA(0x1469E59F0ull)     // FMalloc* GMalloc; vtable +0x20 Realloc(this, ptr, size, align) (as models.c)
+typedef void *(*GmReallocFn)(void *self, void *p, size_t n, uint32_t align);
+static void *rd_realloc(void *p, size_t n) {
+    void *gm = *(void **)ADDR_GMALLOC;
+    return gm ? ((GmReallocFn)(*(void ***)gm)[4])(gm, p, n, 16) : NULL;
+}
+
+static int dism_on;                  // /ragdoll dismember on|off
+static int dism_type = -1;           // MutilationInfo.Type to write: the last one seen on a real entry, or set by hand
+static int dism_type_set;            // set by hand (not overwritten by what is seen)
+static float dism_imp;               // |Impulse| to write: last seen, or set by hand (0 = 5000)
+static int dism_imp_set, dism_logs, mstate_logs, n_dism, n_dism_fail;
+static struct {
+    int state;                       // 0 not looked up, 1 ok, -1 missing (logged)
+    FField *arr, *pieces;
+    int32_t el, pel;
+    FField *region, *type, *impulse, *point, *source, *p_region, *p_bone;
+} mi;
+
+// the names of an enum property's values (UE 4.25: FByteProperty::Enum at +0x78, FEnumProperty::Enum at +0x80;
+// UEnum::Names, TArray<TPair<FName, int64>>, at +0x40), so the log says what Type 2 means
+static void enum_names(FField *p, char *out, size_t n) {
+    char t[64], b[96];
+    out[0] = 0;
+    ue_name(*(FName *)FF_CLASS(p), t, sizeof t);
+    UObject *e = !strcmp(t, "EnumProperty") ? *(UObject **)((char *)p + 0x80) : !strcmp(t, "ByteProperty") ? FP_SUB(p) : NULL;
+    if (!e || U_INDEX(e) < 0 || U_INDEX(e) >= ue_num_objects() || ue_object_at(U_INDEX(e)) != e) { snprintf(out, n, "?"); return; }
+    cname(e, b, sizeof b);
+    if (strcmp(b, "Enum") && strcmp(b, "UserDefinedEnum")) { snprintf(out, n, "? (%s)", b); return; }
+    const TArray *names = (const TArray *)((const char *)e + 0x40);
+    size_t k = (size_t)snprintf(out, n, "%s:", ue_obj_name(e, b, sizeof b));
+    for (int i = 0; names->data && i < names->num && i < 40 && k + 8 < n; i++) {
+        const uint8_t *pr = (const uint8_t *)names->data + (size_t)i * 16;
+        ue_name(*(const FName *)pr, b, sizeof b);
+        const char *sh = strstr(b, "::");
+        k += (size_t)snprintf(out + k, n - k, " %s=%lld", sh ? sh + 2 : b, (long long)*(const int64_t *)(pr + 8));
+    }
+}
+
+static void mi_init(UObject *mut) {
+    if (mi.state) return;
+    mi.state = -1;
+    mi.arr = ue_find_prop(U_CLASS(mut), "MutilationState");
+    mi.pieces = ue_find_prop(U_CLASS(mut), "DismembermentMeshPieces");
+    FField *in = mi.arr ? *(FField **)((char *)mi.arr + 0x78) : NULL, *pin = mi.pieces ? *(FField **)((char *)mi.pieces + 0x78) : NULL;
+    UStruct *st = in ? (UStruct *)FP_SUB(in) : NULL, *pst = pin ? (UStruct *)FP_SUB(pin) : NULL;
+    if (!st || !pst) { LOG("ragdoll dismember: MutilationState / DismembermentMeshPieces not found: off"); return; }
+    mi.el = FP_ELSIZE(in); mi.pel = FP_ELSIZE(pin);
+    mi.region = ue_find_prop(st, "Region"); mi.type = ue_find_prop(st, "Type"); mi.impulse = ue_find_prop(st, "Impulse");
+    mi.point = ue_find_prop(st, "ImpactPoint"); mi.source = ue_find_prop(st, "SourceActor");
+    mi.p_region = ue_find_prop(pst, "Region"); mi.p_bone = ue_find_prop(pst, "StaticMeshAttachName");
+    if (!mi.region || !mi.type || !mi.impulse || !mi.point || !mi.p_region || !mi.p_bone || FP_ELSIZE(mi.region) != 1 ||
+        FP_ELSIZE(mi.type) != 1 || mi.el <= 0 || mi.el > 256 || mi.pel <= 0) {
+        LOG("ragdoll dismember: unexpected MutilationInfo / DismembermentMeshPiece layout: off");
+        return;
+    }
+    mi.state = 1;
+    LOG("ragdoll dismember: MutilationInfo %d bytes: Region@0x%x Type@0x%x Impulse@0x%x ImpactPoint@0x%x SourceActor@0x%x; "
+        "piece %d bytes: Region@0x%x bone@0x%x", mi.el, FP_OFFSET(mi.region), FP_OFFSET(mi.type), FP_OFFSET(mi.impulse),
+        FP_OFFSET(mi.point), mi.source ? FP_OFFSET(mi.source) : -1, mi.pel, FP_OFFSET(mi.p_region), FP_OFFSET(mi.p_bone));
+    char en[1024];
+    enum_names(mi.region, en, sizeof en);
+    LOG("ragdoll dismember: Region %s", en);
+    enum_names(mi.type, en, sizeof en);
+    LOG("ragdoll dismember: Type %s", en);
+}
+
+// at ragdoll time, every body: what the game wrote (learns Type and impulse size from real entries)
+static void mstate_note(Tracked *t) {
+    UObject *mut = comp_of(t->a, "MutilationComponent");
+    if (!mut) return;
+    mi_init(mut);
+    if (mi.state != 1) return;
+    const TArray *arr = (const TArray *)((const uint8_t *)mut + FP_OFFSET(mi.arr));
+    if (!arr->data || arr->num <= 0) return;
+    char a[160], c[96], v[400];
+    for (int i = 0; i < arr->num && i < 8; i++) {
+        const uint8_t *e = (const uint8_t *)arr->data + (size_t)i * mi.el;
+        const float *im = (const float *)(e + FP_OFFSET(mi.impulse));
+        float len = sqrtf(im[0] * im[0] + im[1] * im[1] + im[2] * im[2]);
+        if (!dism_type_set) dism_type = e[FP_OFFSET(mi.type)];
+        if (!dism_imp_set && len > 0.f) dism_imp = len;
+        if (mstate_logs < 30) {
+            fmt_prop(*(FField **)((char *)mi.arr + 0x78), e, v, sizeof v, 1);
+            LOG("ragdoll dismember: %s (%s) at death: MutilationState[%d] %s, |Impulse| %.0f", oname(t->a, a, sizeof a),
+                cname(t->a, c, sizeof c), i, v, len);
+        }
+    }
+    mstate_logs++;
+}
+
+static void dismember(Tracked *t, UObject *mesh) {
+    char a[160];
+    if (!dism_on || !t->blast_ok) return;
+    UObject *mut = comp_of(t->a, "MutilationComponent");
+    if (!mut) return;
+    mi_init(mut);
+    if (mi.state != 1) return;
+    if (dism_type < 0) {
+        if (dism_logs++ < 3) LOG("ragdoll dismember: no real dismemberment seen yet (Type unknown): shoot a limb off first, or /ragdoll dismember type <n>");
+        return;
+    }
+    TArray *arr = (TArray *)((uint8_t *)mut + FP_OFFSET(mi.arr));
+    const TArray *pcs = (const TArray *)((const uint8_t *)mut + FP_OFFSET(mi.pieces));
+    if (!pcs->data || pcs->num <= 0) return;
+    int pick[2] = {-1, -1}, np = pcs->num < 2 ? pcs->num : 2;
+    pick[0] = rand() % pcs->num;
+    if (np > 1) { pick[1] = rand() % (pcs->num - 1); if (pick[1] >= pick[0]) pick[1]++; }
+    float mag = dism_imp > 0.f ? dism_imp : 5000.f;
+    if (arr->num + np > arr->max) {
+        void *d = rd_realloc(arr->data, (size_t)(arr->num + np + 2) * (size_t)mi.el);
+        if (!d) { n_dism_fail++; LOG("ragdoll dismember: allocation failed"); return; }
+        arr->data = d;
+        arr->max = arr->num + np + 2;
+    }
+    char regs[64];
+    size_t rk = 0;
+    regs[0] = 0;
+    for (int j = 0; j < np; j++) {
+        const uint8_t *pc = (const uint8_t *)pcs->data + (size_t)pick[j] * mi.pel;
+        uint8_t region = pc[FP_OFFSET(mi.p_region)];
+        FName bone = *(const FName *)(pc + FP_OFFSET(mi.p_bone));
+        float at[3], d[3];
+        if (bone_loc(mesh, bone, at) && actor_loc(t->a, at)) continue;
+        for (int c = 0; c < 3; c++) d[c] = at[c] - t->blast_at[c];
+        float len = sqrtf(d[0] * d[0] + d[1] * d[1] + d[2] * d[2]);
+        if (len < 1.f) { d[0] = 0; d[1] = 0; d[2] = 1; len = 1.f; }
+        uint8_t *e = (uint8_t *)arr->data + (size_t)arr->num * (size_t)mi.el;
+        memset(e, 0, (size_t)mi.el);
+        e[FP_OFFSET(mi.region)] = region;
+        e[FP_OFFSET(mi.type)] = (uint8_t)dism_type;
+        float *im = (float *)(e + FP_OFFSET(mi.impulse)), *ip = (float *)(e + FP_OFFSET(mi.point));
+        for (int c = 0; c < 3; c++) { im[c] = d[c] / len * mag; ip[c] = t->blast_at[c]; }
+        arr->num++;
+        rk += (size_t)snprintf(regs + rk, sizeof regs - rk, "%s%u", rk ? ", " : "", region);
+    }
+    if (!rk) { n_dism_fail++; return; }
+    int called = call_void(mut, "OnRep_MutilationState");
+    n_dism++;
+    if (dism_logs < 40) {
+        dism_logs++;
+        char res[96];
+        size_t q = 0;
+        res[0] = 0;
+        for (int j = 0; j < np; j++) {
+            const uint8_t *pc = (const uint8_t *)pcs->data + (size_t)pick[j] * mi.pel;
+            Call k;
+            int r = -1;
+            if (call_prep(&k, mut, "IsRegionDismembered")) {
+                void *pa = carg(&k, "Region");
+                if (pa) { *(uint8_t *)pa = pc[FP_OFFSET(mi.p_region)]; call_go(&k); uint8_t *rv = carg(&k, "ReturnValue"); r = rv ? *rv != 0 : -1; }
+            }
+            q += (size_t)snprintf(res + q, sizeof res - q, "%s%d", q ? "/" : "", r);
+        }
+        LOG("ragdoll dismember: %s: regions %s appended (Type %d, impulse %.0f away from the blast), OnRep_MutilationState %s, "
+            "IsRegionDismembered %s, state now %d entries", oname(t->a, a, sizeof a), regs, dism_type, mag,
+            called ? "called" : "NOT FOUND", res, arr->num);
     }
 }
 
@@ -1936,7 +2112,9 @@ static int apply(Tracked *t) {
         LOG("ragdoll after:   montage playing %d", ai ? call_bool(ai, "IsAnyMontagePlaying") : -1);
     }
     if (sim != 1) { LOG("ragdoll: %s is not simulating after the calls", oname(t->a, a, sizeof a)); return -1; }
+    mstate_note(t);       // build 27: what the game wrote on the body (limbs it took off)
     push_body(t, mesh);   // step 2: the killing hit throws the body
+    dismember(t, mesh);   // build 27 experiment (/ragdoll dismember on)
     return 0;
 }
 
@@ -2303,6 +2481,19 @@ void ragdoll_slash(char *rest, Out *o) {
         }
         out_printf(o, "/ragdoll deadline: every ragdoll still there %.0f s after death is removed (12-120, default 15)\n",
                    deadline_s);
+    } else if (!strcmp(verb, "dismember")) {
+        char *arg2 = arg ? strtok(NULL, " ") : NULL;
+        if (arg && (!strcmp(arg, "on") || !strcmp(arg, "off"))) { dism_on = !strcmp(arg, "on"); dism_logs = 0; }
+        else if (arg && !strcmp(arg, "type") && arg2) { int v = atoi(arg2); dism_type = v < 0 ? -1 : v > 255 ? 255 : v; dism_type_set = dism_type >= 0; }
+        else if (arg && !strcmp(arg, "impulse") && arg2) { float v = (float)atof(arg2); dism_imp = v < 0 ? 0 : v; dism_imp_set = v > 0; }
+        else if (arg) { out_printf(o, "usage: /ragdoll dismember [on|off|type <n>|impulse <n>]\n"); return; }
+        if (arg) LOG("ragdoll dismember: %s, Type %d%s, impulse %.0f%s", dism_on ? "on" : "off", dism_type,
+                     dism_type_set ? " (set)" : dism_type < 0 ? " (none seen yet)" : " (seen)", dism_imp > 0 ? dism_imp : 5000.f,
+                     dism_imp_set ? " (set)" : dism_imp > 0 ? " (seen)" : " (default)");
+        out_printf(o, "/ragdoll dismember: %s (experiment, default off): blast victims lose 2 limbs; Type %d%s, impulse %.0f; "
+                      "%d done, %d failed\n", dism_on ? "on" : "off", dism_type,
+                   dism_type < 0 ? " (none seen yet: shoot a limb off first)" : dism_type_set ? " (set)" : " (seen on a real one)",
+                   dism_imp > 0 ? dism_imp : 5000.f, n_dism, n_dism_fail);
     } else if (!strcmp(verb, "bloodbag")) {
         if (arg && (!strcmp(arg, "on") || !strcmp(arg, "off"))) {
             bloodbag_on = !strcmp(arg, "on");
@@ -2352,7 +2543,7 @@ void ragdoll_slash(char *rest, Out *o) {
         if (tracing) trace_stop("restarted");
         if (trace_start(s, o) == 0) out_printf(o, "/ragdoll trace: %.0f s, kill a few Ridden now (log: \"ragdoll trace\" lines)\n", s);
     } else {
-        out_printf(o, "usage: /ragdoll [on [delay]|off|status|mass [x]|gravity [x]|deadline [s]|push [x|on|off|<kind> <n>]|bloodbag [on|off]|probe|trace [secs]]\n");
+        out_printf(o, "usage: /ragdoll [on [delay]|off|status|mass [x]|gravity [x]|deadline [s]|push [x|on|off|<kind> <n>]|bloodbag [on|off]|dismember [on|off|type <n>|impulse <n>]|probe|trace [secs]]\n");
     }
 }
 
