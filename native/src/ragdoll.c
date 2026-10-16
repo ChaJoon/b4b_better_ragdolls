@@ -9,6 +9,8 @@
 //   /ragdoll on [delay]      ragdoll Ridden that die from now on; delay = seconds of the game's own death animation
 //                            first (default 0 = physics at once)
 //   /ragdoll off
+//   /ragdoll mass [x]        every body's mass x the scale (0.1-10, default 1), for bodies that die from now on
+//   /ragdoll gravity [x]     gravity on our ragdolls x the scale (0-5, default 1), at once, bodies in flight included
 //   /ragdoll probe           the nearest living Ridden: its mesh, physics asset, collision, and the death-related
 //                            functions/properties of its classes, into the log (discovery)
 //   /ragdoll trace [secs]    log the game's function calls on Ridden (default 30 s): every new class.function once,
@@ -147,6 +149,7 @@ typedef struct {
     const struct BodyList *bodies;         // its physics bodies' bone names (settle test), NULL = root body only
     float last_v;                          // fastest body at the last settle check, cm/s
     uint8_t spared;                        // times the corpse budget's delete was skipped for it
+    uint8_t mass_set;                      // apply() changed its mass scale (undone if the actor comes back)
     FName prof;
     float rel_loc[3], rel_rot[3];
 } Tracked;
@@ -162,10 +165,22 @@ typedef struct BodyList { UObject *pa; int n; FName bone[MAX_BODIES]; } BodyList
 static BodyList body_lists[8];
 static int n_body_lists;
 
+// ---- tuning: mass and gravity of our ragdolls (this machine only, not saved, like the rest of /ragdoll) ----
+// Mass: USkeletalMeshComponent::SetAllMassScale at ragdoll time, every body's mass x the scale (ratios between bodies
+// kept). Under gravity alone it changes nothing (every mass falls alike); it decides how far a push moves a body:
+// the killing hit's impulse (step 2), other bodies, things walking into it.
+// Gravity: Unreal has only gravity on/off per body, and the world's gravity also moves players and projectiles, so the
+// difference is added as a force every frame: AddForceToAllBodiesBelow from the root body (BoneName None) down,
+// (scale - 1) x the world's gravity, as an acceleration (bAccelChange: mass has no effect, like gravity itself). Only
+// while the settle hold holds the body; the game swaps it for its frozen stand-in within ~1 s of the release.
+static float mass_scale = 1.f, grav_scale = 1.f;
+static float world_gz;   // the world's gravity, cm/s^2, read once per map; 0 = not read yet
+static int n_grav_fail;
+
 static int world_check(void) {   // new map: every old pointer is gone
     static UObject *last_w;
     UObject *w = ue_world();
-    if (w != last_w) { last_w = w; ntr = 0; scan_at = 0; n_body_lists = 0; }
+    if (w != last_w) { last_w = w; ntr = 0; scan_at = 0; n_body_lists = 0; world_gz = 0; }
     return w != NULL;
 }
 
@@ -781,6 +796,67 @@ static void note_corpse_class(UObject *ridden) {
     LOG("ragdoll: corpse stand-in class for %s: %s", cname(ridden, a, sizeof a), ue_obj_name(cc, a, sizeof a));
 }
 
+// ---- tuning (see "tuning" above) ----
+// kg, UPrimitiveComponent::GetMass, -1 unknown. On a skeletal mesh it may be every body or the root body only (not
+// checked for this engine); either way before/after shows whether the scale took.
+static float mesh_mass(UObject *mesh) {
+    Call k;
+    if (!call_prep(&k, mesh, "GetMass")) return -1;
+    call_go(&k);
+    float *r = carg(&k, "ReturnValue");
+    return r ? *r : -1;
+}
+
+static int mass_logs;   // bodies logged with their mass before/after, per /ragdoll mass
+
+static void set_mass_scale(Tracked *t, UObject *mesh, float s) {
+    char a[160];
+    Call k;
+    int log_it = mass_logs < 3 && s != 1.f;
+    float before = log_it ? mesh_mass(mesh) : 0;
+    if (!call_prep(&k, mesh, "SetAllMassScale")) {
+        static int warned;
+        if (!warned++) LOG("ragdoll tune: no SetAllMassScale on %s: mass unchanged", cname(mesh, a, sizeof a));
+        return;
+    }
+    SET(&k, "InMassScale", float, s);
+    call_go(&k);
+    t->mass_set = s != 1.f;
+    if (log_it) {
+        mass_logs++;
+        LOG("ragdoll tune: %s mass x%.2f: %.1f kg -> %.1f kg", oname(t->a, a, sizeof a), s, before, mesh_mass(mesh));
+    }
+}
+
+// The world's gravity (AWorldSettings.WorldGravityZ, the value in use: the project default unless the map sets its
+// own), read once per map from a body's world settings
+static float gravity_z(UObject *actor) {
+    if (world_gz) return world_gz;
+    UObject *ws = call_obj(actor, "GetWorldSettings");
+    int32_t off = ws ? ue_prop_offset(ws, "WorldGravityZ") : -1;
+    float g = off >= 0 ? *(float *)((char *)ws + off) : 0.f;
+    world_gz = g < 0 ? g : -980.f;
+    LOG("ragdoll tune: world gravity %.0f cm/s^2 (%s)", world_gz,
+        !ws ? "no world settings: Unreal's default" : off < 0 ? "no WorldGravityZ: Unreal's default" :
+        g < 0 ? "WorldGravityZ" : "WorldGravityZ not set yet: Unreal's default");
+    return world_gz;
+}
+
+// every frame for each body the settle hold holds, when gravity isn't x1: the difference to scale x gravity
+static void extra_gravity(Tracked *x) {
+    Call k;
+    if (!call_prep(&k, x->mesh, "AddForceToAllBodiesBelow")) {
+        if (!n_grav_fail++) LOG("ragdoll tune: no AddForceToAllBodiesBelow on the mesh: gravity scale has no effect");
+        return;
+    }
+    float *f = carg(&k, "Force");
+    if (!f) return;
+    f[2] = (grav_scale - 1.f) * gravity_z(x->a);   // BoneName stays None: the root body and every body below it
+    SET(&k, "bAccelChange", uint8_t, 1);
+    SET(&k, "bIncludeSelf", uint8_t, 1);
+    call_go(&k);
+}
+
 // ---- the ragdoll ----
 static int apply(Tracked *t) {
     char a[160], c[160];
@@ -822,6 +898,7 @@ static int apply(Tracked *t) {
     if (call_prep(&k, mesh, "SetAllBodiesSimulatePhysics")) { SET(&k, "bNewSimulate", uint8_t, 1); call_go(&k); }
     if (call_prep(&k, mesh, "SetSimulatePhysics")) { SET(&k, "bSimulate", uint8_t, 1); call_go(&k); }
     if (call_prep(&k, mesh, "SetPhysicsBlendWeight")) { SET(&k, "PhysicsBlendWeight", float, 1.f); call_go(&k); }
+    if (mass_scale != 1.f) set_mass_scale(t, mesh, mass_scale);
     call_void(mesh, "WakeAllRigidBodies");
 
     int sim = call_bool(mesh, "IsSimulatingPhysics");
@@ -847,6 +924,7 @@ static void undo(Tracked *t) {
         if (call_prep(&k, mesh, "SetSimulatePhysics")) { SET(&k, "bSimulate", uint8_t, 0); call_go(&k); }
         if (call_prep(&k, mesh, "SetAllBodiesSimulatePhysics")) { SET(&k, "bNewSimulate", uint8_t, 0); call_go(&k); }
         if (call_prep(&k, mesh, "SetCollisionProfileName")) { SET(&k, "InCollisionProfileName", FName, t->prof); call_go(&k); }
+        if (t->mass_set) set_mass_scale(t, mesh, 1.f);
         if (cap && call_prep(&k, mesh, "K2_AttachToComponent")) {
             SET(&k, "Parent", UObject *, cap);
             SET(&k, "LocationRule", uint8_t, 0); SET(&k, "RotationRule", uint8_t, 0); SET(&k, "ScaleRule", uint8_t, 0);   // KeepRelative
@@ -1069,6 +1147,7 @@ void ragdoll_tick(float dt) {
             continue;
         }
         if (x->done) {
+            if (x->ragdolled && !x->released && x->mesh && grav_scale != 1.f && !n_grav_fail) extra_gravity(x);
             if (x->ragdolled && (tick_n % 15) == 0 && call_bool(x->ls, "IsAlive") == 1) undo(x);
             continue;
         }
@@ -1092,13 +1171,14 @@ void ragdoll_slash(char *rest, Out *o) {
         int released = n_at_rest + n_capped;
         out_printf(o, "/ragdoll: %s%s, %d Ridden tracked, %d deaths seen, %d ragdolled, %d failed, %d came back; "
                       "settle hold %s: %d held, %d at rest + %d at the %.0f s cap (avg %.1f s, max %.1f s after death), "
-                      "%d deleted while held; corpse budget %s: %d spared (%d again); %ld stacks logged%s%s\n",
+                      "%d deleted while held; corpse budget %s: %d spared (%d again); mass x%.2f, gravity x%.2f%s; "
+                      "%ld stacks logged%s%s\n",
                    mode_on ? "on" : "off", mode_on && delay_s > 0 ? " (after the game's animation)" : "", ntr, n_deaths,
                    n_applied, n_failed, n_revived,
                    settle_state == 1 ? "on" : settle_state ? "OFF (see log)" : "not armed yet", n_held, n_at_rest, n_capped,
                    SETTLE_CAP, released ? settle_sum / released : 0.0, settle_max, n_held_gone,
                    corpse_state == 1 ? "hook on" : corpse_state ? "hook OFF (see log)" : "not armed yet", n_spared,
-                   n_spared_again, stack_id,
+                   n_spared_again, mass_scale, grav_scale, n_grav_fail ? " (NO EFFECT: see log)" : "", stack_id,
                    tracing ? ", tracing" : "", n_overflow ? ", tracking list full" : "");
     } else if (!strcmp(verb, "on")) {
         float d = arg ? (float)atof(arg) : 0.f;
@@ -1115,6 +1195,23 @@ void ragdoll_slash(char *rest, Out *o) {
         mode_on = 0;
         LOG("ragdoll: off");
         out_printf(o, "/ragdoll off\n");
+    } else if (!strcmp(verb, "mass")) {
+        if (arg) {
+            float m = (float)atof(arg);
+            mass_scale = m < 0.1f ? 0.1f : m > 10.f ? 10.f : m;
+            mass_logs = 0;
+            LOG("ragdoll tune: mass x%.2f", mass_scale);
+        }
+        out_printf(o, "/ragdoll mass: x%.2f (0.1-10, default 1) for bodies that die from now on; under gravity alone "
+                      "weight changes nothing, it sets how far a push moves the body\n", mass_scale);
+    } else if (!strcmp(verb, "gravity")) {
+        if (arg) {
+            float g = (float)atof(arg);
+            grav_scale = g < 0.f ? 0.f : g > 5.f ? 5.f : g;
+            LOG("ragdoll tune: gravity x%.2f", grav_scale);
+        }
+        out_printf(o, "/ragdoll gravity: x%.2f (0-5, default 1) on ragdolls still falling, from now on%s\n", grav_scale,
+                   n_grav_fail ? "; NO EFFECT in this game (see log)" : "");
     } else if (!strcmp(verb, "probe")) {
         world_check();
         if (!mode_on && !tracing) for (int k = 0; k < 64; k++) scan_step();   // not scanning in the background: a full pass now
@@ -1126,7 +1223,7 @@ void ragdoll_slash(char *rest, Out *o) {
         if (tracing) trace_stop("restarted");
         if (trace_start(s, o) == 0) out_printf(o, "/ragdoll trace: %.0f s, kill a few Ridden now (log: \"ragdoll trace\" lines)\n", s);
     } else {
-        out_printf(o, "usage: /ragdoll [on [delay]|off|status|probe|trace [secs]]\n");
+        out_printf(o, "usage: /ragdoll [on [delay]|off|status|mass [x]|gravity [x]|probe|trace [secs]]\n");
     }
 }
 
