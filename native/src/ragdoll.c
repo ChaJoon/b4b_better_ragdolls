@@ -890,7 +890,7 @@ static const uint8_t SIG_SETTLE[] = {0x40,0x55,0x53,0x57,0x48,0x8d,0x6c,0x24,0xb
 typedef void (*SettleFn)(UObject *ragdoll_component);
 static SettleFn orig_settle;
 static int settle_state;   // 0 not tried, 1 hooked, -1 signature mismatch or hook failed
-static int n_held, n_at_rest, n_capped, n_held_gone, n_gone_unchecked, settle_logs;
+static int n_held, n_at_rest, n_capped, n_held_gone, settle_logs;
 static double settle_sum, settle_max;
 
 // the mesh's physics asset's bodies, read once per asset (Common Ridden: 3P_Common_PA, 20 bodies)
@@ -992,34 +992,8 @@ typedef void (*CorpseDestroyFn)(UObject *manager, UObject *corpse, uint8_t net_f
 static CorpseDestroyFn orig_corpse_destroy;
 static int corpse_state, n_spared, n_spared_again;
 
-static int n_budget_calls;
-
-static int readable(const void *p, size_t n) {   // committed, readable memory (no SEH in this build)
-    MEMORY_BASIC_INFORMATION mb;
-    if (!p || !VirtualQuery(p, &mb, sizeof mb) || mb.State != MEM_COMMIT || (mb.Protect & (PAGE_NOACCESS | PAGE_GUARD))) return 0;
-    return (const char *)p + n <= (const char *)mb.BaseAddress + mb.RegionSize;
-}
-
-// Build 10 spared nothing although held bodies were still deleted: either this function isn't the path, or its
-// second argument isn't the body. The first calls say which: the argument as an actor, and as a weak pointer
-// (FWeakObjectPtr: object index first) to one of our bodies.
-static void budget_probe(UObject *manager, void *arg, uint8_t net_force) {
-    char a[160];
-    const char *as_actor = "not one of our bodies", *as_weak = "no";
-    for (int i = 0; arg && i < ntr; i++) {
-        if (tr[i].a == arg) { as_actor = !tr[i].ragdolled ? "our body, not ragdolled" : tr[i].released ? "our body, released" : "our body, HELD"; break; }
-    }
-    if (readable(arg, 8)) {
-        int32_t idx = *(int32_t *)arg;
-        for (int i = 0; i < ntr; i++) if (tr[i].ai == idx) { as_weak = tr[i].ragdolled && !tr[i].released ? "YES, a HELD body" : "yes, one of our bodies"; break; }
-    }
-    LOG("ragdoll budget: call #%d: manager %s, arg %p (%s; as a weak pointer: %s), net force %u", n_budget_calls,
-        oname(manager, a, sizeof a), arg, as_actor, as_weak, net_force);
-}
-
 static void corpse_destroy_detour(UObject *manager, UObject *corpse, uint8_t net_force) {   // game thread (its tick)
     Tracked *x = NULL;
-    if (++n_budget_calls <= 8) budget_probe(manager, corpse, net_force);
     for (int i = 0; corpse && i < ntr; i++) if (tr[i].a == corpse) { x = &tr[i]; break; }
     if (x && x->ragdolled && !x->released) {
         char a[160];
@@ -1050,85 +1024,6 @@ static void corpse_arm(void) {
     LOG("ragdoll budget: hooked; the corpse manager no longer deletes bodies the settle hold holds");
 }
 
-// ---- destroy guard: no deletion path may end a body the settle hold still holds ----
-// Build 10: the corpse budget hook spared 0 bodies while 79 held bodies were still deleted mid-fall, often several in
-// one frame. Whatever the path, it ends in AActor::Destroy (0x143A00C10, seen in every deletion stack of builds 7 and
-// 9: the game's own delete 0x141B6F380, and the corpse manager). So the guard sits there: for a body we ragdolled
-// that the hold hasn't released, the destroy is skipped (returns false) and its callers are logged (static VAs), so
-// the path is known too. The game's own swap and 1 s delete run only after the release, so they pass; so does
-// everything else. Not signature-checked by bytes (not dumped): the address is verified by two known callers in the
-// same build that call or jump to it, the game's delete and the corpse manager's (both themselves signature-checked
-// or dumped), and its first 24 bytes are logged.
-#define ADDR_ACTOR_DESTROY  VA(0x143A00C10ull)
-#define ADDR_RAGDOLL_DELETE VA(0x141B6F380ull)   // the swap's 1 s timer: clears the handle, AActor::Destroy on the Ridden
-typedef uint8_t (*ActorDestroyFn)(UObject *actor, uint8_t net_force, uint8_t modify_level);
-static ActorDestroyFn orig_actor_destroy;
-static int guard_state, n_guarded, n_guard_logs;
-
-static int refs_target(uintptr_t from, int len, uintptr_t target) {   // a call/jmp rel32 to target in [from, from+len)
-    const uint8_t *p = (const uint8_t *)from;
-    for (int i = 0; i + 5 <= len; i++) {
-        if (p[i] != 0xE8 && p[i] != 0xE9) continue;
-        int32_t rel = *(const int32_t *)(p + i + 1);
-        if (from + i + 5 + (intptr_t)rel == target) return 1;
-    }
-    return 0;
-}
-
-static void log_callers(const char *what) {
-    void *fr[10];
-    char line[600];
-    USHORT n = RtlCaptureStackBackTrace(2, 10, fr, NULL);   // skip this function and the detour
-    int at = snprintf(line, sizeof line, "ragdoll guard:   %s, called from", what);
-    for (int i = 0; i < n && at < (int)sizeof line - 24; i++) {
-        uintptr_t pc = (uintptr_t)fr[i];
-        if (!pc) break;
-        at += snprintf(line + at, sizeof line - at, " 0x%llx", (unsigned long long)(pc - g_base_delta));
-    }
-    LOG("%s", line);
-}
-
-static uint8_t actor_destroy_detour(UObject *actor, uint8_t net_force, uint8_t modify_level) {   // game thread
-    Tracked *x = NULL;
-    for (int i = 0; actor && i < ntr; i++) if (tr[i].a == actor) { x = &tr[i]; break; }
-    if (x && x->ragdolled && !x->released && mode_on) {
-        char a[160], w[200];
-        n_guarded++;
-        x->spared++;
-        if (n_guard_logs < 40) {
-            n_guard_logs++;
-            snprintf(w, sizeof w, "spared %s %.1f s after death (fastest %.0f cm/s at the last check, %d checks)",
-                     oname(actor, a, sizeof a), now_s() - x->died_at, x->last_v, x->checks);
-            log_callers(w);
-        }
-        return 0;
-    }
-    return orig_actor_destroy(actor, net_force, modify_level);
-}
-
-static void guard_arm(void) {
-    if (guard_state) return;
-    int by_delete = refs_target(ADDR_RAGDOLL_DELETE, 0x80, ADDR_ACTOR_DESTROY);
-    int by_budget = refs_target(ADDR_CORPSE_DESTROY, 0x200, ADDR_ACTOR_DESTROY);
-    char hex[24 * 3 + 1], *p = hex;
-    for (int k = 0; k < 24; k++) p += sprintf(p, " %02x", ((const uint8_t *)ADDR_ACTOR_DESTROY)[k]);
-    LOG("ragdoll guard: AActor::Destroy 0x143A00C10 referenced by the game's delete: %s, by the corpse manager: %s; bytes%s",
-        by_delete ? "yes" : "no", by_budget ? "yes" : "no", hex);
-    if (!by_delete && !by_budget) {
-        guard_state = -1;
-        LOG("ragdoll guard: not verified (neither known caller calls it): no guard, falling bodies can still be deleted");
-        return;
-    }
-    if (MH_CreateHook((void *)ADDR_ACTOR_DESTROY, (void *)actor_destroy_detour, (void **)&orig_actor_destroy) != MH_OK ||
-        MH_EnableHook((void *)ADDR_ACTOR_DESTROY) != MH_OK) {
-        guard_state = -1;
-        LOG("ragdoll guard: hook failed: falling bodies can still be deleted");
-        return;
-    }
-    guard_state = 1;
-    LOG("ragdoll guard: hooked; no deletion path ends a body the settle hold holds");
-}
-
 static void settle_arm(void) {   // game thread, at /ragdoll on; the hook stays (it only acts on bodies we ragdolled)
     if (settle_state) return;
     if (memcmp((void *)ADDR_SETTLE_CHECK, SIG_SETTLE, sizeof SIG_SETTLE)) {
@@ -1146,7 +1041,6 @@ static void settle_arm(void) {   // game thread, at /ragdoll on; the hook stays 
     LOG("ragdoll settle: hooked; at rest = every body under %.0f cm/s or all asleep for %d checks, cap %.0f s",
         SETTLE_SPEED, SETTLE_CHECKS, SETTLE_CAP);
     corpse_arm();   // only with the hold: without it bodies leave the budget the game's way
-    guard_arm();
 }
 
 void ragdoll_tick(float dt) {
@@ -1162,15 +1056,14 @@ void ragdoll_tick(float dt) {
         Tracked *x = &tr[i];
         if (!ue_object_usable(x->a, x->ai) || !ue_object_usable(x->ls, x->lsi)) {
             // gone before the hold let the game swap it: not the game's swap + delete (on a client: the host's delete?)
-            // (also before its first settle check: build 10 had 78 ragdolls that never reached one)
-            if (x->ragdolled && !x->released) {
+            if (x->ragdolled && x->checks && !x->released) {
                 // a budget or population cleanup would show as many bodies in flight / many Ridden alive at the time
                 int flying = 0, alive = 0;
                 for (int k = 0; k < ntr; k++) { flying += tr[k].ragdolled && !tr[k].released; alive += !tr[k].died_at; }
-                if (x->checks) n_held_gone++; else n_gone_unchecked++;
+                n_held_gone++;
                 LOG("ragdoll settle: a held body was deleted %.1f s after death, before it was at rest (last check: "
-                    "fastest %.0f cm/s after %d checks; now %d bodies in flight incl. this one, %d Ridden alive; spared %d times)",
-                    t - x->died_at, x->last_v, x->checks, flying, alive, x->spared);
+                    "fastest %.0f cm/s after %d checks; now %d bodies in flight incl. this one, %d Ridden alive)",
+                    t - x->died_at, x->last_v, x->checks, flying, alive);
             }
             tr[i--] = tr[--ntr];
             continue;
@@ -1199,15 +1092,13 @@ void ragdoll_slash(char *rest, Out *o) {
         int released = n_at_rest + n_capped;
         out_printf(o, "/ragdoll: %s%s, %d Ridden tracked, %d deaths seen, %d ragdolled, %d failed, %d came back; "
                       "settle hold %s: %d held, %d at rest + %d at the %.0f s cap (avg %.1f s, max %.1f s after death), "
-                      "%d deleted while held + %d before their first check; corpse budget %s: %d calls, %d spared (%d again); "
-                      "destroy guard %s: %d spared; %ld stacks logged%s%s\n",
+                      "%d deleted while held; corpse budget %s: %d spared (%d again); %ld stacks logged%s%s\n",
                    mode_on ? "on" : "off", mode_on && delay_s > 0 ? " (after the game's animation)" : "", ntr, n_deaths,
                    n_applied, n_failed, n_revived,
                    settle_state == 1 ? "on" : settle_state ? "OFF (see log)" : "not armed yet", n_held, n_at_rest, n_capped,
-                   SETTLE_CAP, released ? settle_sum / released : 0.0, settle_max, n_held_gone, n_gone_unchecked,
-                   corpse_state == 1 ? "hook on" : corpse_state ? "hook OFF (see log)" : "not armed yet", n_budget_calls,
-                   n_spared, n_spared_again,
-                   guard_state == 1 ? "on" : guard_state ? "OFF (see log)" : "not armed yet", n_guarded, stack_id,
+                   SETTLE_CAP, released ? settle_sum / released : 0.0, settle_max, n_held_gone,
+                   corpse_state == 1 ? "hook on" : corpse_state ? "hook OFF (see log)" : "not armed yet", n_spared,
+                   n_spared_again, stack_id,
                    tracing ? ", tracing" : "", n_overflow ? ", tracking list full" : "");
     } else if (!strcmp(verb, "on")) {
         float d = arg ? (float)atof(arg) : 0.f;
