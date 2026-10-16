@@ -1088,16 +1088,17 @@ static void extra_gravity(Tracked *x) {
 // ---- step 2: the killing hit throws the body ----
 // The game's damage never goes through the engine's damage path (build 14: no ReceivePointDamage / ReceiveAnyDamage,
 // and its weapons' damage types aren't UDamageTypes), so the engine's impulse-on-damage never fires. Each Ridden's
-// HealthComponent keeps its last hits in RecentDamageInfo (TArray<FDamageInfo>, 3 entries, replicated:
-// OnRep_RecentDamageInfo) with the weapon's damage type, HitComponent, ImpactPoint, ImpactDirection and BoneName.
-// The killing hit, read when we ragdoll the body: the entry with a HitComponent (the stumble event that comes with
-// every hit has none) and the lowest PreviousTotalHealth (a Ridden's health only goes down until it dies, so this
-// needs no assumption about the array's order).
+// HealthComponent keeps its last hits in RecentDamageInfo, replicated (OnRep_RecentDamageInfo), so host and client
+// both have it: TArray<FReplicatedDamageInfo> (build 16 log): Index (a running count), Damage, ServerWorldTime,
+// BoneName, DamageType, Source, SourceName, SourceLocation, DamageContextFlags. No hit point, no direction (the
+// OnDamage event's FDamageInfo has them, but only the server sees that). So, as the game's own client hit reactions
+// must: the killing hit = the newest entry (highest Index) that isn't a stumble event (Stumble_* damage type, which
+// comes with every hit); the hit point = the hit bone's place on the mesh now; the direction = from SourceLocation (or
+// the Source's own place) to that point. Explosions: SourceLocation as the blast centre (to be checked in the log).
 // The push is a real impulse (kg cm/s): the same hit moves a heavier body less, and /ragdoll mass counts.
-//   bullets, melee: AddImpulseAtLocation(direction x strength, ImpactPoint) on the hit bone's body, or the nearest
+//   bullets, melee: AddImpulseAtLocation(direction x strength, hit point) on the hit bone's body, or the nearest
 //                   parent bone that has one (a Common's physics asset has 20 bodies, its skeleton more bones).
-//   explosions:     ImpactDirection is ImpactPoint - the blast centre (checked on a frag grenade, build 14), so
-//                   AddRadialImpulse from the blast centre as a velocity change of strength / the body's mass, the
+//   explosions:     AddRadialImpulse from the blast centre as a velocity change of strength / the body's mass, the
 //                   same for every body part (a blast pushes by area, which goes roughly with mass), weaker with
 //                   distance (x1 at the centre, x0.25 from BLAST_RANGE on).
 // Strength per weapon kind, by the damage type's class: HG02_DamageType_C -> "HG" (the letters before the number),
@@ -1116,13 +1117,13 @@ static int n_push_tab = 12;
 static float push_scale = 1.f;
 static int n_pushed, n_push_radial, n_push_nohit, n_push_fail, push_logs, hit_dumps;
 
-// The stored hit record's fields, found by reflection once. Build 15 assumed it was the same FDamageInfo the OnDamage
-// event carries; it isn't (no HitComponent of that type), so now only a hit point and a direction are required and
-// every other field is optional, under the names it may have. The record's full layout is logged once.
+// The stored hit record's fields, found by reflection once, by name and type, so another layout is logged instead of
+// misread: the record's full layout goes into the log once. Usable: a hit point + direction (an FDamageInfo-like
+// record), or a source (SourceLocation, or the Source object's place) to aim from. Everything else is optional.
 static struct {
     int state; int32_t arr_off, elsize; UStruct *st;
-    FField *point, *dir;                          // required: vectors
-    FField *type, *comp, *bone, *prev_hp, *stumble, *damage;   // optional
+    FField *point, *dir, *srcloc, *source;                               // aim: point + dir, or a source
+    FField *type, *comp, *bone, *prev_hp, *stumble, *damage, *index, *time;   // optional
 } dinfo;
 
 static FField *field_of(UStruct *st, const char *const *names, const char *const *types, int vector) {
@@ -1160,30 +1161,44 @@ static int dinfo_init(UObject *hc) {
                                   ue_name(*(FName *)FF_CLASS(f), t, sizeof t), FP_OFFSET(f));
     LOG("%s", line);
     static const char *const VEC[] = {"StructProperty", NULL}, *const OBJ[] = {"ObjectProperty", "WeakObjectProperty", "ClassProperty", NULL},
-                             *const NAM[] = {"NameProperty", NULL}, *const FLT[] = {"FloatProperty", NULL}, *const BOO[] = {"BoolProperty", NULL};
-    static const char *const N_POINT[] = {"ImpactPoint", "HitResultLocation", "HitLocation", "Location", NULL},
+                             *const NAM[] = {"NameProperty", NULL}, *const FLT[] = {"FloatProperty", NULL}, *const BOO[] = {"BoolProperty", NULL},
+                             *const INT[] = {"IntProperty", NULL};
+    static const char *const N_POINT[] = {"ImpactPoint", "HitResultLocation", "HitLocation", NULL},
                              *const N_DIR[] = {"ImpactDirection", "Direction", "ShotDirection", "HitDirection", "TraceDirection", NULL},
+                             *const N_SRCLOC[] = {"SourceLocation", "InstigatorLocation", "OriginLocation", NULL},
+                             *const N_SOURCE[] = {"Source", "DamageCauser", "Instigator", NULL},
                              *const N_TYPE[] = {"DamageType", "DamageTypeClass", NULL}, *const N_COMP[] = {"HitComponent", NULL},
                              *const N_BONE[] = {"BoneName", "HitBoneName", "Bone", NULL},
                              *const N_HP[] = {"PreviousTotalHealth", "PreviousHealth", NULL},
-                             *const N_STUMBLE[] = {"bStumbleEvent", NULL}, *const N_DMG[] = {"Damage", NULL};
+                             *const N_STUMBLE[] = {"bStumbleEvent", NULL}, *const N_DMG[] = {"Damage", NULL},
+                             *const N_INDEX[] = {"Index", NULL}, *const N_TIME[] = {"ServerWorldTime", NULL};
     dinfo.point = field_of(st, N_POINT, VEC, 1);
     dinfo.dir = field_of(st, N_DIR, VEC, 1);
+    dinfo.srcloc = field_of(st, N_SRCLOC, VEC, 1);
+    dinfo.source = field_of(st, N_SOURCE, OBJ, 0);
     dinfo.type = field_of(st, N_TYPE, OBJ, 0);
     dinfo.comp = field_of(st, N_COMP, OBJ, 0);
     dinfo.bone = field_of(st, N_BONE, NAM, 0);
     dinfo.prev_hp = field_of(st, N_HP, FLT, 0);
     dinfo.stumble = field_of(st, N_STUMBLE, BOO, 0);
     dinfo.damage = field_of(st, N_DMG, FLT, 0);
-    #define FNM(f) ((f) ? ue_name(FF_NAME(f), fn, sizeof fn) : "-")
-    LOG("ragdoll push: using point %s, direction %s", FNM(dinfo.point), dinfo.dir ? ue_name(FF_NAME(dinfo.dir), t, sizeof t) : "-");
-    LOG("ragdoll push: optional: type %s", FNM(dinfo.type));
-    LOG("ragdoll push: optional: hit component %s", FNM(dinfo.comp));
-    LOG("ragdoll push: optional: bone %s", FNM(dinfo.bone));
-    LOG("ragdoll push: optional: health before %s (none: the newest entry is taken as the last one)", FNM(dinfo.prev_hp));
-    LOG("ragdoll push: optional: stumble flag %s", FNM(dinfo.stumble));
-    #undef FNM
-    if (!dinfo.point || !dinfo.dir) { LOG("ragdoll push: the record has no hit point or no direction (field list above): pushes off"); return -1; }
+    dinfo.index = field_of(st, N_INDEX, INT, 0);
+    dinfo.time = field_of(st, N_TIME, FLT, 0);
+    struct { const char *what; FField *f; } use[] = {
+        {"hit point", dinfo.point}, {"direction", dinfo.dir}, {"source location", dinfo.srcloc}, {"source", dinfo.source},
+        {"type", dinfo.type}, {"hit component", dinfo.comp}, {"bone", dinfo.bone}, {"health before", dinfo.prev_hp},
+        {"stumble flag", dinfo.stumble}, {"index", dinfo.index}, {"time", dinfo.time}};
+    k = (size_t)snprintf(line, sizeof line, "ragdoll push: fields used:");
+    for (size_t i = 0; i < sizeof use / sizeof use[0]; i++)
+        k += (size_t)snprintf(line + k, sizeof line - k, " %s=%s", use[i].what, use[i].f ? ue_name(FF_NAME(use[i].f), fn, sizeof fn) : "-");
+    LOG("%s", line);
+    if (!(dinfo.point && dinfo.dir) && !dinfo.srcloc && !dinfo.source) {
+        LOG("ragdoll push: the record has no hit direction and no source to aim from (field list above): pushes off");
+        return -1;
+    }
+    LOG("ragdoll push: aiming %s; newest hit by %s", dinfo.point && dinfo.dir ? "with the record's hit point and direction"
+        : "from the source to the hit bone", dinfo.prev_hp ? "lowest health before" : dinfo.index ? "highest Index"
+        : dinfo.time ? "latest ServerWorldTime" : "the last entry");
     return dinfo.state = 1;
 }
 
@@ -1268,8 +1283,27 @@ static void log_hit(const char *tag, int idx, const uint8_t *e) {
     LOG("%s", line);
 }
 
+// the place of a bone (or socket) of the mesh now, 0 = ok
+static int bone_loc(UObject *mesh, FName bone, float out[3]) {
+    Call k;
+    if (!call_prep(&k, mesh, "GetSocketLocation")) return -1;
+    SET(&k, "InSocketName", FName, bone);
+    call_go(&k);
+    float *r = carg(&k, "ReturnValue");
+    if (!r) return -1;
+    memcpy(out, r, 3 * sizeof(float));
+    return 0;
+}
+
+static float entry_key(const uint8_t *e) {   // larger = the killing hit
+    if (dinfo.prev_hp) return -*(const float *)(e + FP_OFFSET(dinfo.prev_hp));
+    if (dinfo.index) return (float)*(const int32_t *)(e + FP_OFFSET(dinfo.index));
+    if (dinfo.time) return *(const float *)(e + FP_OFFSET(dinfo.time));
+    return 0;
+}
+
 static void push_body(Tracked *t, UObject *mesh) {
-    char a[160], tn[96], bn[64], hb[64];
+    char a[160], tn[96], bn[64], hb[64], sn[96], sc[96];
     if (push_scale <= 0.f) return;
     UObject *hc = call_obj(t->a, "GetHealthComponent");
     if (!hc || dinfo_init(hc) != 1) { n_push_fail++; return; }
@@ -1283,11 +1317,8 @@ static void push_body(Tracked *t, UObject *mesh) {
         // the stumble event that comes with every hit: its flag, else no hit component, else a Stumble damage type
         if (dinfo.stumble && bool_at(dinfo.stumble, e) == 1) continue;
         if (dinfo.comp && !obj_field(dinfo.comp, e)) continue;
-        if (dinfo.type) { char sn[96]; PushKind *sk = kind_of(obj_field(dinfo.type, e), sn, sizeof sn); if (sk && !strcmp(sk->key, "Stumble")) continue; }
-        const float *d = (const float *)(e + FP_OFFSET(dinfo.dir));
-        if (d[0] == 0.f && d[1] == 0.f && d[2] == 0.f) continue;
-        // the killing hit: the lowest health before it if the record has that, else the newest (assumed: the last)
-        if (!best || (dinfo.prev_hp ? *(const float *)(e + FP_OFFSET(dinfo.prev_hp)) < *(const float *)(best + FP_OFFSET(dinfo.prev_hp)) : 1)) best = e;
+        if (dinfo.type) { PushKind *sk = kind_of(obj_field(dinfo.type, e), sn, sizeof sn); if (sk && !strcmp(sk->key, "Stumble")) continue; }
+        if (!best || entry_key(e) >= entry_key(best)) best = e;   // ties: the later entry
     }
     if (!best) {
         n_push_nohit++;
@@ -1297,21 +1328,52 @@ static void push_body(Tracked *t, UObject *mesh) {
     PushKind *kind = dinfo.type ? kind_of(obj_field(dinfo.type, best), tn, sizeof tn) : (snprintf(tn, sizeof tn, "unknown"), push_kind("default", 0));
     float strength = kind->n * push_scale;
     if (strength <= 0.f) return;
-    const float *pt = (const float *)(best + FP_OFFSET(dinfo.point)), *dr = (const float *)(best + FP_OFFSET(dinfo.dir));
+    const BodyList *bl = bodies_of(mesh);
+    FName bone = dinfo.bone ? *(const FName *)(best + FP_OFFSET(dinfo.bone)) : (FName){0, 0};
+    ue_name(bone, hb, sizeof hb);
+    // the bone that takes the push: the hit bone, or its nearest parent with a body, else the first body (the root)
+    Call k;
+    for (int up = 0; bone.idx && bl && !has_body(bl, bone) && up < 8; up++) {
+        if (!call_prep(&k, mesh, "GetParentBone")) { bone = (FName){0, 0}; break; }
+        SET(&k, "BoneName", FName, bone);
+        call_go(&k);
+        FName *r = carg(&k, "ReturnValue");
+        bone = r ? *r : (FName){0, 0};
+    }
+    if (bl && (!bone.idx || !has_body(bl, bone))) bone = bl->bone[0];
+    // where it was hit, and where from
+    float pt[3], org[3], dr[3];
+    const char *from;
+    if (dinfo.point && dinfo.dir) {
+        memcpy(pt, best + FP_OFFSET(dinfo.point), sizeof pt);
+        const float *d = (const float *)(best + FP_OFFSET(dinfo.dir));
+        for (int c = 0; c < 3; c++) org[c] = pt[c] - d[c];
+        from = "the record";
+    } else {
+        if (bone_loc(mesh, bone, pt) && actor_loc(t->a, pt)) { n_push_fail++; return; }
+        const float *sl = dinfo.srcloc ? (const float *)(best + FP_OFFSET(dinfo.srcloc)) : NULL;
+        UObject *src = dinfo.source ? obj_field(dinfo.source, best) : NULL;
+        if (sl && (sl[0] != 0.f || sl[1] != 0.f || sl[2] != 0.f)) { memcpy(org, sl, sizeof org); from = "SourceLocation"; }
+        else if (src && !actor_loc(owner_actor(src) ? owner_actor(src) : src, org)) from = "the source's place";
+        else {
+            n_push_fail++;
+            if (push_logs < PUSH_LOGS) { push_logs++; LOG("ragdoll push: %s: killing hit (%s) has no source location: not pushed", oname(t->a, a, sizeof a), tn); }
+            return;
+        }
+    }
+    for (int c = 0; c < 3; c++) dr[c] = pt[c] - org[c];
     float len = sqrtf(dr[0] * dr[0] + dr[1] * dr[1] + dr[2] * dr[2]);
     if (len < 1e-3f) { n_push_fail++; return; }
-    const BodyList *bl = bodies_of(mesh);
     float mass = body_mass(mesh, bl);
     int log_it = push_logs < PUSH_LOGS;
-    Call k;
+    UObject *src = dinfo.source ? obj_field(dinfo.source, best) : NULL;
     if (kind->radial) {
-        float o[3] = {pt[0] - dr[0], pt[1] - dr[1], pt[2] - dr[2]};   // the blast centre
         float f = 1.f - len / BLAST_RANGE;
         if (f < 0.25f) f = 0.25f;
         float dv = mass > 0 ? strength * f / mass : strength * f / 80.f;   // cm/s for every body part
         if (!call_prep(&k, mesh, "AddRadialImpulse")) { n_push_fail++; return; }
-        float *org = carg(&k, "Origin");
-        if (org) memcpy(org, o, sizeof o);
+        float *o = carg(&k, "Origin");
+        if (o) memcpy(o, org, sizeof org);
         SET(&k, "Radius", float, len + 300.f);   // reaches every part of the body
         SET(&k, "Strength", float, dv);
         SET(&k, "Falloff", uint8_t, 0);           // RIF_Constant: the distance is in dv already
@@ -1320,34 +1382,25 @@ static void push_body(Tracked *t, UObject *mesh) {
         n_pushed++; n_push_radial++;
         if (log_it) {
             push_logs++;
-            LOG("ragdoll push: %s killed by %s (%s %.0f x%.2f): explosion %.0f cm away, x%.2f for distance, body %.1f kg -> %.0f cm/s",
-                oname(t->a, a, sizeof a), tn, kind->key, kind->n, push_scale, len, f, mass, dv);
+            LOG("ragdoll push: %s killed by %s (%s %.0f x%.2f) from %s (%s, %s): explosion at (%.0f %.0f %.0f), %.0f cm away, "
+                "x%.2f for distance, body %.1f kg -> %.0f cm/s", oname(t->a, a, sizeof a), tn, kind->key, kind->n, push_scale,
+                oname(src, sn, sizeof sn), cname(src, bn, sizeof bn), from, org[0], org[1], org[2], len, f, mass, dv);
         }
         return;
     }
-    // bullets and melee: the hit bone's body, or the nearest parent bone with a body
-    FName bone = dinfo.bone ? *(const FName *)(best + FP_OFFSET(dinfo.bone)) : (FName){0, 0};
-    ue_name(bone, hb, sizeof hb);
-    for (int up = 0; bone.idx && bl && !has_body(bl, bone) && up < 8; up++) {
-        if (!call_prep(&k, mesh, "GetParentBone")) { bone = (FName){0, 0}; break; }
-        SET(&k, "BoneName", FName, bone);
-        call_go(&k);
-        FName *r = carg(&k, "ReturnValue");
-        bone = r ? *r : (FName){0, 0};
-    }
-    if (bl && bone.idx && !has_body(bl, bone)) bone = (FName){0, 0};   // nothing found: the root body
     float imp[3] = {dr[0] / len * strength, dr[1] / len * strength, dr[2] / len * strength};
     if (!call_prep(&k, mesh, "AddImpulseAtLocation")) { n_push_fail++; return; }
     float *ip = carg(&k, "Impulse"), *lp = carg(&k, "Location");
     if (ip) memcpy(ip, imp, sizeof imp);
-    if (lp) memcpy(lp, pt, 3 * sizeof(float));
+    if (lp) memcpy(lp, pt, sizeof pt);
     SET(&k, "BoneName", FName, bone);
     call_go(&k);
     n_pushed++;
     if (log_it) {
         push_logs++;
-        LOG("ragdoll push: %s killed by %s (%s %.0f x%.2f): hit %s, pushed on %s, direction (%.2f %.2f %.2f), body %.1f kg (~%.0f cm/s for the whole body)",
-            oname(t->a, a, sizeof a), tn, kind->key, kind->n, push_scale, hb, bone.idx ? ue_name(bone, bn, sizeof bn) : "the root body",
+        LOG("ragdoll push: %s killed by %s (%s %.0f x%.2f) from %s (%s, %s, %.0f cm away): hit %s, pushed on %s, direction "
+            "(%.2f %.2f %.2f), body %.1f kg (~%.0f cm/s for the whole body)", oname(t->a, a, sizeof a), tn, kind->key, kind->n,
+            push_scale, oname(src, sn, sizeof sn), cname(src, sc, sizeof sc), from, len, hb, bone.idx ? ue_name(bone, bn, sizeof bn) : "the root body",
             dr[0] / len, dr[1] / len, dr[2] / len, mass, mass > 0 ? strength / mass : -1.f);
     }
 }
