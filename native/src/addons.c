@@ -1173,29 +1173,45 @@ void addons_refresh(void) {
     list_sync();
     for (int i = 0; i < nA; i++) if (A[i].present) stat_file(&A[i]);
 }
-// Wear (an outfit: the game's customization screen with it shown, models.c) / Use or Stop (a weapon look, for your
-// weapon of that type: /model <name>), while the add-on is loaded; after: other buttons are before them on the line.
-// 1 = something drawn.
+// 1 = you wear one of this add-on's outfits (your current survivor's saved choice); title: which, when it has several
+int addons_wearing(const char *file, char *title, size_t n) {
+    Addon *a = by_name(file);
+    const char *w = a && a->present && a->mounted > 0 ? models_wearing() : NULL;
+    int no, nw;
+    if (!w) return 0;
+    looks_count(a, &no, &nw);
+    for (int i = 0; i < nOF; i++)
+        if (OF[i].addon == a && !_stricmp(OF[i].name, w)) { snprintf(title, n, "%s", no > 1 ? OF[i].title : ""); return 1; }
+    return 0;
+}
+// Wear / Take off (an outfit on your current survivor at once, saved like the customization screen's choice: models.c)
+// / Use or Stop (a weapon look, for your weapon of that type: /model <name>), while the add-on is loaded; after: other
+// buttons are before them on the line. 1 = something drawn.
 int addons_look_buttons(const char *file, int after) {
     Addon *a = by_name(file);
     if (!a || !a->present || a->mounted <= 0) return 0;
     int no, nw, drawn = 0;
     looks_count(a, &no, &nw);
     if (!no && !nw) return 0;
-    char lab[96];
-    ov_begin_disabled(models_off(), "Model swaps are off (Host rules, below).");
+    char lab[96], pol[160];
+    const char *worn = no ? models_wearing() : NULL, *why = no ? models_wear_why_not() : NULL;
+    if (no && !why && models_off()) why = "Model swaps are off (Host rules, below).";
+    if (no && !why && !addons_session_allows_quiet(a->cls.gameplay, pol, sizeof pol)) why = pol;   // as a client
     for (int i = 0; i < nOF; i++) {
         if (OF[i].addon != a) continue;
-        const char *why = models_screen_why_not();
-        snprintf(lab, sizeof lab, "Wear%s%s##%s", no > 1 ? " " : "", no > 1 ? OF[i].title : "", OF[i].name);
+        int on = worn && !_stricmp(worn, OF[i].name);
+        snprintf(lab, sizeof lab, "%s%s%s##%s", on ? "Take off" : "Wear", no > 1 ? " " : "", no > 1 ? OF[i].title : "", OF[i].name);
         if (drawn || after) ov_same_line_fit(lab, 0);
-        ov_begin_disabled(why != NULL, why);
-        if (ov_button(lab)) { const char *e = models_open_screen(OF[i].name); if (e) overlay_note(e); }
-        ov_tooltip("Opens your survivor's customization screen with this outfit on: keep it there (any survivor can "
-                   "wear it). Players with the same add-on see it on you, the others your survivor.");
+        ov_begin_disabled(!on && why != NULL, why);   // Take off always works where you have a survivor
+        if (ov_button(lab)) { const char *e = models_wear(on ? NULL : OF[i].name); if (e) overlay_note(e); }
+        ov_tooltip(on ? "Back to your survivor's own outfit (the one picked in the game's customization screen)."
+                      : "Puts this outfit on your survivor now and keeps it for that survivor (any survivor can wear "
+                        "it), like picking it in the customization screen. Players with the same add-on see it on you, "
+                        "the others your survivor.");
         ov_end_disabled();
         drawn = 1;
     }
+    ov_begin_disabled(models_off(), "Model swaps are off (Host rules, below).");
     for (int i = 0; i < nWP; i++) {
         const Weapon *w = &WP[i];
         if (w->addon != a) continue;

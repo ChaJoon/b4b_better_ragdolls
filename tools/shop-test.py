@@ -14,23 +14,23 @@ folder (addons_dir= in the test prefix). Steps:
   2. refused Add: needs a newer b4bcoop; damaged download (SHA-256); truncated download; nothing is left behind
   3. Add casual_joe (the row's button) in Fort Hope, with the customization screen opened (and closed) before: mounted
      at once, in /model list outfits; the table: installed first, A-Z / Z-A, filter Installed / Available, search;
-     the row's Wear opens the customization screen with the outfit on (listed, unlocked); Esc (Back) twice: worn,
-     the customization view left
+     the row's Wear puts the outfit on at once (the ~ window stays open on the tab, saved in b4bcoop-outfits.txt, the
+     row offers Take off); Take off: the survivor's own outfit, the line gone
   4. Add holly_green: added, applies after a restart (it replaces Holly's party portrait, which Fort Hope has loaded);
      sort by the time installed, both ways
   5. in a mission: Add ak47: mounted at once, the row's Use puts the weapon look on, Stop takes it off; Remove ak47
-     (its row): switched off, removed after restart
+     (its row): switched off, removed after restart; the row's Wear / Take off of casual_joe in the mission
   6. restart: ak47 deleted and gone from addonlist.txt, holly_green and casual_joe mounted at start
   7. newer casual_joe (a v1.1 repack, made here) and holly_green in the list: casual_joe's Update (its row) is
      loaded at once (nothing of it is loaded) and worn; holly_green's waits for the restart (its portrait is in use);
-     restart -> both new files in place
+     the row's Wear replaces the /model wish; restart -> both new files in place, the outfit still worn
   8. casual_joe renamed to my_joe.pak + a copy: logged and noticed as the same add-on twice; the shop's casual_joe is
      shown as installed (my_joe.pak's row) and not added again; Remove + Undo of a hand-installed add-on; Turn on for
      an add-on that was off at the start (ak_off.pak, the ak47 look) loads it at once
-  9. multi.sh 3 (host addons_policy=cosmetic with casual_joe, client 2 without add-ons, client 3 without): client 2
-     gets the list by itself, Adds casual_joe in the host's Fort Hope: loaded at once, worn (Wear: the customization
-     screen); the host (with the add-on) shows the outfit on client 2's hero, client 3 (without) the survivor with the
-     replicated row
+  9. multi.sh 3 (host addons_policy=cosmetic with casual_joe and casual_joe2 (a second outfit, made here), client 2
+     without add-ons, client 3 without): the host Wears one outfit, then the other (swap), Take off; client 2 gets the
+     list by itself, Adds casual_joe in the host's Fort Hope: loaded at once, worn (the row's Wear); the host (with the
+     add-on) shows the outfit on client 2's hero, client 3 (without) the survivor with the replicated row
  10. multi.sh 2, host addons_policy=none: client 2's Add is kept for the next start ("this host allows no add-ons")
 --real instead: no shop_catalog=/shop_pubkey= (the build's own URL and shop key): the real shop repo's list is
 fetched from GitHub, verified and shown with as many add-ons as it has; screenshot. Adds nothing.
@@ -158,29 +158,62 @@ def setc(label, value, n=1):
     time.sleep(0.3)
 
 
-def screen_wear(g, name, n=1):
-    """the row's Wear (customization screen with the outfit), then Esc twice (Back to the menu, Back to Fort Hope):
-    (opened line, listed and unlocked, worn, left the view)"""
-    show(n=n)
-    g.mark()
-    press(f"Wear##{name}", n)
-    opened = e2e.wait_for(lambda: g.grep(rf"models: customization screen opened for \w+ \(~ window\), showing b4bcoop\.outfit\.{name}"), 10, 0.5)
-    time.sleep(2)
-    lst = e2e.agent(n, "mdl", "cs", "list")
-    m = re.search(rf"^.*b4bcoop\.outfit\.{name}.*$", lst, re.M)
-    listed = bool(m) and "locked=0" in m.group(0)
-    e2e.screenshot(n, f"wear-screen-{name}-{n}.png")
-    e2e.agent(n, "key", "0x1B")
-    time.sleep(2)
-    e2e.agent(n, "key", "0x1B")
-    worn = e2e.wait_for(lambda: g.grep(rf"models: hero slot \d+ wears outfit {name}\b"), 30, 1)
-    left = e2e.wait_for(lambda: g.grep(r"models: customization screen closed: left the customization view"), 10, 1)
-    return opened, listed, worn, left
+def picks(n=1):
+    """instance n's saved add-on outfits (b4bcoop-outfits.txt): {survivor: outfit}"""
+    try: lines = open(os.path.join(ROOT, f"test{n}", "b4bcoop-outfits.txt")).read().splitlines()
+    except OSError: return {}
+    return dict(l.split()[:2] for l in lines if not l.startswith("#") and len(l.split()) >= 2)
+
+
+def wearing(n=1):
+    """the outfit row instance n's own hero wears now (dev `model`: "you: outfit=<row> ...")"""
+    m = re.search(r"^you: outfit=(\S+)", e2e.agent(n, "model"), re.M)
+    return m.group(1) if m else ""
+
+
+class Worn:
+    """the row's Wear (or Take off) pressed in the ~ window: done = the agent's log line, row = the outfit row the hero
+    wears then, stays = the window still open on the Add-ons tab, other = the row now offers the other button,
+    hero / saved = the survivor and its line in b4bcoop-outfits.txt"""
+    def __init__(self, g, name, n=1, off=False):
+        show(n=n)
+        g.mark()
+        press(f"{'Take off' if off else 'Wear'}##{name}", n)
+        d = e2e.wait_for(lambda: g.grep(rf"models: {'Take off -' if off else 'Wear ' + name} on (\w+) \(~ window\)"), 10, 0.5)
+        want = f"b4bcoop.outfit.{name}"
+        self.row = e2e.wait_for(lambda: (lambda w: w if (w == want) != off else None)(wearing(n)), 10, 0.5) or wearing(n)
+        self.ok = bool(d) and (self.row == want) != off
+        st = e2e.agent(n, "overlay", "status")
+        self.stays = "open=1" in st and f"tab={TAB} " in st
+        self.other = ypos(f"{'Wear' if off else 'Take off'}##{name}", n) is not None
+        self.hero = d[0] if d else ""
+        self.saved = picks(n).get(self.hero)
+
+    def __str__(self):
+        return f"{self.hero or '?'} wears {self.row}, saved {self.saved}, window {'open' if self.stays else 'closed'}"
+
+
+def second_outfit(src, dst):
+    """src (casual_joe.pak) repacked as another add-on whose outfit is casual_joe2 (the same meshes): a second outfit
+    to swap to; made here, never kept"""
+    sys.path.insert(0, os.path.join(REPO, "modkit"))
+    import addon
+    _, items = addon.read_pak_files(src)
+    info = addon.parse_info(next(d for nm, d in items if nm.lower() == addon.INFO).decode("utf-8-sig", "replace"))
+    info["outfit"] = ["casual_joe2|" + v.split("|", 1)[1].rsplit("|", 1)[0] + "|Casual Joe 2" for v in info["outfit"]]
+    info["title"] = "Casual Joe 2"
+    addon.write_pak(dst, [(nm, d) for nm, d in items if nm.lower() != addon.INFO] + [(addon.INFO, addon.info_text(info).encode())])
+    return dst
 
 
 def row(s, aid):
     m = re.search(rf"^  {re.escape(aid)} \[([\w-]+)\] dl=(\S+) pending=(\d) thumb=(\S+) local=(\S*) msg=(.*)$", s, re.M)
     return m.groups() if m else None
+
+
+def fetch(n=1):
+    """the shop's Refresh, once no other fetch runs (the one on arrival in Fort Hope answers "busy" meanwhile)"""
+    return e2e.wait_for(lambda: (lambda r: r if "error: busy" not in r else None)(e2e.agent(n, "shop", "fetch")), 60, 1)
 
 
 def wait_shop(pred, t=180):
@@ -198,19 +231,19 @@ def addonlist():
 
 
 def forget_picks():
-    """the test add-ons' outfits picked on the customization screen (Wear) are kept per survivor in each prefix's
-    b4bcoop-outfits.txt: dropped before every start, so that no survivor wears one at the start (an Update of an
-    outfit in use waits for a restart) and Wear changes something"""
+    """the test add-ons' outfits picked with Wear are kept per survivor in each prefix's b4bcoop-outfits.txt: dropped
+    before every start (unless a step checks that they are kept), so that no survivor wears one at the start (an
+    Update of an outfit in use waits for a restart) and Wear changes something"""
     for n in (1, 2, 3):
         f = os.path.join(ROOT, f"test{n}", "b4bcoop-outfits.txt")
         try: lines = open(f).read().splitlines(True)
         except OSError: continue
-        keep = [l for l in lines if not re.match(r"\s*\w+\s+casual_joe\s*$", l)]
+        keep = [l for l in lines if not re.match(r"\s*\w+\s+casual_joe2?\s*$", l)]
         if keep != lines: open(f, "w").write("".join(keep))
 
 
-def start(S, extra):
-    forget_picks()
+def start(S, extra, keep_picks=False):
+    if not keep_picks: forget_picks()
     S.ini_extra = ";".join(extra)
     ok = S.launch()
     up = e2e.wait_for(lambda: "shop:" in status() and e2e.has_hero(1), 300, 3)   # in Fort Hope with a hero
@@ -359,10 +392,16 @@ def run(a, S):
     setc("##search", "")
     check("search: only the matching rows", f3[0] is not None and f3[1] is None and f3[2] is None, str(f3))
     e2e.agent(1, "thirdperson", "on")
-    opened, listed, worn, left = screen_wear(g, "casual_joe")
-    check("the row's Wear opens the customization screen with casual_joe on", bool(opened), opened[0][:120] if opened else "")
-    check("customization screen: casual_joe listed, unlocked", listed)
-    check("Back twice: casual_joe worn, the customization view left", bool(worn) and bool(left))
+    w = Worn(g, "casual_joe")
+    check("the row's Wear: casual_joe on at once, the ~ window stays on the Add-ons tab", w.ok and w.stays, str(w))
+    check("Wear: saved for that survivor (b4bcoop-outfits.txt), the row offers Take off", w.saved == "casual_joe" and w.other, str(w))
+    time.sleep(1)
+    shot("3-row-wearing.png")   # the row: wearing, Take off
+    t = Worn(g, "casual_joe", off=True)
+    check("the row's Take off: the survivor's own outfit again, the saved line gone, the row offers Wear",
+          t.ok and t.stays and t.saved is None and t.other, str(t))
+    Worn(g, "casual_joe")
+    e2e.agent(1, "overlay", "close")
     time.sleep(3)
     shot("3-casual_joe-worn.png")
 
@@ -414,6 +453,14 @@ def run(a, S):
         time.sleep(20)
         check("game alive 20 s after the mission mount", e2e.MAP_B in S.world(1) and e2e.has_hero(1))
         shot("5-mission-ak47.png")
+        if wearing(1) == "b4bcoop.outfit.casual_joe": Worn(g, "casual_joe", off=True)   # the same survivor as in Fort Hope
+        w = Worn(g, "casual_joe")
+        check("in a mission: the row's Wear puts casual_joe on at once", w.ok and w.stays and w.saved == "casual_joe", str(w))
+        e2e.agent(1, "overlay", "close")
+        time.sleep(3)
+        shot("5-mission-casual_joe.png")
+        t = Worn(g, "casual_joe", off=True)
+        check("in a mission: the row's Take off", t.ok and t.saved is None, str(t))
         show()
         st = press("Remove##ak47.pak")   # a driven press counts as the confirming second click
         time.sleep(1)
@@ -438,7 +485,7 @@ def run(a, S):
                         "-o", joe11, "--version", "1.1", "--title", "Casual Joe v1.1"], capture_output=True, text=True)
     open(os.path.join(OUT, "casual_joe-1.1.log"), "w").write(r.stdout + r.stderr)
     shop.build(port, {"holly_green": {"pak": "paks/holly_magenta.pak", "version": "1.1"}, "casual_joe": {"pak": joe11, "version": "1.1"}})
-    e2e.agent(1, "shop", "fetch")
+    fetch()   # (the list fetched by itself on arrival may still be running: busy)
     s = wait_shop(lambda s: "phase=ready" in s and "busy=0" in s and "items=4" in s, 90)
     s = wait_shop(lambda s: all((row(s, i) or ["?"])[0] == "update-available" for i in ("holly_green", "casual_joe")), 30)
     check("newer holly_green and casual_joe offered as updates", all((row(s, i) or ["?"])[0] == "update-available" for i in ("holly_green", "casual_joe")),
@@ -468,13 +515,24 @@ def run(a, S):
     show()
     time.sleep(2)
     shot("7-updates.png")
+    w = Worn(g, "casual_joe")   # over the /model wish above: now the survivor's saved choice
+    check("the row's Wear replaces a /model wish and is saved", w.ok and w.saved == "casual_joe" and bool(g.grep(r"models: Wear replaces /model casual_joe")), str(w))
+    # Fort Hope's survivor after a restart is not always the same one: Wear's saved line, copied for every survivor
+    slugs = re.findall(r"^  (\w+): \S+_Customization_DT", e2e.agent(1, "mdl", "screen"), re.M)
+    pf = os.path.join(ROOT, "test1", "b4bcoop-outfits.txt")
+    saved = open(pf).read()
+    line = next((l for l in saved.splitlines() if l.split()[:2] == [w.hero, "casual_joe"]), None)
+    if line: open(pf, "a").write("".join(f"{h} casual_joe\n" for h in slugs if h != w.hero))
     S.stop()
     time.sleep(3)
-    if not start(S, extra): return
+    if not start(S, extra, keep_picks=True): return
     g = S.logs[1]
     want = sha(os.path.join(a.src, "paks", "holly_magenta.pak"))
     check("restart: the updated files are in place", sha(os.path.join(ADDONS, "holly_green.pak")) == want and bool(g.grep(r"shop: updated holly_green\.pak", False))
           and sha(os.path.join(ADDONS, "casual_joe.pak")) == sha(joe11) and bool(g.grep(r"shop: updated casual_joe\.pak", False)))
+    kept = e2e.wait_for(lambda: g.grep(r"models: (\w+) wears add-on outfit casual_joe \(saved choice\)", False), 30, 1)
+    check("restart: the saved choice Wear wrote is worn at the start", bool(line) and len(slugs) >= 12 and bool(kept) and
+          wearing(1) == "b4bcoop.outfit.casual_joe", f"Wear on {w.hero}, now {kept[0] if kept else '?'}: {wearing(1)}")
 
     # 8. the same add-on under other file names (a player's own copy, e.g. batman.pak for the shop's batman-any)
     S.stop()
@@ -488,7 +546,7 @@ def run(a, S):
     g = S.logs[1]
     check("same add-on twice: logged as a duplicate", bool(g.grep(r"addons: duplicate: my_joe\.pak and my_joe_copy\.pak are the same add-on", False)))
     check("same add-on twice: player notice", bool(g.grep(r"addons: notice: Add-on .* is installed twice \(my_joe\.pak and my_joe_copy\.pak\)", False)))
-    e2e.agent(1, "shop", "fetch")
+    fetch()
     s = wait_shop(lambda s: "phase=ready" in s and "busy=0" in s and "items=4" in s, 90)
     rw = row(s, "casual_joe") or ("?",) * 6
     check("the shop's casual_joe known as installed (as my_joe.pak)", rw[0] == "installed-as" and "installed as my_joe.pak: same content" in rw[5], f"{rw[0]} / {rw[5][:100]}")
@@ -545,7 +603,8 @@ def run_client(a, shop_lines):
     joe = os.path.join(a.src, "paks", "casual_joe.pak")
     c2 = os.path.join(ROOT, "test2", "shop-addons")
     # 9. host (addons_policy=cosmetic, with casual_joe), client 2 (Adds it), client 3 (no add-ons)
-    os.environ["B4B_INI_EXTRA1"] = f"addons_dir={fresh_dir(os.path.join(ROOT, 'test1', 'shop-addons-host'), [joe])};addons_policy=cosmetic"
+    joe2 = second_outfit(joe, os.path.join(OUT, "casual_joe2.pak"))   # the host swaps between two outfits
+    os.environ["B4B_INI_EXTRA1"] = f"addons_dir={fresh_dir(os.path.join(ROOT, 'test1', 'shop-addons-host'), [joe, joe2])};addons_policy=cosmetic"
     os.environ["B4B_INI_EXTRA2"] = f"addons_dir={fresh_dir(c2)}"
     os.environ["B4B_INI_EXTRA3"] = f"addons_dir={fresh_dir(os.path.join(ROOT, 'test3', 'shop-addons'))}"
     forget_picks()
@@ -556,6 +615,20 @@ def run_client(a, shop_lines):
         h, c, v = S.logs[1], S.logs[2], S.logs[3]
         check("client 2 checked its add-ons against the host's policy (cosmetic)", bool(c.grep(r"addons: host \S+ asks us to check our add-ons against its policy cosmetic", False)))
         for i in (2, 3): e2e.agent(i, "popup", "close")   # the "asked to check" refusal's popup from the first join
+        w1 = Worn(h, "casual_joe")   # the host: one outfit, then another (one per survivor), then Take off
+        w2 = Worn(h, "casual_joe2")
+        sv = picks(1)
+        check("host: Wear on another outfit swaps (one saved per survivor)", w1.ok and w2.ok and w2.stays and sv.get(w2.hero) == "casual_joe2" and
+              list(sv.values()).count("casual_joe") == 0 and ypos("Wear##casual_joe") is not None, f"{w1} / {w2}")
+        hv = e2e.wait_for(lambda: next((f for f in faces(1) if f[2] and "/b4bcoop/outfits/casual_joe/" in f[1].lower()), None), 15, 1)
+        check("host: its hero shows the outfit's mesh", bool(hv), str(faces(1))[:160])
+        e2e.agent(1, "overlay", "close")
+        e2e.agent(1, "thirdperson", "on")
+        time.sleep(2)
+        shot("9-host-wears-casual_joe2.png")
+        t = Worn(h, "casual_joe2", off=True)
+        check("host: Take off", t.ok and t.saved is None, str(t))
+        e2e.agent(1, "overlay", "close")
         show(n=2)   # client 2 through its ~ window: the list (fetched by itself), Add, then the row's Wear
         wait_shop2 = lambda pred, t: e2e.wait_for(lambda: (lambda s: s if pred(s) else None)(e2e.agent(2, "shop", "status")), t, 1) or e2e.agent(2, "shop", "status")
         s = wait_shop2(lambda s: "phase=ready" in s and "busy=0" in s and "items=4" in s, 90)
@@ -569,9 +642,8 @@ def run_client(a, shop_lines):
         time.sleep(1)
         e2e.screenshot(2, "9-client-added.png")
         rx = r"models: hero slot \d+ wears outfit casual_joe\b"
-        opened, listed, worn, left = screen_wear(c, "casual_joe", 2)
-        check("client: the row's Wear (customization screen, Back twice): casual_joe worn", bool(opened) and listed and bool(worn) and bool(left),
-              f"opened={bool(opened)} listed={listed} worn={bool(worn)} left={bool(left)}")
+        w = Worn(c, "casual_joe", 2)
+        check("client: the row's Wear: casual_joe on at once, saved, the ~ window stays open", w.ok and w.stays and w.saved == "casual_joe" and w.other, str(w))
         check("host (with the add-on): the client's hero wears casual_joe", bool(e2e.wait_for(lambda: h.grep(rx), 30, 1)))
         hh = e2e.wait_for(lambda: next((f for f in faces(1) if not f[2] and "/b4bcoop/outfits/casual_joe/" in f[1].lower()), None), 15, 1)
         check("host shows the outfit's mesh on the client's hero", bool(hh), hh[1] if hh else str(faces(1))[:160])

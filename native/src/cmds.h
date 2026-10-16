@@ -230,6 +230,7 @@ int addons_add_runtime(const char *file, char *msg, size_t mn);   // a new file 
 int addons_load_now(const char *file, int last, char *msg, size_t mn);   // a listed add-on, switched on, not loaded
 int addons_update_runtime(const char *file, const wchar_t *newpath, int last, char *msg, size_t mn);   // newer file
 int addons_session_allows(int gameplay, char *msg, size_t mn);   // addons_mp.c: as a client, the host's policy allows it
+int addons_session_allows_quiet(int gameplay, char *msg, size_t mn);   // same, no log line (asked every frame)
 // another add-on in the folder (not `skip`) with this content id or one of the outfits/weapon looks in a catalog
 // entry's adds list; returns its file name, why = what matched
 const char *addons_installed_like(const char *skip, const char *content_id, const char *adds, char *why, size_t wn);
@@ -244,7 +245,8 @@ typedef struct {
 int addons_slots(void);
 int addons_info(int i, AddonInfo *o);
 void addons_refresh(void);                    // addonlist.txt edited outside the game + file sizes/times (about 1/s)
-int addons_look_buttons(const char *file, int after);   // its row: Wear (outfit) / Use or Stop (weapon look); 1 = drawn
+int addons_look_buttons(const char *file, int after);   // its row: Wear or Take off (outfit) / Use or Stop (weapon look); 1 = drawn
+int addons_wearing(const char *file, char *title, size_t n);   // 1 = you wear one of its outfits (title: which, if several)
 void addons_tab_footer(void);                 // the folder and the "Load add-ons" switch, one line
 int addons_tab_header(void);                  // warnings over the table (off, changes at restart); 1 = add-ons are on
 // looks.c: the ~ window's "Add-ons" tab: one table of the shop's add-ons (shop.c) and the installed ones (addons.c),
@@ -304,10 +306,12 @@ int models_locked(void);                                 // host: /models off
 int models_off(void);                                    // host: /models off; client: as the host's notices said
 UObject *models_load_asset(const char *path);            // LoadAsset_Blocking of an object path, NULL if it failed
 int models_hero_pawns(UObject **out, int max);           // pawns of the hero-team slots, slot order
-// the game's customization screen for your survivor, an add-on outfit (b4bcoop.outfit.<name>) shown on it; NULL
-// opened, else why not (Fort Hope only)
-const char *models_open_screen(const char *outfit);
-const char *models_screen_why_not(void);                 // NULL: models_open_screen can open it now
+// ~ window: an add-on outfit on your current survivor, saved like the customization screen's choice
+// (b4bcoop-outfits.txt); NULL outfit = take it off. NULL = done, else why not
+const char *models_wear(const char *outfit);
+const char *models_wear_why_not(void);                   // NULL: Wear works now
+const char *models_wearing(void);                        // your survivor's saved add-on outfit, NULL none
+int models_wear_held(void);                              // 1: saved, but model swaps are off / the host refused it
 void models_host_panel(void);                            // ~ window: the model swaps part of Host rules
 // weaponlooks.c: added weapon looks (/model <weapon look>, docs/investigations/new-assets.md §9)
 int wlooks_init(void);

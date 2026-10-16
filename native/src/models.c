@@ -1005,7 +1005,7 @@ static void screen_rows(float dt) {
     for (int i = 0; i < n_outfs; i++) outfs[i].stale = 0;
 }
 
-// b4bcoop-outfits.txt: the add-on outfit each survivor wears, picked on the customization screen
+// b4bcoop-outfits.txt: the add-on outfit each survivor wears (Wear in the ~ window, or the customization screen)
 typedef struct { char hero[24], outfit[33]; } Pick;
 static Pick picks[32];
 static int n_picks = -1;
@@ -1050,11 +1050,11 @@ static void pick_set(const char *hero, const char *outfit) {   // outfit NULL: n
     picks_path(path, sizeof path);
     FILE *f = fopen(path, "w");
     if (!f) { LOG("models: can't write %s", path); return; }
-    fprintf(f, "# b4bcoop: add-on outfits picked on the customization screen (survivor outfit). Your profile keeps the\n"
-               "# survivor's previous look, which the game shows without b4bcoop or without the add-on.\n");
+    fprintf(f, "# b4bcoop: add-on outfit per survivor (Wear in the ~ window, or the customization screen). Your profile\n"
+               "# keeps the survivor's previous look, which the game shows without b4bcoop or without the add-on.\n");
     for (int k = 0; k < n_picks; k++) fprintf(f, "%s %s\n", picks[k].hero, picks[k].outfit);
     fclose(f);
-    LOG("models: %s now wears %s on the customization screen", hero, outfit ? outfit : "a game outfit");
+    LOG("models: %s now wears %s (saved choice)", hero, outfit ? outfit : "a game outfit");
 }
 static int hero_by_def(const RowHandle *h) {   // a CharacterDefinitionRow handle (HeroDefinitions_DT, hero_N)
     if (!h || !h->table) return -1;
@@ -1095,7 +1095,7 @@ static void getprof_detour(UObject *pc, RowHandle *hero, CustSet *out) {
     }
     out->slot[SLOT_OUTFIT].table = heroes[hi].custtable; out->slot[SLOT_OUTFIT].row = row;
     out->last = SLOT_OUTFIT;
-    if (n_subst++ < 20) LOG("models: %s wears add-on outfit %s (customization screen)", heroes[hi].slug, nm);
+    if (n_subst++ < 20) LOG("models: %s wears add-on outfit %s (saved choice)", heroes[hi].slug, nm);
 }
 
 // The profile component's EquipCharacterCustomizationSet(hero row handle, set) (logs "applying customization set to
@@ -1134,14 +1134,18 @@ static void equip_detour(UObject *prof, RowHandle *hero, CustSet *set) {
         (handle_str(&copy.slot[copy.last & 3], b, sizeof b), b), wears ? nm : "-");
     orig_equip(prof, hero, &copy);
 }
+#ifndef B4B_RELEASE
 static void tick_screen(void);
+#endif
 void models_tick(float dt) {
     if ((tick_acc += dt) < 0.5f) return;
     dt = tick_acc; tick_acc = 0;
     UObject *w = ue_world();
     if (!w || !ue_local_pc()) return;
     tick_npc();
+#ifndef B4B_RELEASE
     tick_screen();
+#endif
     wlooks_tick(dt);
     screen_rows(dt);
     if (!is_client()) no_subst = 0;
@@ -1527,8 +1531,76 @@ void models_slash(const char *verb, char *rest, Out *o) {
     tick_acc = 1;   // apply on the next tick
 }
 
-// ---- ~ window, Add-ons tab (looks.c): an outfit row's Wear opens the game's customization screen with the outfit on
-// (the #33 rows), and the model swaps part of Host rules. ----
+// ---- ~ window, Add-ons tab (looks.c): an outfit row's Wear / Take off, and the model swaps part of Host rules ----
+// Wear makes the customization screen's choice (#33) without the screen: the survivor's line in b4bcoop-outfits.txt
+// (pick_set), then the game's own re-init of our look from the profile (ClientInitCustomizationRowForSelectedCharacter,
+// run on our machine, also as a client), whose GetProfileCustomization answer (getprof_detour) is that outfit's row.
+// It goes out with ServerSelectCustomizationSet like any look (host rules apply: selectset_detour), so it is the same
+// look at every map change, after a restart and for everyone with the add-on. Take off: the line removed, the same
+// re-init, i.e. the profile's own look (the profile never held the outfit). One outfit per survivor: Wear on another
+// replaces the line. Anywhere we have a survivor (Fort Hope, a mission: the same path as /model reset there).
+static UObject *wear_slot(UObject **ps) {   // our slot with a survivor and a hero to dress, else NULL
+    *ps = my_ps();
+    UObject *slot = ps_slot(*ps);
+    if (!slot || !slot_pawn(slot)) return NULL;   // menus, loading, dead: no object scan (asked every frame)
+    need_catalogue();
+    return slot_hero(slot) >= 0 ? slot : NULL;
+}
+const char *models_wear_why_not(void) {
+    UObject *ps;
+    if (screen_off) return "Add-on outfits can't be saved here (outfits_screen=0 in b4bcoop.ini, or see the log). "
+                           "/model <name> still puts one on until you leave the game.";
+    if (!wear_slot(&ps)) return "Works once you have a survivor: in Fort Hope, or in a mission after the character select.";
+    if (no_subst) return refusal[0] ? refusal : "The host refused your add-on outfit.";
+    return NULL;
+}
+const char *models_wearing(void) {   // the add-on outfit your current survivor wears (its saved choice), NULL none
+    UObject *ps, *slot = wear_slot(&ps);
+    return slot ? pick_of(heroes[slot_hero(slot)].slug) : NULL;
+}
+int models_wear_held(void) { return models_off() || no_subst; }   // saved, but the host shows the survivor's own look now
+const char *models_wear(const char *outfit) {   // NULL: take it off
+    UObject *ps, *slot = wear_slot(&ps);
+    if (!slot) return models_wear_why_not();
+    if (outfit && models_wear_why_not()) return models_wear_why_not();
+    int hi = slot_hero(slot);
+    if (outfit) {
+        Outf *of = outfit_by_name(outfit);
+        char rn[64];
+        snprintf(rn, sizeof rn, OUTFIT_PREFIX "%s", outfit);
+        if (of && !dt_row(heroes[hi].custtable, make_name(rn))) { rows_acc = 0; screen_rows(0); }   // added just now
+        if (!of || of->bad || !dt_row(heroes[hi].custtable, make_name(rn))) {
+            LOG("models: Wear %s: %s", outfit, !of ? "no such outfit" : "not usable (see above)");
+            return "This outfit can't be worn (see the log).";
+        }
+    }
+    if (me.on) LOG("models: Wear replaces /model %s", me.label);
+    me.on = 0; refusal[0] = 0;   // a /model wish would put itself back over it
+    pick_set(heroes[hi].slug, outfit);
+    if (reinit_from_profile(ps, slot)) return "Could not change your look now (see the log).";
+    LOG("models: %s %s on %s (~ window)", outfit ? "Wear" : "Take off", outfit ? outfit : "-", heroes[hi].slug);
+    return NULL;
+}
+
+// Host rules (looks.c, the bottom of the Add-ons tab): model swaps allowed (/models on|off), one line.
+void models_host_panel(void) {
+    int client = is_client();
+    ov_begin_perm(CMD_HOST);
+    int on = client ? host_off != 1 : !locked;   // a client shows what the host's notices said
+    if (ov_checkbox("Model swaps allowed##models", &on)) ov_run(on ? "models on" : "models off");
+    ov_tooltip(client ? "The host's setting, as it last announced it. Off (/models off): nobody can wear another "
+                        "survivor's outfit, an NPC body, an add-on outfit or a weapon look."
+                      : "Off (/models off): every swapped look goes back to normal; nobody can wear another survivor's "
+                        "outfit, an NPC body, an add-on outfit or a weapon look. A player's own survivor's outfits stay "
+                        "allowed. /models shows the state.");
+    ov_end_perm();
+}
+
+#ifndef B4B_RELEASE
+// mdl cs open: the game's customization screen without walking to it (the ~ window's Wear until 0.9.9): Fort Hope's
+// CharacterCustomizationManager.EnterCharacterCustomization, OpenScreen, SetCharacter (+ EquipCustomization of an
+// outfit row on its mannequin). The usable that normally leads there also leaves it; ours enters the customization
+// view, so tick_screen leaves it once the screen is closed (Back / Esc), else the camera stays there.
 static UObject *live_at(const char *cls, int32_t *idx) {   // the newest live object of that class (not its CDO)
     UClass *c = ue_find_class(cls);
     for (int32_t i = ue_num_objects() - 1; c && i >= 0; i--) {
@@ -1538,9 +1610,6 @@ static UObject *live_at(const char *cls, int32_t *idx) {   // the newest live ob
     return NULL;
 }
 static UObject *live_of(const char *cls) { return live_at(cls, NULL); }
-// The screen opened by models_open_screen: the game's own way there (a usable in Fort Hope) also leaves it by itself;
-// ours enters the customization view (EnterCharacterCustomization: the camera on the screen's mannequin), so we leave
-// it once the screen is closed (Back / Esc), else the camera stays there.
 static UObject *our_screen, *our_mgr, *our_ps;
 static int32_t our_screen_idx, our_mgr_idx;
 static void tick_screen(void) {
@@ -1585,15 +1654,15 @@ static UObject *screen_mgr(void) {
     }
     return mgr;
 }
-const char *models_screen_why_not(void) {
+static const char *screen_why_not(void) {
     if (screen_off) return "The customization screen has no add-on outfits here (outfits_screen=0 in b4bcoop.ini).";
     UObject *slot = ps_slot(my_ps());
     if (!screen_mgr() || !slot || slot_hero(slot) < 0)
         return "Wear it from the character customization screen in Fort Hope.";
     return NULL;
 }
-const char *models_open_screen(const char *outfit) {
-    const char *why = models_screen_why_not();
+static const char *open_screen(const char *outfit) {
+    const char *why = screen_why_not();
     if (why) return why;
     UObject *ps = my_ps(), *slot = ps_slot(ps), *mgr = screen_mgr();
     int32_t ho = ue_prop_offset(slot, "CurrentHeroRowHandle");
@@ -1628,26 +1697,11 @@ const char *models_open_screen(const char *outfit) {
         ue_process_event(scr, e, p);
         shown = 1;
     }
-    LOG("models: customization screen opened for %s (~ window)%s%s", heroes[hi].slug, shown ? ", showing " : "", shown ? rn : "");
+    LOG("models: customization screen opened for %s%s%s", heroes[hi].slug, shown ? ", showing " : "", shown ? rn : "");
     overlay_close();
     return NULL;
 }
 
-// Host rules (looks.c, the bottom of the Add-ons tab): model swaps allowed (/models on|off), one line.
-void models_host_panel(void) {
-    int client = is_client();
-    ov_begin_perm(CMD_HOST);
-    int on = client ? host_off != 1 : !locked;   // a client shows what the host's notices said
-    if (ov_checkbox("Model swaps allowed##models", &on)) ov_run(on ? "models on" : "models off");
-    ov_tooltip(client ? "The host's setting, as it last announced it. Off (/models off): nobody can wear another "
-                        "survivor's outfit, an NPC body, an add-on outfit or a weapon look."
-                      : "Off (/models off): every swapped look goes back to normal; nobody can wear another survivor's "
-                        "outfit, an NPC body, an add-on outfit or a weapon look. A player's own survivor's outfits stay "
-                        "allowed. /models shows the state.");
-    ov_end_perm();
-}
-
-#ifndef B4B_RELEASE
 // ---- dev: exploration (docs/investigations/model-swap.md) ----
 static UObject *nth_hero(int idx) {
     static UClass *hc;
@@ -1770,8 +1824,8 @@ static void cmd_standins(const char *cls, Out *o) {
 static void cmd_cs(const char *a, const char *arg, Out *o) {
     UObject *ps = my_ps(), *slot = ps_slot(ps), *mgr = live_of("CharacterCustomizationManager");
     UObject *scr = live_of("CharacterCustomizationScreen");
-    if (!strcmp(a, "open")) {   // as the ~ window's Wear (tick_screen leaves the view when it closes); arg: an outfit
-        const char *e = models_open_screen(arg);
+    if (!strcmp(a, "open")) {   // tick_screen leaves the view when it closes; arg: an outfit
+        const char *e = open_screen(arg);
         if (e) out_printf(o, "%s\n", e);
         else out_printf(o, "screen open for %s\n", slot_hero(slot) >= 0 ? heroes[slot_hero(slot)].slug : "?");
         return;

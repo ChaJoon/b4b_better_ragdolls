@@ -276,8 +276,9 @@ Code: `looks.c` draws one table of the installed add-ons and the shop's list (ov
 it `addons_slots()` / `addons_info()` (file, title, version, author, description, why it can't load, file size, time
 installed = newest of created / written, on / on at start / mounted / valid / gameplay, outfit and weapon-look
 counts), `addons_refresh()` (once a second while the tab is shown: hand edits of `addonlist.txt` re-read as before,
-file sizes and times), `addons_look_buttons(file, after)` (Wear: `models_open_screen`, the customization screen with the
-outfit on; Use / Stop: a weapon look), `addons_tab_header()` (add-ons off / restart warnings) and
+file sizes and times), `addons_look_buttons(file, after)` (Wear / Take off: `models_wear`, the outfit on your survivor at
+once as the customization screen's saved choice, overlay.md "Add-ons tab"; Use / Stop: a weapon look),
+`addons_wearing(file)` (the row's "wearing"), `addons_tab_header()` (add-ons off / restart warnings) and
 `addons_tab_footer()` ("Load add-ons" = ini `addons`, "Copy folder path").
 - No load order and no on/off toggle in the window (Dan: two add-ons changing one file is the player's problem, not a
   mod manager). `ord[]` and `addonlist.txt` are unchanged (`/addons` lists and numbers in that order; a hand-edited

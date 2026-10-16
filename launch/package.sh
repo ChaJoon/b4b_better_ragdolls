@@ -150,8 +150,8 @@ editor and remove the ';' in front of a line. Saved changes apply within a coupl
   More options and details: b4bcoop-COMMANDS.txt.
 
 ADD-ONS (new outfits, weapon looks, textures): press ~, tab Add-ons. It lists the free add-ons from the add-on shop
-and the ones you have: Add downloads one (most are ready at once), Wear puts on an outfit (in Fort Hope it opens the
-game's customization screen), Use / Stop a weapon look, Update, Remove. Or put an add-on's .pak file in a
+and the ones you have: Add downloads one (most are ready at once), Wear / Take off an outfit (on your survivor at once,
+kept for that survivor), Use / Stop a weapon look, Update, Remove. Or put an add-on's .pak file in a
 b4bcoop-addons folder next to Back4Blood.exe and restart the game. Only you see your add-ons, and nobody learns which
 ones you have; friends with the same add-on see your outfit, the others your normal survivor. By default hosts let in
 players with any add-ons; a host can allow cosmetic ones only, or none (addons_policy=; your game checks yours before

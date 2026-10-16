@@ -437,7 +437,8 @@ screen").
   and shows the survivor's previous look; nothing to clean up after uninstalling.
 - **The choice lives in `b4bcoop-outfits.txt`** next to `b4bcoop.ini` (`<survivor> <outfit>` per line, comment header;
   not touched by the updater, which keeps unknown files). Equipping a game outfit or piece for that survivor removes
-  the line.
+  the line. Since 2026-10-16 the `~` window's **Wear** / **Take off** writes / removes the same line without the
+  screen and re-inits the look from the profile path below at once (`models_wear`, overlay.md "Add-ons tab").
 - **Reading it back**: hook on `FCharacterCustomizationUtils::GetProfileCustomization(pc, hero, out)` (0x141B769C0;
   callers: `AGobiPlayerState::InitCustomizationSet` at every hero pick -> `ServerSelectCustomizationSet`, the
   customization screen, the mannequins): for our own controller only, when the survivor has a remembered outfit and its

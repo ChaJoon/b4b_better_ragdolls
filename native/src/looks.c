@@ -4,8 +4,8 @@
 // "Add-ons tab"). Columns: thumbnail | name + file size | installed state | Add, Update, Undo, Turn on, Wear / Use,
 // Remove. Installed add-ons first, then by name or by the time they were installed (either way round); a search box
 // and a filter (All / Installed / Available). No load order and no on/off here: Remove is the way out (an add-on that
-// is off in addonlist.txt shows Turn on). Wear opens the game's customization screen with the outfit on (models.c);
-// weapon looks: Use / Stop (weaponlooks.c). Host rules (models.c, addons_mp.c) at the bottom.
+// is off in addonlist.txt shows Turn on). Wear puts the outfit on your survivor at once (saved like the customization
+// screen's choice; the row then says "wearing" and offers Take off: models.c); weapon looks: Use / Stop (weaponlooks.c). Host rules (models.c, addons_mp.c) at the bottom.
 // Dev: `overlay tab Models|Browse|Get more|Wear|Looks` shows this tab (filter All), `overlay tab Installed` with the
 // filter Installed (overlay_add_alias).
 #include <windows.h>
@@ -135,6 +135,13 @@ static void cell_state(const Row *r, const AddonInfo *ai, const ShopRow *sr) {
         else if (ai->mounted <= 0) ov_text("loads at restart");
         else ov_text("%s%s", *ver ? "v" : "installed", ver);
         if (r->c >= 0 && sr->state == SHOP_NEWER) ov_text_warn("v%s available", sr->version);
+        char wt[64];
+        if (addons_wearing(ai->file, wt, sizeof wt) && !models_wear_held()) ov_text("wearing%s%s", *wt ? " " : "", wt);
+        else if (addons_wearing(ai->file, wt, sizeof wt)) {
+            ov_text_dim("wearing%s%s (paused)", *wt ? " " : "", wt);
+            ov_tooltip("Model swaps are off in this session (or the host refused it): everyone sees your survivor's "
+                       "own look until they are allowed again. The outfit stays your choice.");
+        }
     } else if (r->c >= 0) {
         if (sr->state == SHOP_DOWNLOADING) ov_text_dim("downloading");
         else if (sr->state == SHOP_INSTALLED_AS) {
