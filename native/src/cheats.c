@@ -853,6 +853,82 @@ static void cmd_spawn(char *rest, Out *o) {
     if (n) notice("host spawned %d %s", n, a);
 }
 
+// /spawnprop <name part | class path> [match #] (fork, for the ragdoll tests): an actor of a class this map has already
+// loaded, matched by name with underscores and case ignored (gascan, barrel, propane...), or of a Blueprint class path
+// (loaded if needed), on the floor 3 m in front of the host's hero. Lists up to 12 matches with their class paths;
+// the first one is spawned unless a match number is given. A class loads with the map's own copies of it, so a map
+// without a gas can has no gas-can class to match: the path printed in another map loads it anywhere.
+static void squash(const char *s, char *out, size_t n) {
+    size_t k = 0;
+    for (; *s && k + 1 < n; s++) if (*s != '_') out[k++] = (char)((*s >= 'A' && *s <= 'Z') ? *s + 32 : *s);
+    out[k] = 0;
+}
+
+static int class_derives(UObject *c, UClass *base) {
+    for (UStruct *s = (UStruct *)c; s; s = US_SUPER(s)) if ((UObject *)s == (UObject *)base) return 1;
+    return 0;
+}
+
+static void cmd_spawnprop(char *rest, Out *o) {
+    char *a = rest ? strtok(rest, " ") : NULL, *b = a ? strtok(NULL, " ") : NULL;
+    if (!a) { out_printf(o, "usage: /spawnprop <name part|class path> [match #], e.g. /spawnprop gascan, /spawnprop barrel 2\n"); return; }
+    if (!in_mission()) { out_printf(o, "/spawnprop: only during a mission\n"); return; }
+    UObject *pawn = ps_pawn(host_ps()), *gs = class_cdo("GameplayStatics");
+    float at[3], fwd[3];
+    if (actor_loc(pawn, at) || actor_fwd(pawn, fwd) || !gs) { out_printf(o, "you have no hero right now\n"); return; }
+    char path[400], nm[160];
+    UClass *pick = NULL;
+    if (strchr(a, '/')) {
+        if (!(pick = load_class(a))) { out_printf(o, "/spawnprop: couldn't load %s\n", a); return; }
+    } else {
+        UClass *cc = cls("Class"), *ac = cls("Actor");
+        if (!cc || !ac) { out_printf(o, "/spawnprop: not now\n"); return; }
+        char want[96], sq[160];
+        squash(a, want, sizeof want);
+        int k = b ? atoi(b) : 1, found = 0;
+        for (int32_t i = 0, n = ue_num_objects(); i < n; i++) {
+            UObject *c = ue_object_at(i);
+            if (!c || !ue_is_a(c, cc) || !class_derives(c, ac)) continue;
+            ue_obj_name(c, nm, sizeof nm);
+            if (!strncmp(nm, "SKEL_", 5) || !strncmp(nm, "REINST_", 7) || !strncmp(nm, "TRASHCLASS", 10)) continue;
+            squash(nm, sq, sizeof sq);
+            if (!strstr(sq, want)) continue;
+            found++;
+            if (found <= 12) out_printf(o, "  %d: %s\n", found, ue_full_path(c, path, sizeof path));
+            if (found == k) pick = c;
+        }
+        if (!found) {
+            out_printf(o, "/spawnprop: no actor class with \"%s\" in its name is loaded in this map (a class loads with the map's own copies)\n", a);
+            return;
+        }
+        if (!pick) { out_printf(o, "/spawnprop: %d matches, no #%d\n", found, k); return; }
+        if (found > 12) out_printf(o, "  ... %d matches in all\n", found);
+    }
+    // on the floor (the hero's location is its capsule's middle, ~90 cm up), 3 m ahead, facing the hero
+    float loc[3] = {at[0] + fwd[0] * 300.f, at[1] + fwd[1] * 300.f, at[2] - 60.f};
+    float yaw = atan2f(-fwd[1], -fwd[0]) * 0.5f;
+    float xf[12] = {0, 0, sinf(yaw), cosf(yaw), loc[0], loc[1], loc[2], 0, 1, 1, 1, 0};   // FTransform: quat, translation, scale
+    Call c;
+    if (!call_prep(&c, gs, "BeginDeferredActorSpawnFromClass")) { out_printf(o, "/spawnprop: not available\n"); return; }
+    SET(&c, "WorldContextObject", UObject *, ue_world());
+    SET(&c, "ActorClass", UObject *, (UObject *)pick);
+    void *t = carg(&c, "SpawnTransform");
+    if (t) memcpy(t, xf, sizeof xf);
+    SET(&c, "CollisionHandlingOverride", uint8_t, 1);   // AlwaysSpawn
+    call_go(&c);
+    UObject **r = carg(&c, "ReturnValue"), *act = r ? *r : NULL;
+    if (!act || !call_prep(&c, gs, "FinishSpawningActor")) { out_printf(o, "/spawnprop: spawn failed\n"); return; }
+    SET(&c, "Actor", UObject *, act);
+    t = carg(&c, "SpawnTransform");
+    if (t) memcpy(t, xf, sizeof xf);
+    call_go(&c);
+    ue_obj_name((UObject *)pick, nm, sizeof nm);
+    LOG("cheats: spawnprop %s (%s) at %.0f %.0f %.0f -> %p", nm, ue_full_path((UObject *)pick, path, sizeof path), loc[0], loc[1],
+        loc[2], (void *)act);
+    out_printf(o, "spawned a %s 3 m ahead\n", nm);
+    notice("host spawned a %s", nm);
+}
+
 // Every living ridden: GobiCharacters that aren't heroes (players, bots, and NPC allies like Emmett are
 // HeroCharacters) and aren't controlled by a player. Common ridden and the mutations (Common_/Hag_/Snitcher_/
 // Brute_AICharacterBP) are plain GobiCharacters; the specials are ZombieCharacters.
@@ -1325,7 +1401,7 @@ static void set_on(int en, Out *o) {
 static const struct { const char *name; int perm; } VERBS[] = {{"cheats", CMD_ANYONE}, {"god", CMD_CHEAT},
     {"heal", CMD_CHEAT}, {"revive", CMD_CHEAT}, {"ammo", CMD_CHEAT}, {"copper", CMD_CHEAT}, {"card", CMD_CHEAT},
     {"fly", CMD_CHEAT}, {"noclip", CMD_CHEAT}, {"walk", CMD_CHEAT}, {"tp", CMD_CHEAT}, {"freecam", CMD_CHEAT},
-    {"size", CMD_CHEAT}, {"horde", CMD_CHEAT}, {"director", CMD_CHEAT}, {"spawn", CMD_CHEAT}, {"killall", CMD_CHEAT},
+    {"size", CMD_CHEAT}, {"horde", CMD_CHEAT}, {"director", CMD_CHEAT}, {"spawn", CMD_CHEAT}, {"spawnprop", CMD_CHEAT}, {"killall", CMD_CHEAT},
     {"freeze", CMD_CHEAT}, {"slomo", CMD_CHEAT}, {"win", CMD_CHEAT}, {"lose", CMD_CHEAT}, {"unlockall", CMD_OWNSAVE},
     {"supply", CMD_OWNSAVE}, {"skulls", CMD_OWNSAVE}, {"burncards", CMD_OWNSAVE}};
 
@@ -1346,7 +1422,7 @@ static void help(Out *o) {
     out_printf(o, "cheats (host only, after /cheats on; [p] = player name, #n, me or all):\n"
                   "/god [p] [on|off]  /heal [p]  /revive [p]  /ammo infinite|off  /copper +N [p]  /card <name>|list [p]\n"
                   "/fly [p]  /noclip  /walk [p]  /tp [p] <p|saferoom|start>  /freecam  /size <x>\n"
-                  "/horde  /director calm|build|peak  /spawn <type> [n]  /killall  /freeze  /slomo <x>  /win  /lose\n"
+                  "/horde  /director calm|build|peak  /spawn <type> [n]  /spawnprop <name> [#]  /killall  /freeze  /slomo <x>  /win  /lose\n"
                   "%s"
                   "state: cheats %s", own, on ? "ON" : "off");
     if (on) out_printf(o, ", god %d, ammo %s, speed %.2f%s%s", n_gods, ammo_inf ? "infinite" : "normal", slomo, frozen ? ", frozen" : "", freecam ? ", freecam" : "");
@@ -1380,6 +1456,7 @@ void cheats_slash(const char *verb, char *rest, Out *o) {
     else if (!strcmp(verb, "horde")) cmd_horde(o);
     else if (!strcmp(verb, "director")) cmd_director(rest, o);
     else if (!strcmp(verb, "spawn")) cmd_spawn(rest, o);
+    else if (!strcmp(verb, "spawnprop")) cmd_spawnprop(rest, o);
     else if (!strcmp(verb, "killall")) cmd_killall(o);
     else if (!strcmp(verb, "freeze")) cmd_freeze(o);
     else if (!strcmp(verb, "slomo")) cmd_slomo(rest, o);
