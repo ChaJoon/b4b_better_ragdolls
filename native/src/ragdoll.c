@@ -161,6 +161,7 @@ typedef struct {
     uint8_t mass_set;                      // apply() changed its mass scale (undone if the actor comes back)
     uint8_t bag;                           // an explosion's destroy (the blood bag) was refused for it
     uint8_t ended;                         // removed by the deadline (hidden, physics off, destroy asked)
+    uint8_t fxwho, fxp;                    // build 23 arcs probe: 1 spared, 2 control; probes done (bit per time)
     FName prof;
     float rel_loc[3], rel_rot[3];
 } Tracked;
@@ -408,6 +409,8 @@ static void stack_log(int kind, const char *what) {
 
 static int is_corpse_class(UClass *c) { for (int k = 0; k < n_corpse_cls; k++) if (c == corpse_cls[k]) return 1; return 0; }
 
+static void fx_note(UClass *c, UObject *r, UObject *outer);   // build 23, below
+
 static UObject *sco_detour(UClass *c, UObject *outer, FName name, uint32_t fl, uint32_t ifl, UObject *tmpl, uint8_t copy,
                            void *graph, uint8_t arch) {
     UObject *r = orig_sco(c, outer, name, fl, ifl, tmpl, copy, graph, arch);
@@ -416,6 +419,7 @@ static UObject *sco_detour(UClass *c, UObject *outer, FName name, uint32_t fl, u
         snprintf(w, sizeof w, "%s constructed (%s)", oname(r, a, sizeof a), oname(c, b, sizeof b));
         stack_log(ST_SPAWN, w);
     }
+    if (tracing && c && r && !(fl & LIVE_FLAGS) && GetCurrentThreadId() == game_tid && !own_call()) fx_note(c, r, outer);
     return r;
 }
 
@@ -453,11 +457,18 @@ static void stack_check(UObject *o, UObject *actor, UFunction *fn, void *params)
     // a ragdoll the settle hold released goes the known way (swap, delete 1 s later): only the others are of interest
     if (!x || x->released || (x->stacked & (1u << kind))) return;
     x->stacked |= 1u << kind;
+    // build 22 log: the director despawns living Ridden far away the same way; those used up the stack budget before
+    // any explosion. A blood bag is dead when it's destroyed: a Ridden still alive here is not one.
+    if (!x->died_at && x->ls && ue_object_usable(x->ls, x->lsi) && call_bool(x->ls, "IsAlive") == 1) return;
+    double lb = last_blast_t();
+    char since[48];
+    if (lb > 0) snprintf(since, sizeof since, "%.3f s after the last explosion", now_s() - lb);
+    else snprintf(since, sizeof since, "no explosion yet");
     int n = x->died_at
         ? snprintf(w, sizeof w, "%s.%s on %s, %.2f s after death, %s", cname(o, a, sizeof a), ue_obj_name(fn, b, sizeof b),
                    oname(actor, c, sizeof c), now_s() - x->died_at, x->ragdolled ? "ragdolled" : "game's own death")
-        : snprintf(w, sizeof w, "%s.%s on %s, NOT YET SEEN DEAD (a blood bag?), %.3f s after the last explosion",
-                   cname(o, a, sizeof a), ue_obj_name(fn, b, sizeof b), oname(actor, c, sizeof c), now_s() - last_blast_t());
+        : snprintf(w, sizeof w, "%s.%s on %s, NOT YET SEEN DEAD (a blood bag?), %s",
+                   cname(o, a, sizeof a), ue_obj_name(fn, b, sizeof b), oname(actor, c, sizeof c), since);
     if (kind == ST_ENDPLAY && params && n > 0 && n < (int)sizeof w)
         snprintf(w + n, sizeof w - n, ", reason %u", *(uint8_t *)params);   // 0 Destroyed, 1 LevelTransition, 3 RemovedFromWorld
     stack_log(kind, w);
@@ -585,8 +596,10 @@ static UObject *owner_actor(UObject *o) {
 }
 
 static int per_frame(const char *fn) {   // left out of the death sequences (still listed once)
+    // build 23: + the facial animation and anim-graph calls every frame (60% of build 22's log, every dead body for 8 s)
     return !strncmp(fn, "ReceiveTick", 11) || !strncmp(fn, "BlueprintUpdateAnimation", 24) ||
-           !strncmp(fn, "BlueprintThreadSafe", 19) || !strncmp(fn, "BlueprintPostEvaluate", 21);
+           !strncmp(fn, "BlueprintThreadSafe", 19) || !strncmp(fn, "BlueprintPostEvaluate", 21) ||
+           !strcmp(fn, "GetCurves") || !strcmp(fn, "GetBindingName") || !strncmp(fn, "EvaluateGraphExposedInputs", 26);
 }
 
 static void trace_other(UObject *o, UObject *actor, UFunction *fn, void *params) {   // not on a Ridden or corpse
@@ -657,6 +670,48 @@ typedef struct { double t; float at[3]; } Blast;
 static Blast blasts[8];
 static int blast_at;
 static double last_blast_t(void) { double t = 0; for (int i = 0; i < 8; i++) if (blasts[i].t > t) t = blasts[i].t; return t ? t : -1e9; }
+
+// ---- what an explosion creates (discovery, build 23, while a trace runs) ----
+// The red arcs on spared blood bags were no effect component of theirs at death (build 22: only an inactive
+// CharacterEmitter). So: every object of an effect-like class (particles, decals, gore, gibs, dynamic materials...)
+// constructed within 0.5 s before or 3 s after an explosion's effects call is logged, with what it was made in. The
+// "before" ones matter: the blood bag code runs before that call, in the same frame (build 20 stacks), so they wait
+// in a ring until the call comes. Gunfire's own decals and impacts outside those windows are never logged.
+#define FX_NEW_LOGS 100
+typedef struct { double t; char what[232]; } FxNew;
+static FxNew fx_ring[32];
+static int fx_ring_at, fx_new_logs;
+
+static void fx_note(UClass *c, UObject *r, UObject *outer) {   // game thread, from the construction hook
+    static const char *const NEW_KEYS[] = {"particle", "niagara", "fx", "decal", "emitter", "blood", "gore", "gib",
+                                           "juice", "mutil", "limb", "dismember", "sever", "chunk",
+                                           "materialinstancedynamic", NULL};
+    if (fx_new_logs >= FX_NEW_LOGS) return;
+    char cn[96], a[96], b[96], d[64], e[96];
+    if (!name_has(ue_obj_name(c, cn, sizeof cn), NEW_KEYS)) return;
+    UObject *own = outer ? owner_actor(outer) : NULL;
+    double t = now_s(), lb = last_blast_t();
+    char what[232];
+    snprintf(what, sizeof what, "%s (%s) constructed in %s (%s), owner %s", oname(r, a, sizeof a), cn, oname(outer, b, sizeof b),
+             cname(outer, d, sizeof d), oname(own, e, sizeof e));
+    if (lb > 0 && t - lb < 3.0) {
+        fx_new_logs++;
+        LOG("ragdoll fx: +%.3fs after the explosion: %s", t - lb, what);
+        return;
+    }
+    FxNew *f = &fx_ring[fx_ring_at++ % 32];
+    f->t = t;
+    memcpy(f->what, what, sizeof what);
+}
+
+static void fx_flush(double blast_t) {   // game thread: an explosion's effects call just came; its frame's objects
+    for (int k = 0; k < 32; k++) {
+        FxNew *f = &fx_ring[(fx_ring_at + k) % 32];   // oldest first
+        if (!f->t || blast_t - f->t > 0.5 || f->t > blast_t) { f->t = 0; continue; }
+        if (fx_new_logs < FX_NEW_LOGS) { fx_new_logs++; LOG("ragdoll fx: -%.3fs before the explosion's effects call: %s", blast_t - f->t, f->what); }
+        f->t = 0;
+    }
+}
 static int juice_state;   // blast lookup: 0 not looked up, 1 ok, -1 missing
 
 static void juice_resolve(void) {
@@ -751,31 +806,143 @@ static void bag_unhide(Tracked *t, UObject *mesh) {
         LOG("ragdoll bloodbag: %s spared: actor hidden %d, mesh visible %d -> %d (shown before the ragdoll)", oname(t->a, a, sizeof a),
             hidden, vis, call_bool(mesh, "IsVisible"));
     }
-    // Discovery (build 22): Joon sees dark red arcs around spared bodies until their swap: likely the blood-bag gore
-    // effect, started on a body that was meant to vanish. The effect components of the first 3 spared bodies, with
-    // their assets, so the next build can switch off just those.
-    static int fx_logs;
-    if (fx_logs >= 3) return;
-    fx_logs++;
-    UClass *ac = cls("ActorComponent");
-    if (!ac || !call_prep(&k, t->a, "K2_GetComponentsByClass")) return;
-    SET(&k, "ComponentClass", UClass *, ac);
-    call_go(&k);
-    TArray *r = carg(&k, "ReturnValue");
-    static const char *const FX_KEYS[] = {"particle", "niagara", "fx", "decal", "emitter", "blood", "gore", "ribbon", "cable", NULL};
-    int n = 0;
-    for (int i = 0; r && r->data && i < r->num && i < 128; i++) {
-        UObject *comp = ((UObject **)r->data)[i];
-        char cn[128], on[128], an[160];
-        if (!comp || !name_has(cname(comp, cn, sizeof cn), FX_KEYS)) continue;
-        UObject *asset = ue_get_ptr(comp, "Template");
-        if (!asset) asset = ue_get_ptr(comp, "Asset");
-        if (!asset) asset = ue_get_ptr(comp, "DecalMaterial");
-        n++;
-        LOG("ragdoll bloodbag:   %s effect %s (%s), asset %s, active %d, visible %d", oname(t->a, a, sizeof a), oname(comp, on, sizeof on),
-            cn, asset ? ue_obj_name(asset, an, sizeof an) : "-", call_bool(comp, "IsActive"), call_bool(comp, "IsVisible"));
+}
+
+// ---- the red arcs (discovery, build 23) ----
+// Build 22: a spared body's only effect component at death is an inactive CharacterEmitter, no asset: the arcs are
+// not a particle on the body at that moment. Seen until the swap to the stand-in (which has the mesh's own look), so
+// they belong to the body: an effect made a moment later, or its look (materials, morph targets: a body swelling up
+// before it bursts would draw as red spheres). Probed at death, +0.5 s and +2 s on the first 3 spared bodies and, to
+// compare, the first 2 bodies that die near an explosion without being blood bags: effect components, the mesh's
+// attached children (whoever owns them), its materials with their parameters, its morph targets, its scale.
+static const float FXP_T[] = {0.f, 0.5f, 2.f};
+static int fxp_spared, fxp_ctrl;
+
+static int call_int(UObject *o, const char *fn) {
+    Call c; if (!call_prep(&c, o, fn)) return -1;
+    call_go(&c);
+    int32_t *r = carg(&c, "ReturnValue");
+    return r ? *r : -1;
+}
+
+static void log_array(const char *who, const char *what, UObject *o, const char *prop, int max) {   // array of structs
+    FField *ap = o ? ue_find_prop(U_CLASS(o), prop) : NULL;
+    if (!ap) return;
+    FField *inner = *(FField **)((char *)ap + 0x78);   // FArrayProperty::Inner
+    const TArray *arr = (const TArray *)((const uint8_t *)o + FP_OFFSET(ap));
+    if (!inner || !arr) return;
+    LOG("ragdoll fxprobe %s:   %s %s: %d", who, what, prop, arr->num);
+    int32_t el = FP_ELSIZE(inner);
+    for (int i = 0; arr->data && i < arr->num && i < max && el > 0; i++) {
+        char v[600];
+        fmt_prop(inner, (const uint8_t *)arr->data + (size_t)i * el, v, sizeof v, 2);
+        LOG("ragdoll fxprobe %s:     [%d] %s", who, i, v);
     }
-    LOG("ragdoll bloodbag: %s: %d effect components of %d components", oname(t->a, a, sizeof a), n, r ? r->num : -1);
+}
+
+static void fx_probe(Tracked *t, double dt) {   // game thread
+    char who[200], a[160], b[160], c[160];
+    snprintf(who, sizeof who, "%s +%.1fs (%s)", oname(t->a, a, sizeof a), dt,
+             t->fxwho == 1 ? "spared blood bag" : "near-blast death, not a blood bag");
+    UObject *mesh = t->mesh;
+    Call k;
+    // effect components on the actor, as build 22 did, now also later
+    static const char *const FX_KEYS[] = {"particle", "niagara", "fx", "decal", "emitter", "blood", "gore", "ribbon", "cable", NULL};
+    UClass *ac = cls("ActorComponent");
+    if (ac && call_prep(&k, t->a, "K2_GetComponentsByClass")) {
+        SET(&k, "ComponentClass", UClass *, ac);
+        call_go(&k);
+        TArray *r = carg(&k, "ReturnValue");
+        int n = 0;
+        for (int i = 0; r && r->data && i < r->num && i < 128; i++) {
+            UObject *comp = ((UObject **)r->data)[i];
+            char cn[128];
+            if (!comp || !name_has(cname(comp, cn, sizeof cn), FX_KEYS)) continue;
+            UObject *asset = ue_get_ptr(comp, "Template");
+            if (!asset) asset = ue_get_ptr(comp, "Asset");
+            if (!asset) asset = ue_get_ptr(comp, "DecalMaterial");
+            n++;
+            LOG("ragdoll fxprobe %s: effect %s (%s), asset %s, active %d, visible %d", who, oname(comp, b, sizeof b), cn,
+                oname(asset, c, sizeof c), call_bool(comp, "IsActive"), call_bool(comp, "IsVisible"));
+        }
+        LOG("ragdoll fxprobe %s: %d effect components of %d components", who, n, r ? r->num : -1);
+    }
+    if (!mesh) return;
+    // whatever is attached to the mesh, also things other actors own (an effect spawned attached to a bone)
+    FField *chp = ue_find_prop(U_CLASS(mesh), "AttachChildren");
+    if (chp) {
+        const TArray *ch = (const TArray *)((const uint8_t *)mesh + FP_OFFSET(chp));
+        LOG("ragdoll fxprobe %s: mesh children: %d", who, ch->num);
+        for (int i = 0; ch->data && i < ch->num && i < 24; i++) {
+            UObject *x = ((UObject **)ch->data)[i];
+            if (!x) continue;
+            UObject *own = COMP_OWNER(x);
+            LOG("ragdoll fxprobe %s:   child %s (%s), owner %s, visible %d", who, oname(x, a, sizeof a), cname(x, b, sizeof b),
+                oname(own, c, sizeof c), call_bool(x, "IsVisible"));
+        }
+    }
+    // materials: a dynamic one, or a swapped one, with its parameters
+    int nm = call_int(mesh, "GetNumMaterials");
+    FField *ovp = ue_find_prop(U_CLASS(mesh), "OverrideMaterials");
+    LOG("ragdoll fxprobe %s: %d materials, %d overrides", who, nm,
+        ovp ? ((const TArray *)((const uint8_t *)mesh + FP_OFFSET(ovp)))->num : -1);
+    for (int i = 0; i < nm && i < 12; i++) {
+        if (!call_prep(&k, mesh, "GetMaterial")) break;
+        SET(&k, "ElementIndex", int32_t, i);
+        call_go(&k);
+        UObject **rm = carg(&k, "ReturnValue");
+        UObject *m = rm ? *rm : NULL;
+        if (!m) { LOG("ragdoll fxprobe %s:   material %d: none", who, i); continue; }
+        UObject *par = ue_find_prop(U_CLASS(m), "Parent") ? ue_get_ptr(m, "Parent") : NULL;
+        LOG("ragdoll fxprobe %s:   material %d: %s (%s), parent %s", who, i, oname(m, a, sizeof a), cname(m, b, sizeof b),
+            oname(par, c, sizeof c));
+        if (cname(m, b, sizeof b) && strstr(b, "Dynamic")) {   // its live parameters
+            char what[32];
+            snprintf(what, sizeof what, "material %d", i);
+            log_array(who, what, m, "ScalarParameterValues", 16);
+            log_array(who, what, m, "VectorParameterValues", 16);
+        }
+    }
+    // morph targets with their weights now
+    UObject *skm = ue_get_ptr(mesh, "SkeletalMesh");
+    FField *mtp = skm ? ue_find_prop(U_CLASS(skm), "MorphTargets") : NULL;
+    if (mtp) {
+        const TArray *mt = (const TArray *)((const uint8_t *)skm + FP_OFFSET(mtp));
+        int nonzero = 0;
+        for (int i = 0; mt->data && i < mt->num && i < 64; i++) {
+            UObject *m = ((UObject **)mt->data)[i];
+            if (!m || !call_prep(&k, mesh, "GetMorphTarget")) continue;
+            wchar_t wn[96];
+            ue_obj_name(m, a, sizeof a);
+            size_t j = 0;
+            for (; a[j] && j + 1 < 96; j++) wn[j] = (wchar_t)(unsigned char)a[j];
+            wn[j] = 0;
+            SET(&k, "MorphTargetName", FName, fname_of(wn));
+            call_go(&k);
+            float *w = carg(&k, "ReturnValue");
+            if (w && *w != 0.f) { nonzero++; LOG("ragdoll fxprobe %s:   morph target %s = %g", who, a, *w); }
+        }
+        LOG("ragdoll fxprobe %s: %d morph targets, %d not 0", who, mt->num, nonzero);
+    } else LOG("ragdoll fxprobe %s: no morph target list (skeletal mesh %s)", who, oname(skm, a, sizeof a));
+    // its size (a body blown up would show here)
+    if (call_prep(&k, mesh, "K2_GetComponentScale") || call_prep(&k, mesh, "GetComponentScale")) {
+        call_go(&k);
+        float *sc = carg(&k, "ReturnValue");
+        if (sc) LOG("ragdoll fxprobe %s: mesh scale (%.2f %.2f %.2f)", who, sc[0], sc[1], sc[2]);
+    }
+}
+
+static void fx_probe_mark(Tracked *t) {   // from apply(): which bodies get the probe
+    if (t->bag) { if (fxp_spared < 3) { fxp_spared++; t->fxwho = 1; } }
+    else if (fxp_ctrl < 2 && last_blast_t() > 0 && now_s() - last_blast_t() < 1.0) { fxp_ctrl++; t->fxwho = 2; }
+}
+
+static void fx_probe_tick(Tracked *t, double now) {   // from the tick, bodies we ragdolled
+    for (int i = 0; i < (int)(sizeof FXP_T / sizeof FXP_T[0]); i++) {
+        if ((t->fxp & (1u << i)) || now - t->died_at < FXP_T[i]) continue;
+        t->fxp |= 1u << i;
+        fx_probe(t, now - t->died_at);
+    }
 }
 
 static void pe_detour(UObject *o, UFunction *fn, void *params) {
@@ -783,6 +950,7 @@ static void pe_detour(UObject *o, UFunction *fn, void *params) {
         Blast *b = &blasts[blast_at++ % 8];
         b->t = now_s();
         memcpy(b->at, (uint8_t *)params + FP_OFFSET(blast_loc_f), sizeof b->at);
+        if (tracing) fx_flush(b->t);
     }
     if (tracing && o && fn && !own_call()) trace_call(o, fn, params);
     orig_pe(o, fn, params);
@@ -847,6 +1015,8 @@ static int trace_start(double secs, Out *o) {
     n_other_pairs = n_hit_lines = n_other_lines = 0;
     memset(ring, 0, sizeof ring);
     memset(focus, 0, sizeof focus);
+    memset(fx_ring, 0, sizeof fx_ring);
+    fx_new_logs = 0;
     trace_t0 = now_s();
     trace_end = trace_t0 + secs;
     LeaveCriticalSection(&tcs);
@@ -1283,11 +1453,17 @@ static void extra_gravity(Tracked *x) {
 typedef struct { char key[24]; float n; uint8_t radial; } PushKind;
 static PushKind push_tab[48] = {   // first guesses (x the scale, default 4); a Common weighs 133 kg by GetBoneMass
     {"HG", 6000, 0},  {"SMG", 7000, 0}, {"AR", 9000, 0}, {"LMG", 11000, 0}, {"SG", 25000, 0},
-    {"FragGrenade", 60000, 1},   // frags and pipe bombs (both FragGrenade_DamageType_C); Joon's pick (16 Oct) {"PipeBomb", 40000, 1}, {"Grenade", 40000, 1}, {"Explosi", 40000, 1},
-    {"Propane", 40000, 1}, {"Stumble", 0, 0}, {"default", 8000, 0},
+    {"FragGrenade", 60000, 1},   // frags and pipe bombs (both FragGrenade_DamageType_C); Joon's pick (16 Oct)
+    {"PipeBomb", 40000, 1}, {"Grenade", 40000, 1}, {"Explosi", 40000, 1},   // (build 22 had these commented out by mistake)
+    {"Propane", 40000, 1},
+    // build 22 log: red barrels and Exploders were unknown (default 8000, aimed from the shooter, not the blast).
+    // Blasts, as strong as a frag until Joon picks (first guess). Gas cans kill by fire over seconds, 5-8 m away:
+    // a burning body collapses where it stands, so no push (first guess too; /ragdoll push GasCan <n> to change)
+    {"ExplodingBarrel", 60000, 1}, {"Exploder", 60000, 1}, {"GasCan", 0, 0},
+    {"Stumble", 0, 0}, {"default", 8000, 0},
     {"Sni", 25000, 0},   // snipers (Sni01_DamageType_C) as strong as the shotgun (Joon, 16 Oct)
 };
-static int n_push_tab = 13;
+static int n_push_tab = 16;   // the entries above (/ragdoll push <kind> <n> appends)
 #define PUSH_DEFAULT 4.f   // Joon's pick (build 17, 16 Oct). GetBoneMass sums: Common 133 kg, Reeker family 710-790 kg
 static float push_scale = PUSH_DEFAULT;
 static int n_pushed, n_push_radial, n_push_nohit, n_push_fail, push_logs, hit_dumps;
@@ -1645,6 +1821,7 @@ static int apply(Tracked *t) {
         log_mesh(mesh, "kind");
     }
     if (t->bag) bag_unhide(t, mesh);
+    fx_probe_mark(t);
     UObject *ai = ue_get_ptr(mesh, "AnimScriptInstance"), *pac = comp_of(t->a, "PhysicalAnimationComponent");
     if (detail) {
         detail_left--;
@@ -1972,6 +2149,7 @@ void ragdoll_tick(float dt) {
             continue;
         }
         if (x->done) {
+            if (x->ragdolled && x->fxwho && !x->ended) fx_probe_tick(x, t);
             if (x->ragdolled && !x->ended && t - x->died_at >= deadline_s) { end_body(x, t - x->died_at); continue; }
             if (x->ragdolled && !x->released && x->mesh && grav_scale != 1.f && !n_grav_fail) extra_gravity(x);
             if (x->ragdolled && (tick_n % 15) == 0 && call_bool(x->ls, "IsAlive") == 1) undo(x);
@@ -2016,7 +2194,7 @@ void ragdoll_slash(char *rest, Out *o) {
         mode_on = 1;
         detail_left = DETAIL_LOGS;
         settle_logs = 0;
-        push_logs = hit_dumps = left_logs = bag_logs = 0;
+        push_logs = hit_dumps = left_logs = bag_logs = fxp_spared = fxp_ctrl = 0;
         settle_arm();
         bag_arm();
         pe_update();
