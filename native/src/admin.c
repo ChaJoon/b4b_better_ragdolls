@@ -669,7 +669,7 @@ static const struct { const char *name; int perm; const char *usage; } CMDS[] = 
     {"kick", CMD_HOST, "/kick <name|#>"}, {"ban", CMD_HOST, "/ban <name|#>"}, {"unban", CMD_HOST, "/unban <name|steam:id|#n|all>"},
     {"bans", CMD_HOST, "/bans"}, {"lock", CMD_HOST, "/lock"}, {"unlock", CMD_HOST, "/unlock"}, {"teamsize", CMD_HOST, "/teamsize N"},
     {"restart", CMD_HOST, "/restart"}, {"ready", CMD_HOST, "/ready [vote]"}, {"bots", CMD_HOST, "/bots on|off|default"},
-    {"say", CMD_HOST, "/say <message>"}, {"ragdoll", CMD_ANYONE, "/ragdoll [on [delay]|off|mass [x]|gravity [x]|deadline [s]|probe|trace [secs]]"}, {"handoff", CMD_ANYONE, "/handoff [<name|#>]"},   // host part checked in handoff.c
+    {"say", CMD_HOST, "/say <message>"}, {"ragdoll", CMD_ANYONE, "/ragdoll [on [delay]|off|mass [x]|gravity [x]|deadline [s]|push [x|off|<kind> <n>]|probe|trace [secs]]"}, {"handoff", CMD_ANYONE, "/handoff [<name|#>]"},   // host part checked in handoff.c
     {"model", CMD_ANYONE, "/model list|<name>|reset"}, {"models", CMD_ANYONE, "/models [on|off]"},   // host parts checked in models.c
     {"addons", CMD_ANYONE, "/addons [on|off|info <#>|policy]"}, {"addon", CMD_ANYONE, "/addons [on|off|info <#>|policy]"},
 };

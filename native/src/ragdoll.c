@@ -1,8 +1,8 @@
 // Ragdoll deaths for the Ridden (experimental, fork module). Local and cosmetic: every machine ragdolls the bodies it
 // draws, nothing is sent over the network, so no protocol change (players without it see the game's own deaths).
 //
-// Step 1 (this file): physics falls instead of the canned death animations. Step 2 (later): impulse from the killing
-// hit (shotgun blasts, explosions).
+// Step 1: physics falls instead of the canned death animations. Step 2: the killing hit throws the body (shotgun
+// blasts, explosions), from the game's own record of the hit (see "step 2").
 //
 // Chat command /ragdoll (anyone, host or client; the setting is per machine and not saved yet):
 //   /ragdoll                 status
@@ -12,6 +12,8 @@
 //   /ragdoll mass [x]        every body's mass x the scale (0.1-10, default 1), for bodies that die from now on
 //   /ragdoll gravity [x]     gravity on our ragdolls x the scale (0-5, default 2.5), at once, bodies in flight included
 //   /ragdoll deadline [s]    every ragdoll still there s seconds after death is removed (12-120, default 15)
+//   /ragdoll push [x]        the killing hit throws the body (step 2): overall strength x (0-10, default 1, off = 0);
+//   /ragdoll push <kind> <n> one weapon kind's strength in kg cm/s (HG, SMG, AR, LMG, SG, FragGrenade, default, ...)
 //   /ragdoll probe           the nearest living Ridden: its mesh, physics asset, collision, and the death-related
 //                            functions/properties of its classes, into the log (discovery). Also (step 2 discovery):
 //                            every setting that could push a body (mesh, movement, actor), all its components (hit,
@@ -34,6 +36,7 @@
 #include <string.h>
 #include <stdlib.h>
 #include <math.h>
+#include <ctype.h>
 #include "MinHook.h"
 #include "ue.h"
 #include "log.h"
@@ -1082,6 +1085,214 @@ static void extra_gravity(Tracked *x) {
     call_go(&k);
 }
 
+// ---- step 2: the killing hit throws the body ----
+// The game's damage never goes through the engine's damage path (build 14: no ReceivePointDamage / ReceiveAnyDamage,
+// and its weapons' damage types aren't UDamageTypes), so the engine's impulse-on-damage never fires. Each Ridden's
+// HealthComponent keeps its last hits in RecentDamageInfo (TArray<FDamageInfo>, 3 entries, replicated:
+// OnRep_RecentDamageInfo) with the weapon's damage type, HitComponent, ImpactPoint, ImpactDirection and BoneName.
+// The killing hit, read when we ragdoll the body: the entry with a HitComponent (the stumble event that comes with
+// every hit has none) and the lowest PreviousTotalHealth (a Ridden's health only goes down until it dies, so this
+// needs no assumption about the array's order).
+// The push is a real impulse (kg cm/s): the same hit moves a heavier body less, and /ragdoll mass counts.
+//   bullets, melee: AddImpulseAtLocation(direction x strength, ImpactPoint) on the hit bone's body, or the nearest
+//                   parent bone that has one (a Common's physics asset has 20 bodies, its skeleton more bones).
+//   explosions:     ImpactDirection is ImpactPoint - the blast centre (checked on a frag grenade, build 14), so
+//                   AddRadialImpulse from the blast centre as a velocity change of strength / the body's mass, the
+//                   same for every body part (a blast pushes by area, which goes roughly with mass), weaker with
+//                   distance (x1 at the centre, x0.25 from BLAST_RANGE on).
+// Strength per weapon kind, by the damage type's class: HG02_DamageType_C -> "HG" (the letters before the number),
+// else a table key found in the name (FragGrenade_DamageType_C -> "FragGrenade"). An unknown kind gets "default" and is
+// logged once by name, so it can be added: /ragdoll push <key> <n>. Every strength x the overall /ragdoll push scale.
+#define BLAST_RANGE  800.f   // cm from the blast centre where an explosion's push bottoms out
+#define PUSH_LOGS    40      // pushes logged per /ragdoll on
+#define HIT_DUMPS    3       // deaths whose whole RecentDamageInfo is logged per /ragdoll on (array order, clients)
+typedef struct { char key[24]; float n; uint8_t radial; } PushKind;
+static PushKind push_tab[48] = {   // first guesses, to be tuned in game; a Common weighs roughly 70-90 kg
+    {"HG", 6000, 0},  {"SMG", 7000, 0}, {"AR", 9000, 0}, {"LMG", 11000, 0}, {"SG", 25000, 0},
+    {"FragGrenade", 40000, 1}, {"PipeBomb", 40000, 1}, {"Grenade", 40000, 1}, {"Explosi", 40000, 1},
+    {"Propane", 40000, 1}, {"Stumble", 0, 0}, {"default", 8000, 0},
+};
+static int n_push_tab = 12;
+static float push_scale = 1.f;
+static int n_pushed, n_push_radial, n_push_nohit, n_push_fail, push_logs, hit_dumps;
+
+// FDamageInfo's fields, found by reflection once (HealthComponent.RecentDamageInfo's inner struct)
+static struct { int state; int32_t arr_off, elsize; FField *type, *comp, *point, *dir, *bone, *prev_hp, *damage; } dinfo;
+
+static int dinfo_init(UObject *hc) {
+    if (dinfo.state) return dinfo.state;
+    char t[64];
+    dinfo.state = -1;
+    FField *arr = ue_find_prop(U_CLASS(hc), "RecentDamageInfo");
+    FField *inner = arr ? *(FField **)((char *)arr + 0x78) : NULL;   // FArrayProperty::Inner
+    UStruct *st = inner ? (UStruct *)FP_SUB(inner) : NULL;
+    if (!st) { LOG("ragdoll push: no HealthComponent.RecentDamageInfo (or not an array of structs): pushes off"); return -1; }
+    dinfo.arr_off = FP_OFFSET(arr);
+    dinfo.elsize = FP_ELSIZE(inner);
+    struct { FField **f; const char *name, *type; } want[] = {
+        {&dinfo.type, "DamageType", "ObjectProperty"}, {&dinfo.comp, "HitComponent", "ObjectProperty"},
+        {&dinfo.point, "ImpactPoint", "StructProperty"}, {&dinfo.dir, "ImpactDirection", "StructProperty"},
+        {&dinfo.bone, "BoneName", "NameProperty"}, {&dinfo.prev_hp, "PreviousTotalHealth", "FloatProperty"},
+        {&dinfo.damage, "Damage", "FloatProperty"}};
+    for (size_t i = 0; i < sizeof want / sizeof want[0]; i++) {
+        FField *f = ue_find_prop(st, want[i].name);
+        if (!f || strcmp(ue_name(*(FName *)FF_CLASS(f), t, sizeof t), want[i].type)) {
+            LOG("ragdoll push: DamageInfo.%s missing or not a %s: pushes off", want[i].name, want[i].type);
+            return -1;
+        }
+        *want[i].f = f;
+    }
+    LOG("ragdoll push: HealthComponent.RecentDamageInfo at 0x%x, %d-byte DamageInfo entries", dinfo.arr_off, dinfo.elsize);
+    return dinfo.state = 1;
+}
+
+static PushKind *push_kind(const char *key, int add) {
+    for (int i = 0; i < n_push_tab; i++) if (!_stricmp(push_tab[i].key, key)) return &push_tab[i];
+    if (!add || n_push_tab == (int)(sizeof push_tab / sizeof push_tab[0])) return NULL;
+    PushKind *k = &push_tab[n_push_tab++];
+    snprintf(k->key, sizeof k->key, "%s", key);
+    k->n = push_kind("default", 0)->n;
+    k->radial = 0;
+    return k;
+}
+
+// the damage type's class name -> the table entry
+static PushKind *kind_of(UObject *dtype, char *name, size_t n) {
+    if (!dtype) { snprintf(name, n, "None"); return push_kind("default", 0); }
+    cname(dtype, name, n);
+    char code[24], low[160], kl[24];
+    size_t i = 0;
+    for (; name[i] && i + 1 < sizeof code && ((name[i] >= 'A' && name[i] <= 'Z') || (name[i] >= 'a' && name[i] <= 'z')); i++) code[i] = name[i];
+    code[i] = 0;
+    PushKind *k = (name[i] >= '0' && name[i] <= '9') ? push_kind(code, 0) : NULL;   // HG02 -> HG
+    if (k) return k;
+    for (i = 0; name[i] && i + 1 < sizeof low; i++) low[i] = (char)tolower((unsigned char)name[i]);
+    low[i] = 0;
+    for (int j = 0; j < n_push_tab; j++) {   // a key in the name: FragGrenade_DamageType_C
+        size_t m = 0;
+        for (; push_tab[j].key[m] && m + 1 < sizeof kl; m++) kl[m] = (char)tolower((unsigned char)push_tab[j].key[m]);
+        kl[m] = 0;
+        if (m >= 4 && strcmp(kl, "default") && strstr(low, kl)) return &push_tab[j];
+    }
+    static char unknown[16][96];
+    int seen = 0, slot = -1;
+    for (int j = 0; j < 16; j++) { if (!strcmp(unknown[j], name)) seen = 1; if (slot < 0 && !unknown[j][0]) slot = j; }
+    if (!seen && slot >= 0) {
+        snprintf(unknown[slot], sizeof unknown[slot], "%s", name);
+        LOG("ragdoll push: unknown damage type %s: default strength (add it with /ragdoll push %s <n>)", name, code[0] ? code : name);
+    }
+    return push_kind("default", 0);
+}
+
+static const BodyList *bodies_of(UObject *mesh);
+static int has_body(const BodyList *bl, FName b) {
+    for (int i = 0; bl && i < bl->n; i++) if (bl->bone[i].idx == b.idx && bl->bone[i].num == b.num) return 1;
+    return 0;
+}
+
+// the whole body's mass in kg (every body, mass scale included), -1 unknown
+static float body_mass(UObject *mesh, const BodyList *bl) {
+    Call k;
+    if (bl && call_prep(&k, mesh, "GetBoneMass")) {
+        FName *bn = carg(&k, "BoneName");
+        float *r = carg(&k, "ReturnValue"), sum = 0;
+        SET(&k, "bScaleMass", uint8_t, 1);
+        if (bn && r) {
+            for (int i = 0; i < bl->n; i++) { *bn = bl->bone[i]; *r = 0; call_go(&k); sum += *r; }
+            if (sum > 0) return sum;
+        }
+    }
+    return mesh_mass(mesh);
+}
+
+static void log_hit(const char *tag, int idx, const uint8_t *e) {
+    char tn[96], cn[96], bn[64];
+    const float *p = (const float *)(e + FP_OFFSET(dinfo.point)), *d = (const float *)(e + FP_OFFSET(dinfo.dir));
+    UObject *ty = *(UObject *const *)(e + FP_OFFSET(dinfo.type)), *hc = *(UObject *const *)(e + FP_OFFSET(dinfo.comp));
+    LOG("ragdoll push:   %s [%d] %s damage %g, health before %g, hit %s, bone %s, point (%.0f %.0f %.0f), direction (%.2f %.2f %.2f)",
+        tag, idx, ty ? cname(ty, tn, sizeof tn) : "None", *(const float *)(e + FP_OFFSET(dinfo.damage)),
+        *(const float *)(e + FP_OFFSET(dinfo.prev_hp)), hc ? oname(hc, cn, sizeof cn) : "None",
+        ue_name(*(const FName *)(e + FP_OFFSET(dinfo.bone)), bn, sizeof bn), p[0], p[1], p[2], d[0], d[1], d[2]);
+}
+
+static void push_body(Tracked *t, UObject *mesh) {
+    char a[160], tn[96], bn[64], hb[64];
+    if (push_scale <= 0.f) return;
+    UObject *hc = call_obj(t->a, "GetHealthComponent");
+    if (!hc || dinfo_init(hc) != 1) { n_push_fail++; return; }
+    const TArray *arr = (const TArray *)((char *)hc + dinfo.arr_off);
+    const uint8_t *best = NULL;
+    int dump = hit_dumps < HIT_DUMPS;
+    if (dump) { hit_dumps++; LOG("ragdoll push: %s: RecentDamageInfo, %d entries:", oname(t->a, a, sizeof a), arr->num); }
+    for (int i = 0; arr->data && i < arr->num && i < 16; i++) {
+        const uint8_t *e = (const uint8_t *)arr->data + (size_t)i * dinfo.elsize;
+        if (dump) log_hit("entry", i, e);
+        if (!*(UObject *const *)(e + FP_OFFSET(dinfo.comp))) continue;   // the stumble event: no hit component
+        if (!best || *(const float *)(e + FP_OFFSET(dinfo.prev_hp)) < *(const float *)(best + FP_OFFSET(dinfo.prev_hp))) best = e;
+    }
+    if (!best) {
+        n_push_nohit++;
+        if (push_logs < PUSH_LOGS) { push_logs++; LOG("ragdoll push: %s: no hit with a hit component in RecentDamageInfo (%d entries): not pushed", oname(t->a, a, sizeof a), arr->num); }
+        return;
+    }
+    PushKind *kind = kind_of(*(UObject *const *)(best + FP_OFFSET(dinfo.type)), tn, sizeof tn);
+    float strength = kind->n * push_scale;
+    if (strength <= 0.f) return;
+    const float *pt = (const float *)(best + FP_OFFSET(dinfo.point)), *dr = (const float *)(best + FP_OFFSET(dinfo.dir));
+    float len = sqrtf(dr[0] * dr[0] + dr[1] * dr[1] + dr[2] * dr[2]);
+    if (len < 1e-3f) { n_push_fail++; return; }
+    const BodyList *bl = bodies_of(mesh);
+    float mass = body_mass(mesh, bl);
+    int log_it = push_logs < PUSH_LOGS;
+    Call k;
+    if (kind->radial) {
+        float o[3] = {pt[0] - dr[0], pt[1] - dr[1], pt[2] - dr[2]};   // the blast centre
+        float f = 1.f - len / BLAST_RANGE;
+        if (f < 0.25f) f = 0.25f;
+        float dv = mass > 0 ? strength * f / mass : strength * f / 80.f;   // cm/s for every body part
+        if (!call_prep(&k, mesh, "AddRadialImpulse")) { n_push_fail++; return; }
+        float *org = carg(&k, "Origin");
+        if (org) memcpy(org, o, sizeof o);
+        SET(&k, "Radius", float, len + 300.f);   // reaches every part of the body
+        SET(&k, "Strength", float, dv);
+        SET(&k, "Falloff", uint8_t, 0);           // RIF_Constant: the distance is in dv already
+        SET(&k, "bVelChange", uint8_t, 1);
+        call_go(&k);
+        n_pushed++; n_push_radial++;
+        if (log_it) {
+            push_logs++;
+            LOG("ragdoll push: %s killed by %s (%s %.0f x%.2f): explosion %.0f cm away, x%.2f for distance, body %.1f kg -> %.0f cm/s",
+                oname(t->a, a, sizeof a), tn, kind->key, kind->n, push_scale, len, f, mass, dv);
+        }
+        return;
+    }
+    // bullets and melee: the hit bone's body, or the nearest parent bone with a body
+    FName bone = *(const FName *)(best + FP_OFFSET(dinfo.bone));
+    ue_name(bone, hb, sizeof hb);
+    for (int up = 0; bone.idx && bl && !has_body(bl, bone) && up < 8; up++) {
+        if (!call_prep(&k, mesh, "GetParentBone")) { bone = (FName){0, 0}; break; }
+        SET(&k, "BoneName", FName, bone);
+        call_go(&k);
+        FName *r = carg(&k, "ReturnValue");
+        bone = r ? *r : (FName){0, 0};
+    }
+    if (bl && bone.idx && !has_body(bl, bone)) bone = (FName){0, 0};   // nothing found: the root body
+    float imp[3] = {dr[0] / len * strength, dr[1] / len * strength, dr[2] / len * strength};
+    if (!call_prep(&k, mesh, "AddImpulseAtLocation")) { n_push_fail++; return; }
+    float *ip = carg(&k, "Impulse"), *lp = carg(&k, "Location");
+    if (ip) memcpy(ip, imp, sizeof imp);
+    if (lp) memcpy(lp, pt, 3 * sizeof(float));
+    SET(&k, "BoneName", FName, bone);
+    call_go(&k);
+    n_pushed++;
+    if (log_it) {
+        push_logs++;
+        LOG("ragdoll push: %s killed by %s (%s %.0f x%.2f): hit %s, pushed on %s, direction (%.2f %.2f %.2f), body %.1f kg (~%.0f cm/s for the whole body)",
+            oname(t->a, a, sizeof a), tn, kind->key, kind->n, push_scale, hb, bone.idx ? ue_name(bone, bn, sizeof bn) : "the root body",
+            dr[0] / len, dr[1] / len, dr[2] / len, mass, mass > 0 ? strength / mass : -1.f);
+    }
+}
+
 // ---- the ragdoll ----
 static int apply(Tracked *t) {
     char a[160], c[160];
@@ -1143,6 +1354,7 @@ static int apply(Tracked *t) {
         LOG("ragdoll after:   montage playing %d", ai ? call_bool(ai, "IsAnyMontagePlaying") : -1);
     }
     if (sim != 1) { LOG("ragdoll: %s is not simulating after the calls", oname(t->a, a, sizeof a)); return -1; }
+    push_body(t, mesh);   // step 2: the killing hit throws the body
     return 0;
 }
 
@@ -1451,13 +1663,15 @@ void ragdoll_slash(char *rest, Out *o) {
         out_printf(o, "/ragdoll: %s%s, %d Ridden tracked, %d deaths seen, %d ragdolled, %d failed, %d came back; "
                       "settle hold %s: %d held, %d at rest + %d at the %.0f s cap (avg %.1f s, max %.1f s after death), "
                       "%d deleted while held; corpse budget %s: %d spared (%d again); deadline %.0f s: %d removed "
-                      "(%d never got the game's settle check); mass x%.2f, gravity x%.2f%s; %ld stacks logged%s%s\n",
+                      "(%d never got the game's settle check); mass x%.2f, gravity x%.2f%s; push x%.2f: %d pushed (%d explosions), "
+                      "%d without a hit, %d failed; %ld stacks logged%s%s\n",
                    mode_on ? "on" : "off", mode_on && delay_s > 0 ? " (after the game's animation)" : "", ntr, n_deaths,
                    n_applied, n_failed, n_revived,
                    settle_state == 1 ? "on" : settle_state ? "OFF (see log)" : "not armed yet", n_held, n_at_rest, n_capped,
                    SETTLE_CAP, released ? settle_sum / released : 0.0, settle_max, n_held_gone,
                    corpse_state == 1 ? "hook on" : corpse_state ? "hook OFF (see log)" : "not armed yet", n_spared,
-                   n_spared_again, deadline_s, n_ended, n_ended_unchecked, mass_scale, grav_scale, n_grav_fail ? " (NO EFFECT: see log)" : "", stack_id,
+                   n_spared_again, deadline_s, n_ended, n_ended_unchecked, mass_scale, grav_scale, n_grav_fail ? " (NO EFFECT: see log)" : "",
+                   push_scale, n_pushed, n_push_radial, n_push_nohit, n_push_fail, stack_id,
                    tracing ? ", tracing" : "", n_overflow ? ", tracking list full" : "");
     } else if (!strcmp(verb, "on")) {
         float d = arg ? (float)atof(arg) : 0.f;
@@ -1465,6 +1679,7 @@ void ragdoll_slash(char *rest, Out *o) {
         mode_on = 1;
         detail_left = DETAIL_LOGS;
         settle_logs = 0;
+        push_logs = hit_dumps = 0;
         settle_arm();
         LOG("ragdoll: on, delay %.2f s", delay_s);
         out_printf(o, "/ragdoll on: Ridden that die from now on fall as ragdolls%s and stay until they lie still (this machine only)%s\n",
@@ -1500,6 +1715,32 @@ void ragdoll_slash(char *rest, Out *o) {
         }
         out_printf(o, "/ragdoll deadline: every ragdoll still there %.0f s after death is removed (12-120, default 15)\n",
                    deadline_s);
+    } else if (!strcmp(verb, "push")) {
+        char *arg2 = arg ? strtok(NULL, " ") : NULL;
+        if (arg && !arg2 && (isdigit((unsigned char)arg[0]) || arg[0] == '.')) {   // /ragdoll push <x>: overall scale
+            float x = (float)atof(arg);
+            push_scale = x < 0.f ? 0.f : x > 10.f ? 10.f : x;
+            LOG("ragdoll push: scale x%.2f", push_scale);
+        } else if (arg && !strcmp(arg, "off")) {
+            push_scale = 0.f;
+            LOG("ragdoll push: off");
+        } else if (arg && arg2) {   // /ragdoll push <key> <n>: one weapon kind
+            float n = (float)atof(arg2);
+            PushKind *k = push_kind(arg, 1);
+            if (!k) { out_printf(o, "/ragdoll push: table full\n"); return; }
+            k->n = n < 0.f ? 0.f : n > 500000.f ? 500000.f : n;
+            LOG("ragdoll push: %s = %.0f%s", k->key, k->n, k->radial ? " (explosion)" : "");
+        } else if (arg) {
+            out_printf(o, "usage: /ragdoll push [<x> | off | <weapon kind> <strength>]\n");
+            return;
+        }
+        char line[1024];
+        size_t m = 0;
+        for (int i = 0; i < n_push_tab && m + 40 < sizeof line; i++)
+            m += (size_t)snprintf(line + m, sizeof line - m, "%s%s %.0f%s", i ? ", " : "", push_tab[i].key, push_tab[i].n,
+                                  push_tab[i].radial ? " (blast)" : "");
+        out_printf(o, "/ragdoll push: x%.2f (0-10, default 1, 0 = off) on bodies that die from now on; kg cm/s per weapon "
+                      "kind: %s\n", push_scale, line);
     } else if (!strcmp(verb, "probe")) {
         world_check();
         if (!mode_on && !tracing) for (int k = 0; k < 64; k++) scan_step();   // not scanning in the background: a full pass now
@@ -1511,7 +1752,7 @@ void ragdoll_slash(char *rest, Out *o) {
         if (tracing) trace_stop("restarted");
         if (trace_start(s, o) == 0) out_printf(o, "/ragdoll trace: %.0f s, kill a few Ridden now (log: \"ragdoll trace\" lines)\n", s);
     } else {
-        out_printf(o, "usage: /ragdoll [on [delay]|off|status|mass [x]|gravity [x]|deadline [s]|probe|trace [secs]]\n");
+        out_printf(o, "usage: /ragdoll [on [delay]|off|status|mass [x]|gravity [x]|deadline [s]|push [x|off|<kind> <n>]|probe|trace [secs]]\n");
     }
 }
 
