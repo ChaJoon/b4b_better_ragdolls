@@ -90,7 +90,10 @@ static void call_go(Call *c) {
     ue_process_event(c->obj, c->fn, c->p);
     own_depth--;
 }
-static int own_call(void) { return own_depth && own_tid == GetCurrentThreadId(); }
+// own_traced (build 29): the game's calls made inside our one call at depth 1 are traced like its own (what
+// OnRep_MutilationState does); our nested calls (depth 2+, e.g. the trace's own checks) stay out
+static int own_traced;
+static int own_call(void) { return own_depth && own_tid == GetCurrentThreadId() && !(own_traced && own_depth == 1); }
 #define SET(c, name, type, v) do { void *_a = carg(c, name); if (_a) *(type *)_a = (v); } while (0)
 static UObject *call_obj(UObject *o, const char *fn) {
     Call c; if (!call_prep(&c, o, fn)) return NULL;
@@ -166,6 +169,8 @@ typedef struct {
     uint8_t fxwho, fxp;                    // build 23 arcs probe: 1 spared, 2 control; probes done (bit per time)
     uint8_t blast_ok;                      // build 27: pushed by a recorded explosion, from blast_at
     float blast_at[3];
+    uint8_t dism, velp;                    // build 29: limbs taken off by /ragdoll dismember; speed probes done (bits)
+    float push_dv;                         // build 29: cm/s the blast push gave every body (0 = no blast push)
     FName prof;
     float rel_loc[3], rel_rot[3];
 } Tracked;
@@ -415,9 +420,21 @@ static int is_corpse_class(UClass *c) { for (int k = 0; k < n_corpse_cls; k++) i
 
 static void fx_note(UClass *c, UObject *r, UObject *outer);   // build 23, below
 
+// build 29: objects the game constructs inside our OnRep_MutilationState call (gib pieces, sprays), while tracing
+static int dism_watch, dism_built_logs;
+#define DISM_BUILT_LOGS 80
+static void dism_built(UClass *c, UObject *r, UObject *outer) {
+    if (dism_built_logs >= DISM_BUILT_LOGS) return;
+    dism_built_logs++;
+    char a[96], b[96], d[96];
+    LOG("ragdoll dismember:   constructed %s (%s) in %s", ue_obj_name(r, a, sizeof a), ue_obj_name(c, b, sizeof b),
+        outer ? ue_obj_name(outer, d, sizeof d) : "-");
+}
+
 static UObject *sco_detour(UClass *c, UObject *outer, FName name, uint32_t fl, uint32_t ifl, UObject *tmpl, uint8_t copy,
                            void *graph, uint8_t arch) {
     UObject *r = orig_sco(c, outer, name, fl, ifl, tmpl, copy, graph, arch);
+    if (dism_watch && c && r && GetCurrentThreadId() == game_tid) dism_built(c, r, outer);
     if (tracing && c && r && !(fl & LIVE_FLAGS) && is_corpse_class(c) && !own_call()) {
         char a[160], b[160], w[360];
         snprintf(w, sizeof w, "%s constructed (%s)", oname(r, a, sizeof a), oname(c, b, sizeof b));
@@ -1727,6 +1744,8 @@ static float entry_key(const uint8_t *e) {   // larger = the killing hit
     return 0;
 }
 
+static void dismember(Tracked *t, UObject *mesh);
+
 static void push_body(Tracked *t, UObject *mesh) {
     char a[160], tn[96], bn[64], hb[64], sn[96], sc[96];
     if (push_scale <= 0.f) return;
@@ -1817,6 +1836,10 @@ static void push_body(Tracked *t, UObject *mesh) {
         float f = 1.f - len / BLAST_RANGE;
         if (f < 0.25f) f = 0.25f;
         float dv = mass > 0 ? strength * f / mass : strength * f / 80.f;   // cm/s for every body part
+        // build 29: limbs off first (/ragdoll dismember on), then the push. Build 28 pushed first, and bodies that
+        // lost limbs barely moved (Joon, 16 Oct 23:40): whatever the game's limb code does to the body, it is done
+        // before the impulse now, and our physics settings are put back after it.
+        dismember(t, mesh);
         if (!call_prep(&k, mesh, "AddRadialImpulse")) { n_push_fail++; return; }
         float *o = carg(&k, "Origin");
         if (o) memcpy(o, org, sizeof org);
@@ -1825,6 +1848,7 @@ static void push_body(Tracked *t, UObject *mesh) {
         SET(&k, "Falloff", uint8_t, 0);           // RIF_Constant: the distance is in dv already
         SET(&k, "bVelChange", uint8_t, 1);
         call_go(&k);
+        t->push_dv = dv;
         n_pushed++; n_push_radial++;
         if (log_it) {
             push_logs++;
@@ -1851,6 +1875,20 @@ static void push_body(Tracked *t, UObject *mesh) {
     }
 }
 
+// the game's animation off the body (montages stopped, physical animation motors at 0) / every body simulating, full
+// physics in the pose: apply(), and again after the game's limb code (build 29)
+static void anim_off(UObject *ai, UObject *pac) {
+    Call k;
+    if (ai && call_prep(&k, ai, "Montage_Stop")) { SET(&k, "InBlendOutTime", float, 0.f); call_go(&k); }
+    if (pac && call_prep(&k, pac, "SetStrengthMultiplyer")) { SET(&k, "InStrengthMultiplyer", float, 0.f); call_go(&k); }
+}
+static void sim_on(UObject *mesh) {
+    Call k;
+    if (call_prep(&k, mesh, "SetAllBodiesSimulatePhysics")) { SET(&k, "bNewSimulate", uint8_t, 1); call_go(&k); }
+    if (call_prep(&k, mesh, "SetSimulatePhysics")) { SET(&k, "bSimulate", uint8_t, 1); call_go(&k); }
+    if (call_prep(&k, mesh, "SetPhysicsBlendWeight")) { SET(&k, "PhysicsBlendWeight", float, 1.f); call_go(&k); }
+}
+
 // ---- dismemberment (build 27: discovery + an opt-in experiment) ----
 // MutilationComponent (builds 23-26 probes): `MutilationState`, a replicated array of MutilationInfo {Region, Type,
 // Impulse, ImpactPoint, SourceActor} (clients act on it in OnRep_MutilationState), and `DismembermentMeshPieces`, one
@@ -1863,6 +1901,8 @@ static void push_body(Tracked *t, UObject *mesh) {
 //      its own pieces appended to MutilationState with the Type last seen on a real one, an impulse away from the
 //      blast, then OnRep_MutilationState is called here. Whether the game then hides the limb and throws the piece is
 //      what the run shows (and IsRegionDismembered after it). On the host the array also replicates to clients.
+//      Build 28 (Joon, 16 Oct 23:40): the game takes those limbs off (IsRegionDismembered 1, a few hands seen flying),
+//      but the bodies then barely moved. Build 29: before the push, our physics settings again after it, speeds logged.
 #define ADDR_GMALLOC VA(0x1469E59F0ull)     // FMalloc* GMalloc; vtable +0x20 Realloc(this, ptr, size, align) (as models.c)
 typedef void *(*GmReallocFn)(void *self, void *p, size_t n, uint32_t align);
 static void *rd_realloc(void *p, size_t n) {
@@ -1874,7 +1914,7 @@ static int dism_on;                  // /ragdoll dismember on|off
 static int dism_type = -1;           // MutilationInfo.Type to write: the last one seen on a real entry, or set by hand
 static int dism_type_set;            // set by hand (not overwritten by what is seen)
 static float dism_imp;               // |Impulse| to write: last seen, or set by hand (0 = 5000)
-static int dism_imp_set, dism_logs, mstate_logs, n_dism, n_dism_fail;
+static int dism_imp_set, dism_logs, mstate_logs, n_dism, n_dism_fail, dism_traced;
 static struct {
     int state;                       // 0 not looked up, 1 ok, -1 missing (logged)
     FField *arr, *pieces;
@@ -2006,8 +2046,31 @@ static void dismember(Tracked *t, UObject *mesh) {
         rk += (size_t)snprintf(regs + rk, sizeof regs - rk, "%s%u", rk ? ", " : "", region);
     }
     if (!rk) { n_dism_fail++; return; }
+    // the first 3 per /ragdoll dismember on, while a trace runs: the game's calls inside this one (and what it
+    // constructs) go into the log as if the game had made the call (build 29: what takes the push away)
+    int watch = tracing && dism_traced < 3;
+    if (watch) {
+        dism_traced++;
+        LOG("ragdoll dismember: %s: the game's calls inside OnRep_MutilationState follow", oname(t->a, a, sizeof a));
+        own_traced = 1;
+        dism_watch = 1;
+    }
     int called = call_void(mut, "OnRep_MutilationState");
+    own_traced = 0;
+    dism_watch = 0;
+    t->dism = 1;
     n_dism++;
+    // whatever the limb code did to the body's physics: our settings again, before the push
+    anim_off(ue_get_ptr(mesh, "AnimScriptInstance"), comp_of(t->a, "PhysicalAnimationComponent"));
+    sim_on(mesh);
+    call_void(mesh, "WakeAllRigidBodies");
+    if (watch) {
+        char v[400];
+        for (int i = 0; i < arr->num && i < 8; i++) {
+            fmt_prop(*(FField **)((char *)mi.arr + 0x78), (const uint8_t *)arr->data + (size_t)i * mi.el, v, sizeof v, 1);
+            LOG("ragdoll dismember: %s after OnRep: MutilationState[%d] %s", oname(t->a, a, sizeof a), i, v);
+        }
+    }
     if (dism_logs < 40) {
         dism_logs++;
         char res[96];
@@ -2026,6 +2089,47 @@ static void dismember(Tracked *t, UObject *mesh) {
         LOG("ragdoll dismember: %s: regions %s appended (Type %d, impulse %.0f away from the blast), OnRep_MutilationState %s, "
             "IsRegionDismembered %s, state now %d entries", oname(t->a, a, sizeof a), regs, dism_type, mag,
             called ? "called" : "NOT FOUND", res, arr->num);
+    }
+}
+
+// build 29: how fast blast-pushed bodies really travel, dismembered or not: the mean velocity of all their bodies
+// (flailing limbs cancel out) 0.1 and 0.4 s after death against the push they got, and what could hold them back
+// (a montage, physical-animation motors, physics off). 16 bodies of each kind, counted again at /ragdoll dismember.
+#define VEL_LOGS 16
+static int vel_logs_d, vel_logs_c;
+static const double VEL_T[] = {0.1, 0.4};
+static void vel_probe_tick(Tracked *x, double now) {
+    for (int i = 0; i < (int)(sizeof VEL_T / sizeof VEL_T[0]); i++) {
+        if ((x->velp & (1u << i)) || now - x->died_at < VEL_T[i]) continue;
+        x->velp |= 1u << i;
+        int *n = x->dism ? &vel_logs_d : &vel_logs_c;
+        if (!i) { if (*n >= VEL_LOGS) { x->velp = 0x80; return; } (*n)++; }
+        if (i == (int)(sizeof VEL_T / sizeof VEL_T[0]) - 1) x->velp |= 0x80;   // the last one: done with this body
+        Call k;
+        if (!x->mesh || !call_prep(&k, x->mesh, "GetPhysicsLinearVelocity")) return;
+        FName *bn = carg(&k, "BoneName");
+        float *v = carg(&k, "ReturnValue");
+        if (!v) return;
+        const BodyList *bl = bodies_of(x->mesh);
+        int nb = bl && bn ? bl->n : 0, cnt = 0;
+        float sum[3] = {0, 0, 0}, top = 0;
+        for (int b = nb ? 0 : -1; b < nb; b++) {   // no list: the root body only
+            if (b >= 0) *bn = bl->bone[b];
+            call_go(&k);
+            for (int c = 0; c < 3; c++) sum[c] += v[c];
+            float sp = sqrtf(v[0] * v[0] + v[1] * v[1] + v[2] * v[2]);
+            if (sp > top) top = sp;
+            cnt++;
+        }
+        for (int c = 0; c < 3; c++) sum[c] /= (float)(cnt ? cnt : 1);
+        UObject *ai = ue_get_ptr(x->mesh, "AnimScriptInstance"), *pac = comp_of(x->a, "PhysicalAnimationComponent");
+        int32_t so = pac ? ue_prop_offset(pac, "StrengthMultiplyer") : -1;
+        char a[160], pm[24];
+        if (so >= 0) snprintf(pm, sizeof pm, "%.2f", *(float *)((char *)pac + so)); else snprintf(pm, sizeof pm, "?");
+        LOG("ragdoll velocity: %s (%s) +%.1fs: bodies move %.0f cm/s on average (%.0f up), fastest %.0f; push %.0f cm/s; "
+            "simulating %d, montage %d, physical animation x%s", oname(x->a, a, sizeof a), x->dism ? "dismembered" : "not dismembered",
+            VEL_T[i], sqrtf(sum[0] * sum[0] + sum[1] * sum[1] + sum[2] * sum[2]), sum[2], top, x->push_dv,
+            call_bool(x->mesh, "IsSimulatingPhysics"), ai ? call_bool(ai, "IsAnyMontagePlaying") : -1, pm);
     }
 }
 
@@ -2090,8 +2194,7 @@ static int apply(Tracked *t) {
     // The game's own death: physics already on, but a death-reaction montage steers the bodies for ~0.5 s (the
     // "forward lunge") until PlayDeathReactionComponent's ragdoll point. Stop every montage at once (no blend out)
     // and give physics the full say.
-    if (ai && call_prep(&k, ai, "Montage_Stop")) { SET(&k, "InBlendOutTime", float, 0.f); call_go(&k); }
-    if (pac && call_prep(&k, pac, "SetStrengthMultiplyer")) { SET(&k, "InStrengthMultiplyer", float, 0.f); call_go(&k); }
+    anim_off(ai, pac);
     t->prof = collision_profile(mesh);
     t->cap_coll = 3;
     if (cap && call_prep(&k, cap, "GetCollisionEnabled")) { call_go(&k); uint8_t *r = carg(&k, "ReturnValue"); if (r) t->cap_coll = *r; }
@@ -2105,9 +2208,7 @@ static int apply(Tracked *t) {
     static FName ragdoll_profile;
     if (!ragdoll_profile.idx) ragdoll_profile = fname_of(L"Ragdoll");
     if (call_prep(&k, mesh, "SetCollisionProfileName")) { SET(&k, "InCollisionProfileName", FName, ragdoll_profile); call_go(&k); }
-    if (call_prep(&k, mesh, "SetAllBodiesSimulatePhysics")) { SET(&k, "bNewSimulate", uint8_t, 1); call_go(&k); }
-    if (call_prep(&k, mesh, "SetSimulatePhysics")) { SET(&k, "bSimulate", uint8_t, 1); call_go(&k); }
-    if (call_prep(&k, mesh, "SetPhysicsBlendWeight")) { SET(&k, "PhysicsBlendWeight", float, 1.f); call_go(&k); }
+    sim_on(mesh);
     if (mass_scale != 1.f) set_mass_scale(t, mesh, mass_scale);
     call_void(mesh, "WakeAllRigidBodies");
 
@@ -2119,8 +2220,7 @@ static int apply(Tracked *t) {
     }
     if (sim != 1) { LOG("ragdoll: %s is not simulating after the calls", oname(t->a, a, sizeof a)); return -1; }
     mstate_note(t);       // build 27: what the game wrote on the body (limbs it took off)
-    push_body(t, mesh);   // step 2: the killing hit throws the body
-    dismember(t, mesh);   // build 27 experiment (/ragdoll dismember on)
+    push_body(t, mesh);   // step 2: the killing hit throws the body (blast victims: /ragdoll dismember first)
     return 0;
 }
 
@@ -2404,6 +2504,7 @@ void ragdoll_tick(float dt) {
         }
         if (x->done) {
             if (x->ragdolled && x->fxwho && !x->ended) fx_probe_tick(x, t);
+            if (x->ragdolled && x->push_dv > 0.f && !(x->velp & 0x80) && !x->ended) vel_probe_tick(x, t);
             if (x->ragdolled && !x->ended && t - x->died_at >= deadline_s) { end_body(x, t - x->died_at); continue; }
             if (x->ragdolled && !x->released && x->mesh && grav_scale != 1.f && !n_grav_fail) extra_gravity(x);
             if (x->ragdolled && (tick_n % 15) == 0 && call_bool(x->ls, "IsAlive") == 1) undo(x);
@@ -2489,7 +2590,10 @@ void ragdoll_slash(char *rest, Out *o) {
                    deadline_s);
     } else if (!strcmp(verb, "dismember")) {
         char *arg2 = arg ? strtok(NULL, " ") : NULL;
-        if (arg && (!strcmp(arg, "on") || !strcmp(arg, "off"))) { dism_on = !strcmp(arg, "on"); dism_logs = 0; }
+        if (arg && (!strcmp(arg, "on") || !strcmp(arg, "off"))) {
+            dism_on = !strcmp(arg, "on");
+            dism_logs = dism_traced = dism_built_logs = vel_logs_d = vel_logs_c = 0;
+        }
         else if (arg && !strcmp(arg, "type") && arg2) { int v = atoi(arg2); dism_type = v < 0 ? -1 : v > 255 ? 255 : v; dism_type_set = dism_type >= 0; }
         else if (arg && !strcmp(arg, "impulse") && arg2) { float v = (float)atof(arg2); dism_imp = v < 0 ? 0 : v; dism_imp_set = v > 0; }
         else if (arg) { out_printf(o, "usage: /ragdoll dismember [on|off|type <n>|impulse <n>]\n"); return; }
