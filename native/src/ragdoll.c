@@ -422,6 +422,11 @@ static Tracked *dead_tracked(UObject *a) {   // game thread only: tr[] belongs t
     for (int i = 0; i < ntr; i++) if (tr[i].a == a) return tr[i].died_at ? &tr[i] : NULL;
     return NULL;
 }
+static double last_blast_t(void);
+static Tracked *any_tracked(UObject *a) {   // also the ones not yet seen dead (game thread only)
+    for (int i = 0; i < ntr; i++) if (tr[i].a == a) return &tr[i];
+    return NULL;
+}
 
 static int same_name(UFunction *fn, FName n) { return n.idx && U_NAME(fn).idx == n.idx && U_NAME(fn).num == n.num; }
 
@@ -441,12 +446,17 @@ static void stack_check(UObject *o, UObject *actor, UFunction *fn, void *params)
     int kind = same_name(fn, nm_unpossessed) ? ST_UNPOSSESS : same_name(fn, nm_endplay) ? ST_ENDPLAY :
                same_name(fn, nm_destroyed) ? ST_DESTROYED : -1;
     if (kind < 0 || GetCurrentThreadId() != game_tid) return;
-    Tracked *x = dead_tracked(actor);
+    // Ridden we saw die, and (build 20) Ridden ended before we ever saw them dead: an explosion's blood bag destroys
+    // them in the frame they die, so our tick never does; the stack names the code that does it
+    Tracked *x = any_tracked(actor);
     // a ragdoll the settle hold released goes the known way (swap, delete 1 s later): only the others are of interest
     if (!x || x->released || (x->stacked & (1u << kind))) return;
     x->stacked |= 1u << kind;
-    int n = snprintf(w, sizeof w, "%s.%s on %s, %.2f s after death, %s", cname(o, a, sizeof a), ue_obj_name(fn, b, sizeof b),
-                     oname(actor, c, sizeof c), now_s() - x->died_at, x->ragdolled ? "ragdolled" : "game's own death");
+    int n = x->died_at
+        ? snprintf(w, sizeof w, "%s.%s on %s, %.2f s after death, %s", cname(o, a, sizeof a), ue_obj_name(fn, b, sizeof b),
+                   oname(actor, c, sizeof c), now_s() - x->died_at, x->ragdolled ? "ragdolled" : "game's own death")
+        : snprintf(w, sizeof w, "%s.%s on %s, NOT YET SEEN DEAD (a blood bag?), %.3f s after the last explosion",
+                   cname(o, a, sizeof a), ue_obj_name(fn, b, sizeof b), oname(actor, c, sizeof c), now_s() - last_blast_t());
     if (kind == ST_ENDPLAY && params && n > 0 && n < (int)sizeof w)
         snprintf(w + n, sizeof w - n, ", reason %u", *(uint8_t *)params);   // 0 Destroyed, 1 LevelTransition, 3 RemovedFromWorld
     stack_log(kind, w);
@@ -643,12 +653,13 @@ static void trace_call(UObject *o, UFunction *fn, void *params) {
 // ProcessEvent sets NumJuiced to 0 before the game runs the call, on this machine and in what it sends: those bodies
 // die normally, and the ragdoll and the blast push take them. /ragdoll bloodbag on = the game's own.
 static UFunction *explode_fn;
-static FField *juice_f, *blast_loc_f;
+static FField *juice_f, *blast_loc_f, *vfx_chars_f, *vfx_locs_f;
 // recent explosions' centres (LocationOverride, = the blast point: checked against a frag's ImpactPoint - ImpactDirection
 // in build 14), for the blast push: the hit record's source is often the thrower, not the grenade
 typedef struct { double t; float at[3]; } Blast;
 static Blast blasts[8];
 static int blast_at;
+static double last_blast_t(void) { double t = 0; for (int i = 0; i < 8; i++) if (blasts[i].t > t) t = blasts[i].t; return t ? t : -1e9; }
 static int bloodbag_on;      // 1 = the game's blood bags
 static int n_unjuiced, n_unjuiced_calls, juice_logs, juice_state;   // juice_state: 0 not looked up, 1 ok, -1 missing
 
@@ -664,13 +675,20 @@ static void juice_resolve(void) {
     if (strcmp(t, "IntProperty") && strcmp(t, "ByteProperty")) { LOG("ragdoll bloodbag: NumJuiced is a %s, not a number: blood bags stay", t); return; }
     juice_f = f;
     explode_fn = fn;
+    LOG("ragdoll bloodbag: found ExplosionComponent.Multicast_ExplodeFromSeed, NumJuiced %s at +0x%x", t, FP_OFFSET(f));
+    char lt[64], sn[64];
     FField *lf = ue_find_prop(fn, "LocationOverride");
-    char sn[64];
-    if (lf && !strcmp(ue_name(*(FName *)FF_CLASS(lf), t, sizeof t), "StructProperty") && !strncmp(ue_obj_name(FP_SUB(lf), sn, sizeof sn), "Vector", 6))
+    if (lf && !strcmp(ue_name(*(FName *)FF_CLASS(lf), lt, sizeof lt), "StructProperty") && !strncmp(ue_obj_name(FP_SUB(lf), sn, sizeof sn), "Vector", 6))
         blast_loc_f = lf;
     else LOG("ragdoll bloodbag: no LocationOverride vector: blast pushes aim from the hit's source");
+    // build 19 showed NumJuiced 0 doesn't stop the blood bags: the effect lists are emptied too (test of whether the
+    // effects code ends the listed characters)
+    FField *vc = ue_find_prop(fn, "VFXCharacters"), *vl = ue_find_prop(fn, "VFXCharacterLocations");
+    if (vc && !strcmp(ue_name(*(FName *)FF_CLASS(vc), lt, sizeof lt), "ArrayProperty")) vfx_chars_f = vc;
+    if (vl && !strcmp(ue_name(*(FName *)FF_CLASS(vl), lt, sizeof lt), "ArrayProperty")) vfx_locs_f = vl;
+    LOG("ragdoll bloodbag: effect lists VFXCharacters %s, VFXCharacterLocations %s", vfx_chars_f ? "found" : "MISSING",
+        vfx_locs_f ? "found" : "MISSING");
     juice_state = 1;
-    LOG("ragdoll bloodbag: found ExplosionComponent.Multicast_ExplodeFromSeed, NumJuiced %s at +0x%x", t, FP_OFFSET(f));
 }
 
 static void unjuice(UObject *o, uint8_t *params) {
@@ -678,14 +696,21 @@ static void unjuice(UObject *o, uint8_t *params) {
     ue_name(*(FName *)FF_CLASS(juice_f), t, sizeof t);
     uint8_t *v = params + FP_OFFSET(juice_f);
     int n = !strcmp(t, "IntProperty") ? *(int32_t *)v : *v;
-    if (n <= 0) return;
+    TArray *vc = vfx_chars_f ? (TArray *)(params + FP_OFFSET(vfx_chars_f)) : NULL;
+    TArray *vl = vfx_locs_f ? (TArray *)(params + FP_OFFSET(vfx_locs_f)) : NULL;
+    int chars = vc ? vc->num : 0;
+    if (n <= 0 && chars <= 0) return;
     if (!strcmp(t, "IntProperty")) *(int32_t *)v = 0; else *v = 0;
-    n_unjuiced += n;
+    // num 0 only: the data and capacity stay, so the caller frees them as usual (pointers and vectors: no destructors)
+    if (vc) vc->num = 0;
+    if (vl) vl->num = 0;
+    n_unjuiced += chars;
     n_unjuiced_calls++;
     if (juice_logs < 20) {
         juice_logs++;
         UObject *owner = owner_actor(o);
-        LOG("ragdoll bloodbag: explosion of %s: %d blood bags kept as bodies (NumJuiced %d -> 0)", oname(owner ? owner : o, a, sizeof a), n, n);
+        LOG("ragdoll bloodbag: explosion of %s: effect list of %d characters emptied (NumJuiced was %d)",
+            oname(owner ? owner : o, a, sizeof a), chars, n);
     }
 }
 
@@ -1912,7 +1937,7 @@ void ragdoll_slash(char *rest, Out *o) {
                       "settle hold %s: %d held, %d at rest + %d at the %.0f s cap (avg %.1f s, max %.1f s after death), "
                       "%d deleted while held; corpse budget %s: %d spared (%d again); deadline %.0f s: %d removed "
                       "(%d never got the game's settle check); mass x%.2f, gravity x%.2f%s; push x%.2f: %d pushed (%d explosions), "
-                      "%d without a hit, %d failed; blood bags %s: %d kept as bodies in %d explosions; %ld stacks logged%s%s\n",
+                      "%d without a hit, %d failed; blood bags %s: %d characters taken off the effect lists of %d explosions; %ld stacks logged%s%s\n",
                    mode_on ? "on" : "off", mode_on && delay_s > 0 ? " (after the game's animation)" : "", ntr, n_deaths,
                    n_applied, n_left, n_failed, n_revived,
                    settle_state == 1 ? "on" : settle_state ? "OFF (see log)" : "not armed yet", n_held, n_at_rest, n_capped,
