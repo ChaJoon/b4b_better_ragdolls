@@ -10,9 +10,9 @@
 //                            first (default 0 = physics at once)
 //   /ragdoll off
 //   /ragdoll mass [x]        every body's mass x the scale (0.1-10, default 1), for bodies that die from now on
-//   /ragdoll gravity [x]     gravity on our ragdolls x the scale (0-5, default 2.5), at once, bodies in flight included
+//   /ragdoll gravity [x]     gravity on our ragdolls x the scale (0-5, default 1.3), at once, bodies in flight included
 //   /ragdoll deadline [s]    every ragdoll still there s seconds after death is removed (12-120, default 15)
-//   /ragdoll push [x]        the killing hit throws the body (step 2): overall strength x (0-10, default 1, off = 0);
+//   /ragdoll push [x]        the killing hit throws the body (step 2): overall strength x (0-10, default 4, off = 0);
 //   /ragdoll push <kind> <n> one weapon kind's strength in kg cm/s (HG, SMG, AR, LMG, SG, FragGrenade, default, ...)
 //   /ragdoll probe           the nearest living Ridden: its mesh, physics asset, collision, and the death-related
 //                            functions/properties of its classes, into the log (discovery). Also (step 2 discovery):
@@ -182,7 +182,7 @@ static int n_body_lists;
 // difference is added as a force every frame: AddForceToAllBodiesBelow from the root body (BoneName None) down,
 // (scale - 1) x the world's gravity, as an acceleration (bAccelChange: mass has no effect, like gravity itself). Only
 // while the settle hold holds the body; the game swaps it for its frozen stand-in within ~1 s of the release.
-#define GRAV_DEFAULT 2.5f   // Joon's pick from the build 12 runs (16 Oct): heavier, punchier falls than the world's 1x
+#define GRAV_DEFAULT 1.3f   // Joon's pick with the push on (build 17, 16 Oct); 2.5 before the push existed
 static float mass_scale = 1.f, grav_scale = GRAV_DEFAULT;
 static float world_gz;   // the world's gravity, cm/s^2, read once per map; 0 = not read yet
 static int n_grav_fail;
@@ -1114,7 +1114,8 @@ static PushKind push_tab[48] = {   // first guesses, to be tuned in game; a Comm
     {"Propane", 40000, 1}, {"Stumble", 0, 0}, {"default", 8000, 0},
 };
 static int n_push_tab = 12;
-static float push_scale = 1.f;
+#define PUSH_DEFAULT 4.f   // Joon's pick (build 17, 16 Oct): x1 was too weak (bodies weigh ~700-800 kg by GetBoneMass)
+static float push_scale = PUSH_DEFAULT;
 static int n_pushed, n_push_radial, n_push_nohit, n_push_fail, push_logs, hit_dumps;
 
 // The stored hit record's fields, found by reflection once, by name and type, so another layout is logged instead of
@@ -1403,6 +1404,31 @@ static void push_body(Tracked *t, UObject *mesh) {
             push_scale, oname(src, sn, sizeof sn), cname(src, sc, sizeof sc), from, len, hb, bone.idx ? ue_name(bone, bn, sizeof bn) : "the root body",
             dr[0] / len, dr[1] / len, dr[2] / len, mass, mass > 0 ? strength / mass : -1.f);
     }
+}
+
+// ---- deaths the game turns into an explosion: left to the game ----
+// The Reeker family dies through a death montage that is the gameplay itself (build 17 trace, 16 Oct): Reeker
+// (BloaterBasic) Bloater_DeathPop_AM = its gas pop, Exploder Exploder_Explode_Death_AM = its explosion, Retch (Vomiter)
+// Bloater_DeathPop_AM = its body bursting (its blast comes earlier, from ExplosionComponent.OnDeath). apply() stops every
+// montage, which cut the pop and the explosion (on the host: for everyone), and the game never starts a corpse
+// timer for them, so they lay there until the deadline. So: at death, if the death montage the game just started is a
+// pop or an explosion, the death is the game's: no montage stop, no ragdoll, no push. Per death, by the montage, so a
+// Reeker that ever dies without popping still ragdolls, and other popping kinds need no list.
+static const char *const POP_KEYS[] = {"deathpop", "explode", "gib", NULL};
+static int n_left, left_logs;
+
+static int special_death(Tracked *t) {
+    char a[160], c[160], m[160];
+    UObject *mesh = ue_get_ptr(t->a, "Mesh"), *ai = mesh ? ue_get_ptr(mesh, "AnimScriptInstance") : NULL;
+    UObject *mon = ai ? call_obj(ai, "GetCurrentActiveMontage") : NULL;
+    if (!mon || !name_has(ue_obj_name(mon, m, sizeof m), POP_KEYS)) return 0;
+    n_left++;
+    if (left_logs < 20) {
+        left_logs++;
+        LOG("ragdoll: %s (%s) left to the game: its death montage %s pops or explodes", oname(t->a, a, sizeof a),
+            cname(t->a, c, sizeof c), m);
+    }
+    return 1;
 }
 
 // ---- the ragdoll ----
@@ -1763,7 +1789,7 @@ void ragdoll_tick(float dt) {
         if (!mode_on) { x->done = 1; continue; }
         if (t - x->died_at < delay_s) continue;
         x->done = 1;
-        if (is_boss(x->a)) continue;
+        if (is_boss(x->a) || special_death(x)) continue;
         if (apply(x) == 0) n_applied++; else n_failed++;
     }
 }
@@ -1772,13 +1798,13 @@ void ragdoll_slash(char *rest, Out *o) {
     char *verb = rest ? strtok(rest, " ") : NULL, *arg = verb ? strtok(NULL, " ") : NULL;
     if (!verb || !strcmp(verb, "status")) {
         int released = n_at_rest + n_capped;
-        out_printf(o, "/ragdoll: %s%s, %d Ridden tracked, %d deaths seen, %d ragdolled, %d failed, %d came back; "
+        out_printf(o, "/ragdoll: %s%s, %d Ridden tracked, %d deaths seen, %d ragdolled, %d left to the game (pop/explode), %d failed, %d came back; "
                       "settle hold %s: %d held, %d at rest + %d at the %.0f s cap (avg %.1f s, max %.1f s after death), "
                       "%d deleted while held; corpse budget %s: %d spared (%d again); deadline %.0f s: %d removed "
                       "(%d never got the game's settle check); mass x%.2f, gravity x%.2f%s; push x%.2f: %d pushed (%d explosions), "
                       "%d without a hit, %d failed; %ld stacks logged%s%s\n",
                    mode_on ? "on" : "off", mode_on && delay_s > 0 ? " (after the game's animation)" : "", ntr, n_deaths,
-                   n_applied, n_failed, n_revived,
+                   n_applied, n_left, n_failed, n_revived,
                    settle_state == 1 ? "on" : settle_state ? "OFF (see log)" : "not armed yet", n_held, n_at_rest, n_capped,
                    SETTLE_CAP, released ? settle_sum / released : 0.0, settle_max, n_held_gone,
                    corpse_state == 1 ? "hook on" : corpse_state ? "hook OFF (see log)" : "not armed yet", n_spared,
@@ -1791,7 +1817,7 @@ void ragdoll_slash(char *rest, Out *o) {
         mode_on = 1;
         detail_left = DETAIL_LOGS;
         settle_logs = 0;
-        push_logs = hit_dumps = 0;
+        push_logs = hit_dumps = left_logs = 0;
         settle_arm();
         LOG("ragdoll: on, delay %.2f s", delay_s);
         out_printf(o, "/ragdoll on: Ridden that die from now on fall as ragdolls%s and stay until they lie still (this machine only)%s\n",
@@ -1837,8 +1863,8 @@ void ragdoll_slash(char *rest, Out *o) {
             push_scale = 0.f;
             LOG("ragdoll push: off");
         } else if (arg && !strcmp(arg, "on")) {
-            push_scale = 1.f;
-            LOG("ragdoll push: on (x1)");
+            push_scale = PUSH_DEFAULT;
+            LOG("ragdoll push: on (x%.2f, the default)", push_scale);
         } else if (arg && arg2) {   // /ragdoll push <key> <n>: one weapon kind
             float n = (float)atof(arg2);
             PushKind *k = push_kind(arg, 1);
@@ -1854,8 +1880,8 @@ void ragdoll_slash(char *rest, Out *o) {
         for (int i = 0; i < n_push_tab && m + 40 < sizeof line; i++)
             m += (size_t)snprintf(line + m, sizeof line - m, "%s%s %.0f%s", i ? ", " : "", push_tab[i].key, push_tab[i].n,
                                   push_tab[i].radial ? " (blast)" : "");
-        out_printf(o, "/ragdoll push: x%.2f (0-10, default 1, 0 = off) on bodies that die from now on; kg cm/s per weapon "
-                      "kind: %s\n", push_scale, line);
+        out_printf(o, "/ragdoll push: x%.2f (0-10, default %.0f, 0 = off) on bodies that die from now on; kg cm/s per weapon "
+                      "kind: %s\n", push_scale, PUSH_DEFAULT, line);
     } else if (!strcmp(verb, "probe")) {
         world_check();
         if (!mode_on && !tracing) for (int k = 0; k < 64; k++) scan_step();   // not scanning in the background: a full pass now
