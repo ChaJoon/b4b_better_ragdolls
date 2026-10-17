@@ -561,10 +561,15 @@ static void fail_box(const wchar_t *text) {
 // The launcher itself (this file) is renamed into backup\<ours>\ while it runs: Windows renames a mapped DLL.
 #define AU_CHECK_MS 2000
 static const UpdiTimeouts AU_QUICK = {AU_CHECK_MS, AU_CHECK_MS, AU_CHECK_MS, AU_CHECK_MS};
-#ifdef B4B_RELEASE
+#if defined(B4B_RELEASE) && !defined(B4B_FORK)
 #define AU_DEFAULT 1
 #else
-#define AU_DEFAULT 0
+#define AU_DEFAULT 0      // dev builds, and the ragdoll fork (B4B_FORK, build.sh): a release would replace this build
+#endif
+#ifdef B4B_FORK
+#define AU_OFF_WHY "off by default in this fork build (ragdoll; an update installs the official b4bcoop; auto_update=1 turns it on)"
+#else
+#define AU_OFF_WHY "off by default in developer builds (auto_update=1 turns it on)"
 #endif
 static char au_api[200] = UPDI_DEFAULT_API, au_repo[100] = UPDI_DEFAULT_REPO;
 static uint8_t au_pub[32] = {B4B_RELEASE_PUBKEY_BYTES};
@@ -723,7 +728,7 @@ static int au_enabled(const char **why) {
     char v[16];
     int on = AU_DEFAULT;
     if (ini_get("auto_update", v, sizeof v) && v[0]) { on = atoi(v) != 0; *why = on ? "auto_update=1" : "auto_update=0"; }
-    else *why = AU_DEFAULT ? "on by default" : "off by default in developer builds (auto_update=1 turns it on)";
+    else *why = AU_DEFAULT ? "on by default" : AU_OFF_WHY;
 #ifndef B4B_RELEASE
     if (GetEnvironmentVariableA("B4B_LAUNCHER_UPDATE", v, sizeof v)) {
         on = strcmp(v, "off") != 0;

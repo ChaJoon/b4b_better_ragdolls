@@ -593,6 +593,7 @@ before the game opens. This is done by the b4bcoop launcher (`xinput1_3.dll` nex
 - Turn it off: `~` window → **Updates** → **Update b4bcoop automatically when the game starts**, or `auto_update=0`
   in `b4bcoop.ini` (read at the next game start).
 - Linux/Steam Deck: the launcher runs from the second game start after installing (like the co-op / online question).
+- Ragdoll fork builds: off unless `auto_update=1`. An update installs the official b4bcoop, without the ragdolls.
 
 ## b4bcoop.ini options
 
@@ -776,7 +777,7 @@ join=steam:7656119XXXXXXXXXX
 | `addons_dir` | `<game>\b4bcoop-addons` | Another add-ons folder, a full Windows path, e.g. `addons_dir=D:\b4b-addons` |
 | `addons_policy` | `any` | Host: which add-ons joiners may have: `cosmetic`, `any`, `none`, `match` (see Add-ons; joiners check themselves, `match` shows them your gameplay add-ons' ids) |
 | `updates` | `1` | `0`: hide the `~` window's Updates tab (see [Updates](#updates)) |
-| `auto_update` | `1` | `0`: don't check GitHub for a newer b4bcoop when the game starts (see [Automatic update](#automatic-update-when-the-game-starts)); the `~` Updates tab has the same switch |
+| `auto_update` | `1` (ragdoll fork: `0`) | `0`: don't check GitHub for a newer b4bcoop when the game starts (see [Automatic update](#automatic-update-when-the-game-starts)); the `~` Updates tab has the same switch |
 | `shop` | `1` | `0`: the add-on shop off (see [Add-ons from the shop](#add-ons-from-the-shop)): its list isn't fetched, the `~` window's Add-ons tab shows only your add-ons |
 
 ## Launch options & troubleshooting

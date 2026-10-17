@@ -42,10 +42,11 @@ static const uint8_t RELEASE_PUBKEY[32] = {B4B_RELEASE_PUBKEY_BYTES};
 #define MAX_STARTS 2          // starts of a fresh update that may end without reaching HEALTHY_SECONDS
 
 static int enabled = 1;       // ini updates=0: no Updates tab
-#ifdef B4B_RELEASE
+#if defined(B4B_RELEASE) && !defined(B4B_FORK)
 #define AUTO_DEFAULT 1        // ini auto_update: the launcher's automatic update (redirect.c has the same default)
 #else
-#define AUTO_DEFAULT 0        // dev builds: off unless auto_update=1, so a release never replaces a developer's build
+#define AUTO_DEFAULT 0        // dev builds and the ragdoll fork (B4B_FORK): off unless auto_update=1, so a release never
+                              // replaces a developer's (or the fork's) build
 #endif
 static int auto_on = AUTO_DEFAULT;
 static int launcher_auto;     // the root xinput1_3.dll is a launcher that updates (feature "auto-update-1")
@@ -338,6 +339,10 @@ static void panel(void) {
                                      "zip and in every update); it isn't there or is older.");
 #ifndef B4B_RELEASE
     ov_text_dim("Developer build: off unless auto_update=1 (env B4B_LAUNCHER_UPDATE=off|on|cancel overrides it).");
+#endif
+#ifdef B4B_FORK
+    ov_text_warn("Ragdoll fork build: off unless auto_update=1. Any update here installs the official b4bcoop, "
+                 "without the ragdolls.");
 #endif
     if (auto_note[0]) ov_text_dim("Last automatic update: %s.", auto_note);
     if (s.result[0] && strcmp(s.installed, B4B_VERSION) == 0 && strstr(s.result, "put back"))
