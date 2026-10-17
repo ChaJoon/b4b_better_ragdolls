@@ -4,7 +4,8 @@
 // Step 1: physics falls instead of the canned death animations. Step 2: the killing hit throws the body (shotgun
 // blasts, explosions), from the game's own record of the hit (see "step 2").
 //
-// Chat command /ragdoll (anyone, host or client; the setting is per machine and not saved yet):
+// Chat command /ragdoll (anyone, host or client; per machine). Build 36: every setting below is saved in b4bcoop.ini
+// when changed (see "saved settings" at the end), /ragdoll on included: it is on again at the next game start.
 //   /ragdoll                 status
 //   /ragdoll on [delay]      ragdoll Ridden that die from now on; delay = seconds of the game's own death animation
 //                            first (default 0 = physics at once)
@@ -19,7 +20,7 @@
 //   /ragdoll bloodbag [on|off] off (default): Ridden an explosion would burst stay bodies (ragdolled, pushed)
 //   /ragdoll blood [on|off]  on (default): those bodies get the blood the game paints on the blast victims it keeps
 //   /ragdoll dismember [on|off|limbs <min> [max]|big <0-100>|head <0-100|on|off>|pieces on|off|type <n|auto>|
-//                      impulse <n>]  off by default: blast victims lose min-max limbs (default 2-3, a different limb
+//                      impulse <n>]  on by default (build 36): blast victims lose min-max limbs (default 2-3, a different limb
 //                            each, big cuts big% of the time) through the game's MutilationState, each thrown as a piece;
 //                            head: the share of victims that lose their head (default 50; see "dismemberment")
 //   /ragdoll probe           the nearest living Ridden: its mesh, physics asset, collision, and the death-related
@@ -1388,8 +1389,10 @@ static void extra_gravity(Tracked *x) {
 #define PUSH_LOGS    40      // pushes logged per /ragdoll on
 #define HIT_DUMPS    3       // deaths whose whole RecentDamageInfo is logged per /ragdoll on (array order, clients)
 typedef struct { char key[24]; float n; uint8_t radial; } PushKind;
-static PushKind push_tab[48] = {   // first guesses (x the scale, default 4); a Common weighs 133 kg by GetBoneMass
-    {"HG", 6000, 0},  {"SMG", 7000, 0}, {"AR", 9000, 0}, {"LMG", 11000, 0}, {"SG", 25000, 0},
+static const PushKind PUSH_DEF[] = {   // x the scale (default 4); a Common weighs 133 kg by GetBoneMass
+    // build 36: the guns are Joon's (17 Oct, after build 35: HG 6000, SMG 7000, AR 9000, LMG 11000, SG 25000 before)
+    {"HG", 3000, 0},  {"SMG", 3500, 0}, {"AR", 5000, 0}, {"LMG", 10000, 0}, {"SG", 22500, 0},
+    {"Sni", 25000, 0},   // snipers (Sni01_DamageType_C) (Joon, 16 Oct; kept 17 Oct); listed with the guns since build 36
     {"FragGrenade", 60000, 1},   // frags and pipe bombs (both FragGrenade_DamageType_C); Joon's pick (16 Oct)
     {"PipeBomb", 40000, 1}, {"Grenade", 40000, 1}, {"Explosi", 40000, 1},   // (build 22 had these commented out by mistake)
     {"Propane", 40000, 1},
@@ -1397,10 +1400,12 @@ static PushKind push_tab[48] = {   // first guesses (x the scale, default 4); a 
     // Blasts, as strong as a frag until Joon picks (first guess). Gas cans kill by fire over seconds, 5-8 m away:
     // a burning body collapses where it stands, so no push (first guess too; /ragdoll push GasCan <n> to change)
     {"ExplodingBarrel", 60000, 1}, {"Exploder", 60000, 1}, {"GasCan", 0, 0},
-    {"Stumble", 0, 0}, {"default", 8000, 0},
-    {"Sni", 25000, 0},   // snipers (Sni01_DamageType_C) as strong as the shotgun (Joon, 16 Oct)
+    {"Stumble", 0, 0}, {"default", 8000, 0},   // default: melee and any weapon not named here
 };
-static int n_push_tab = 16;   // the entries above (/ragdoll push <kind> <n> appends)
+#define N_PUSH_DEF ((int)(sizeof PUSH_DEF / sizeof PUSH_DEF[0]))
+static PushKind push_tab[48];   // PUSH_DEF, then b4bcoop.ini's ragdoll_kinds and /ragdoll push <kind> <n> (which appends)
+static int n_push_tab;          // 0 = not filled yet (push_kind fills it)
+static void kinds_reset(void) { memcpy(push_tab, PUSH_DEF, sizeof PUSH_DEF); n_push_tab = N_PUSH_DEF; }
 #define PUSH_DEFAULT 4.f   // Joon's pick (build 17, 16 Oct). GetBoneMass sums: Common 133 kg, Reeker family 710-790 kg
 static float push_scale = PUSH_DEFAULT;
 static int n_pushed, n_push_radial, n_push_nohit, n_push_fail, push_logs, hit_dumps;
@@ -1499,6 +1504,7 @@ static UObject *obj_field(FField *f, const uint8_t *e) {
 }
 
 static PushKind *push_kind(const char *key, int add) {
+    if (!n_push_tab) kinds_reset();
     for (int i = 0; i < n_push_tab; i++) if (!_stricmp(push_tab[i].key, key)) return &push_tab[i];
     if (!add || n_push_tab == (int)(sizeof push_tab / sizeof push_tab[0])) return NULL;
     PushKind *k = &push_tab[n_push_tab++];
@@ -1825,11 +1831,16 @@ static int actors_of(UClass *c, UObject **out, int max) {
     return n;
 }
 
-static int dism_on;                  // /ragdoll dismember on|off
-static int dism_min = 2, dism_max = 3;   // build 32: limbs per blast victim (/ragdoll dismember limbs <min> [max])
+#define DISM_DEFAULT 1               // build 36: on by default (Joon, 17 Oct: everything on at a game start)
+static int dism_on = DISM_DEFAULT;   // /ragdoll dismember on|off
+#define DISM_MIN_DEF 2
+#define DISM_MAX_DEF 3
+static int dism_min = DISM_MIN_DEF, dism_max = DISM_MAX_DEF;   // build 32: limbs per blast victim (/ragdoll dismember limbs <min> [max])
 static int dism_pieces = 1;          // build 32: our piece for every limb the game throws none for
-static int dism_big = 75;            // build 33: % of limbs whose big cut (an "Upper" region) is tried first
-static int dism_head = 50;           // % of blast victims that also lose the head (build 33 test; build 34: Joon, half)
+#define DISM_BIG_DEF 75
+static int dism_big = DISM_BIG_DEF;  // build 33: % of limbs whose big cut (an "Upper" region) is tried first
+#define DISM_HEAD_DEF 50
+static int dism_head = DISM_HEAD_DEF; // % of blast victims that also lose the head (build 33 test; build 34: Joon, half)
 static int dism_type = -1;           // MutilationInfo.Type set by hand (/ragdoll dismember type <n>), -1 = BreakOff
 static int dism_type_set;            // set by hand
 static float dism_imp;               // |Impulse| to write: last seen, or set by hand (0 = 5000)
@@ -3348,7 +3359,8 @@ static void shot_tick(double now) {   // game thread: this frame's hits, one sho
 // not be allowed to destroy a replicated actor; it stays hidden until the host's copy goes. Bodies the game handled
 // the normal way (swap + delete about 1-2 s after the release) are long gone by then. The log line says what the
 // game had done with the body, to find out why it never got there.
-static float deadline_s = 15.f;   // s after death; above SETTLE_CAP plus the game's swap and 1 s delete
+#define DEADLINE_DEFAULT 15.f
+static float deadline_s = DEADLINE_DEFAULT;   // s after death; above SETTLE_CAP plus the game's swap and 1 s delete
 static int n_ended, n_ended_unchecked, deadline_logs;
 
 static void end_body(Tracked *x, double age) {
@@ -3379,10 +3391,143 @@ static void end_body(Tracked *x, double age) {
     call_void(x->a, "K2_DestroyActor");
 }
 
+// ---- saved settings (build 36): b4bcoop.ini ----
+// Joon (17 Oct): everything should work after a restart. Every /ragdoll setting is written to b4bcoop.ini (next to the
+// DLL) by the command that changes it, through the agent's own writer (cmds_ini_set: that one key, the file's
+// comments and order kept). A value equal to the default is written as a commented-out line, so a default changed in a
+// later build still applies. Read at start (ragdoll_init) and when the file is edited while the game runs
+// (ragdoll_live, from cmds.c's reload poll). Keys:
+//   ragdoll=1                          /ragdoll on: on at every start (the tick turns it on once a world exists)
+//   ragdoll_delay, ragdoll_mass, ragdoll_gravity, ragdoll_deadline, ragdoll_push, ragdoll_shot   numbers
+//   ragdoll_kinds=SG:30000,Axe:6000    the push table's kinds that differ from the defaults, or were added
+//   ragdoll_bloodbag, ragdoll_blood, ragdoll_dismember, ragdoll_pieces   1 / 0 (on / off read too)
+//   ragdoll_limbs=2-3, ragdoll_big=75, ragdoll_head=50   as /ragdoll dismember limbs|big|head
+// Not saved: trace, probe, dismember type|impulse (the dismember experiment's test knobs).
+static int start_on;     // ragdoll=1 read: the tick turns the ragdoll on, once
+static int start_done;   // that happened, or the player turned it on or off himself
+static int save_fail;    // a write failed during this command
+
+static float clampf(float v, float lo, float hi) { return v < lo ? lo : v > hi ? hi : v; }
+static int clampi(int v, int lo, int hi) { return v < lo ? lo : v > hi ? hi : v; }
+static int onoff(const char *v, int def) {
+    if (!v) return def;
+    if (!_stricmp(v, "on") || !_stricmp(v, "true")) return 1;
+    if (!_stricmp(v, "off") || !_stricmp(v, "false")) return 0;
+    return atoi(v) != 0;
+}
+static void set_limbs(int lo, int hi) {   // 1-4 each, in order
+    lo = clampi(lo, 1, N_LIMBS);
+    hi = clampi(hi, 1, N_LIMBS);
+    if (hi < lo) { int x = lo; lo = hi; hi = x; }
+    dism_min = lo; dism_max = hi;
+}
+
+static void save(const char *key, const char *val) {   // val NULL: back to the default (the line commented out)
+    if (cmds_ini_set(key, val)) { save_fail = 1; LOG("ragdoll: could not write %s to %s", key, cmds_config_path()); }
+}
+static void save_f(const char *key, float v, float def) {
+    char b[32];
+    if (v == def) { save(key, NULL); return; }
+    snprintf(b, sizeof b, "%g", v);
+    save(key, b);
+}
+static void save_i(const char *key, int v, int def) {
+    char b[16];
+    if (v == def) { save(key, NULL); return; }
+    snprintf(b, sizeof b, "%d", v);
+    save(key, b);
+}
+static void save_kinds(void) {   // the kinds that differ from PUSH_DEF, or aren't in it
+    char b[600];
+    size_t m = 0;
+    b[0] = 0;
+    for (int i = 0; i < n_push_tab && m + 40 < sizeof b; i++) {
+        int same = 0;
+        for (int j = 0; j < N_PUSH_DEF; j++)
+            if (!_stricmp(PUSH_DEF[j].key, push_tab[i].key)) { same = PUSH_DEF[j].n == push_tab[i].n; break; }
+        if (!same) m += (size_t)snprintf(b + m, sizeof b - m, "%s%s:%.0f", m ? "," : "", push_tab[i].key, push_tab[i].n);
+    }
+    save("ragdoll_kinds", m ? b : NULL);
+}
+
+// one b4bcoop.ini key into the settings (val NULL = removed: the default); 1 = a key of ours
+static int setting(const char *k, const char *v) {
+    if (!strcmp(k, "ragdoll")) start_on = onoff(v, 0);
+    else if (!strcmp(k, "ragdoll_delay")) delay_s = v ? clampf((float)atof(v), 0.f, 10.f) : 0.f;
+    else if (!strcmp(k, "ragdoll_mass")) mass_scale = v ? clampf((float)atof(v), 0.1f, 10.f) : 1.f;
+    else if (!strcmp(k, "ragdoll_gravity")) grav_scale = v ? clampf((float)atof(v), 0.f, 5.f) : GRAV_DEFAULT;
+    else if (!strcmp(k, "ragdoll_deadline")) deadline_s = v ? clampf((float)atof(v), 12.f, 120.f) : DEADLINE_DEFAULT;
+    else if (!strcmp(k, "ragdoll_push")) push_scale = v ? clampf((float)atof(v), 0.f, 10.f) : PUSH_DEFAULT;
+    else if (!strcmp(k, "ragdoll_shot")) shot_scale = v ? clampf((float)atof(v), 0.f, 10.f) : SHOT_DEFAULT;
+    else if (!strcmp(k, "ragdoll_kinds")) {   // KIND:n pairs, comma-separated (no strtok: the chat handler uses it)
+        kinds_reset();
+        for (const char *p = v ? v : ""; *p; ) {
+            char key[24];
+            size_t n = 0;
+            while (*p == ' ' || *p == ',') p++;
+            while (*p && *p != ':' && *p != ',' && *p != ' ' && n + 1 < sizeof key) key[n++] = *p++;
+            key[n] = 0;
+            while (*p && *p != ':' && *p != ',') p++;   // spaces before ':', or the rest of a name too long (cut to 23
+                                                        // letters, as /ragdoll push <kind> cuts it)
+            if (*p != ':') continue;
+            float x = (float)atof(++p);
+            while (*p && *p != ',') p++;
+            PushKind *pk = n ? push_kind(key, 1) : NULL;
+            if (pk) pk->n = clampf(x, 0.f, 500000.f);
+        }
+    }
+    else if (!strcmp(k, "ragdoll_bloodbag")) bloodbag_on = onoff(v, 0);
+    else if (!strcmp(k, "ragdoll_blood")) blood_on = onoff(v, 1);
+    else if (!strcmp(k, "ragdoll_dismember")) dism_on = onoff(v, DISM_DEFAULT);
+    else if (!strcmp(k, "ragdoll_pieces")) dism_pieces = onoff(v, 1);
+    else if (!strcmp(k, "ragdoll_limbs")) {   // "2-4", or one number
+        const char *d = v ? strchr(v, '-') : NULL;
+        if (v) set_limbs(atoi(v), d ? atoi(d + 1) : atoi(v)); else set_limbs(DISM_MIN_DEF, DISM_MAX_DEF);
+    }
+    else if (!strcmp(k, "ragdoll_big")) dism_big = v ? clampi(atoi(v), 0, 100) : DISM_BIG_DEF;
+    else if (!strcmp(k, "ragdoll_head")) dism_head = v ? clampi(atoi(v), 0, 100) : DISM_HEAD_DEF;
+    else return 0;
+    return 1;
+}
+
+static void turn_on(float delay) {   // game thread: /ragdoll on, or ragdoll=1 at start
+    delay_s = clampf(delay, 0.f, 10.f);
+    mode_on = 1;
+    start_done = 1;
+    detail_left = DETAIL_LOGS;
+    settle_logs = 0;
+    push_logs = hit_dumps = left_logs = bag_logs = 0;
+    shot_logs = shot_miss_logs = shot_dumps = 0;
+    if (shot_state < 0) shot_state = 0;   // look OnCorpseHit up again
+    shot_reset();
+    game_tid = GetCurrentThreadId();
+    settle_arm();
+    bag_arm();
+    pe_update();
+    LOG("ragdoll: on, delay %.2f s", delay_s);
+}
+static void turn_off(void) {
+    mode_on = 0;
+    start_done = 1;
+    pe_update();
+    LOG("ragdoll: off");
+}
+
+// b4bcoop.ini edited while the game runs (cmds.c's reload poll, game thread): 1 = our key, applied
+int ragdoll_live(const char *key, const char *val) {
+    if (strncmp(key, "ragdoll", 7) || !setting(key, val)) return 0;
+    if (!strcmp(key, "ragdoll")) { if (start_on && !mode_on) turn_on(delay_s); else if (!start_on && mode_on) turn_off(); }
+    return 1;
+}
+
 void ragdoll_tick(float dt) {
     (void)dt;
     tick_n++;
     game_tid = GetCurrentThreadId();   // the tick runs on the game thread (shot_note checks it)
+    if (start_on && !start_done && !mode_on && ue_world()) {   // build 36: b4bcoop.ini ragdoll=1
+        turn_on(delay_s);
+        LOG("ragdoll: on at start (b4bcoop.ini ragdoll=1)");
+    }
     if (!mode_on && !tracing && !any_ragdolled()) return;
     if (tracing && now_s() > trace_end) trace_stop("time up");
     if (!world_check()) { for (int i = 0; i < 6; i++) if (watches[i].actor) watch_end(&watches[i]); return; }
@@ -3431,6 +3576,7 @@ void ragdoll_tick(float dt) {
 }
 
 void ragdoll_slash(char *rest, Out *o) {
+    save_fail = 0;
     char *verb = rest ? strtok(rest, " ") : NULL, *arg = verb ? strtok(NULL, " ") : NULL;
     if (!verb || !strcmp(verb, "status")) {
         int released = n_at_rest + n_capped;
@@ -3455,33 +3601,25 @@ void ragdoll_slash(char *rest, Out *o) {
                    n_shot_hits, n_shove_trace, n_shove_near, n_shot_reheld, n_shot_noshooter, n_shot_early, n_shot_frozen,
                    n_shot_blast, n_shot_notours, n_shot_fail, n_shot_dropped);
     } else if (!strcmp(verb, "on")) {
-        float d = arg ? (float)atof(arg) : 0.f;
-        delay_s = d < 0 ? 0 : d > 10 ? 10 : d;
-        mode_on = 1;
-        detail_left = DETAIL_LOGS;
-        settle_logs = 0;
-        push_logs = hit_dumps = left_logs = bag_logs = 0;
-        shot_logs = shot_miss_logs = shot_dumps = 0;
-        if (shot_state < 0) shot_state = 0;   // look OnCorpseHit up again
-        shot_reset();
-        game_tid = GetCurrentThreadId();   // chat commands run on the game thread
-        settle_arm();
-        bag_arm();
-        pe_update();
-        LOG("ragdoll: on, delay %.2f s", delay_s);
-        out_printf(o, "/ragdoll on: Ridden that die from now on fall as ragdolls%s and stay until they lie still (this machine only)%s\n",
+        turn_on(arg ? (float)atof(arg) : 0.f);
+        start_on = 1;
+        save("ragdoll", "1");
+        save_f("ragdoll_delay", delay_s, 0.f);
+        out_printf(o, "/ragdoll on: Ridden that die from now on fall as ragdolls%s and stay until they lie still (this machine "
+                      "only); on at every game start until /ragdoll off%s\n",
                    delay_s > 0 ? " after the game's death animation starts" : "",
                    settle_state == 1 ? "" : "; settle hold OFF: they freeze at the game's time (see log)");
     } else if (!strcmp(verb, "off")) {
-        mode_on = 0;
-        pe_update();
-        LOG("ragdoll: off");
-        out_printf(o, "/ragdoll off\n");
+        turn_off();
+        start_on = 0;
+        save("ragdoll", NULL);
+        out_printf(o, "/ragdoll off (also at the next game start)\n");
     } else if (!strcmp(verb, "mass")) {
         if (arg) {
             float m = (float)atof(arg);
             mass_scale = m < 0.1f ? 0.1f : m > 10.f ? 10.f : m;
             mass_logs = 0;
+            save_f("ragdoll_mass", mass_scale, 1.f);
             LOG("ragdoll tune: mass x%.2f", mass_scale);
         }
         out_printf(o, "/ragdoll mass: x%.2f (0.1-10, default 1) for bodies that die from now on; under gravity alone "
@@ -3491,6 +3629,7 @@ void ragdoll_slash(char *rest, Out *o) {
             float g = (float)atof(arg);
             grav_scale = g < 0.f ? 0.f : g > 5.f ? 5.f : g;
             LOG("ragdoll tune: gravity x%.2f", grav_scale);
+            save_f("ragdoll_gravity", grav_scale, GRAV_DEFAULT);
         }
         out_printf(o, "/ragdoll gravity: x%.2f (0-5, default %.1f) on ragdolls still falling, from now on%s\n", grav_scale, GRAV_DEFAULT,
                    n_grav_fail ? "; NO EFFECT in this game (see log)" : "");
@@ -3499,6 +3638,7 @@ void ragdoll_slash(char *rest, Out *o) {
             float s = (float)atof(arg);
             deadline_s = s < 12.f ? 12.f : s > 120.f ? 120.f : s;
             deadline_logs = 0;
+            save_f("ragdoll_deadline", deadline_s, DEADLINE_DEFAULT);
             LOG("ragdoll deadline: %.0f s", deadline_s);
         }
         out_printf(o, "/ragdoll deadline: every ragdoll still there %.0f s after death is removed (12-120, default 15)\n",
@@ -3508,23 +3648,27 @@ void ragdoll_slash(char *rest, Out *o) {
         if (arg && (!strcmp(arg, "on") || !strcmp(arg, "off"))) {
             dism_on = !strcmp(arg, "on");
             dism_logs = dism_traced = dism_built_logs = vel_logs_d = vel_logs_c = dism_probed = head_logs = piece_fail_logs = 0;
+            save_i("ragdoll_dismember", dism_on, DISM_DEFAULT);
         }
         else if (arg && !strcmp(arg, "limbs") && arg2 && isdigit((unsigned char)arg2[0])) {   // limbs <min> [max], 1-4
-            int lo = atoi(arg2), hi = arg3 ? atoi(arg3) : lo;
-            lo = lo < 1 ? 1 : lo > N_LIMBS ? N_LIMBS : lo;
-            hi = hi < 1 ? 1 : hi > N_LIMBS ? N_LIMBS : hi;
-            if (hi < lo) { int x = lo; lo = hi; hi = x; }
-            dism_min = lo; dism_max = hi;
+            set_limbs(atoi(arg2), arg3 ? atoi(arg3) : atoi(arg2));
+            char b[16];
+            snprintf(b, sizeof b, "%d-%d", dism_min, dism_max);
+            save("ragdoll_limbs", dism_min == DISM_MIN_DEF && dism_max == DISM_MAX_DEF ? NULL : b);
         }
-        else if (arg && !strcmp(arg, "pieces") && arg2 && (!strcmp(arg2, "on") || !strcmp(arg2, "off"))) dism_pieces = !strcmp(arg2, "on");
+        else if (arg && !strcmp(arg, "pieces") && arg2 && (!strcmp(arg2, "on") || !strcmp(arg2, "off"))) {
+            dism_pieces = !strcmp(arg2, "on");
+            save_i("ragdoll_pieces", dism_pieces, 1);
+        }
         else if (arg && !strcmp(arg, "big") && arg2 && isdigit((unsigned char)arg2[0])) {   // % of limbs cut big first
-            int v = atoi(arg2);
-            dism_big = v < 0 ? 0 : v > 100 ? 100 : v;
+            dism_big = clampi(atoi(arg2), 0, 100);
+            save_i("ragdoll_big", dism_big, DISM_BIG_DEF);
         }
         else if (arg && !strcmp(arg, "head") && arg2 && (isdigit((unsigned char)arg2[0]) || !strcmp(arg2, "on") || !strcmp(arg2, "off"))) {
             int v = !strcmp(arg2, "on") ? 50 : !strcmp(arg2, "off") ? 0 : atoi(arg2);   // % of victims
             dism_head = v < 0 ? 0 : v > 100 ? 100 : v;
             head_logs = 0;
+            save_i("ragdoll_head", dism_head, DISM_HEAD_DEF);
         }
         else if (arg && !strcmp(arg, "type") && arg2) {   // a number, or "auto" for BreakOff again
             int v = strcmp(arg2, "auto") ? atoi(arg2) : -1;
@@ -3543,7 +3687,7 @@ void ragdoll_slash(char *rest, Out *o) {
         if (arg) LOG("ragdoll dismember: %s, %d-%d limbs, big cuts %d%%, head %d%%, pieces of ours %s, Type %d%s, impulse %.0f%s",
                      dism_on ? "on" : "off", dism_min, dism_max, dism_big, dism_head, dism_pieces ? "on" : "off", type, src,
                      dism_imp > 0 ? dism_imp : 5000.f, dism_imp_set ? " (set)" : dism_imp > 0 ? " (seen)" : " (default)");
-        out_printf(o, "/ragdoll dismember: %s (default off): blast victims lose %d-%d limbs (limbs <min> [max], 1-4; one arm at "
+        out_printf(o, "/ragdoll dismember: %s (default on): blast victims lose %d-%d limbs (limbs <min> [max], 1-4; one arm at "
                       "most, the game refuses a second), a different limb each; big cuts (elbow, knee) %d%% of the time, else "
                       "wrist or ankle (big <0-100>, default 75); heads off on %d%% of victims (head <0-100|on|off>, default 50); "
                       "pieces of ours %s (a flying piece for each limb the game throws none for); Type %d%s, impulse %.0f; so far "
@@ -3555,6 +3699,7 @@ void ragdoll_slash(char *rest, Out *o) {
         if (arg && (!strcmp(arg, "on") || !strcmp(arg, "off"))) {
             blood_on = !strcmp(arg, "on");
             paint_logs = paint_probes = 0;
+            save_i("ragdoll_blood", blood_on, 1);
             LOG("ragdoll blood: %s", blood_on ? "on" : "off");
         } else if (arg) { out_printf(o, "usage: /ragdoll blood [on|off]\n"); return; }
         out_printf(o, "/ragdoll blood: %s (default on): bodies spared from the blood bag get the blood the game paints on the "
@@ -3564,6 +3709,7 @@ void ragdoll_slash(char *rest, Out *o) {
         if (arg && (!strcmp(arg, "on") || !strcmp(arg, "off"))) {
             bloodbag_on = !strcmp(arg, "on");
             pe_update();
+            save_i("ragdoll_bloodbag", bloodbag_on, 0);
             LOG("ragdoll bloodbag: %s", bloodbag_on ? "on (the game's)" : "off (bodies kept)");
         }
         out_printf(o, "/ragdoll bloodbag: %s (default off) while /ragdoll is on: Ridden near a blast %s%s\n",
@@ -3575,18 +3721,22 @@ void ragdoll_slash(char *rest, Out *o) {
             float x = (float)atof(arg);
             push_scale = x < 0.f ? 0.f : x > 10.f ? 10.f : x;
             LOG("ragdoll push: scale x%.2f", push_scale);
+            save_f("ragdoll_push", push_scale, PUSH_DEFAULT);
         } else if (arg && !strcmp(arg, "off")) {
             push_scale = 0.f;
             LOG("ragdoll push: off");
+            save_f("ragdoll_push", push_scale, PUSH_DEFAULT);
         } else if (arg && !strcmp(arg, "on")) {
             push_scale = PUSH_DEFAULT;
             LOG("ragdoll push: on (x%.2f, the default)", push_scale);
+            save_f("ragdoll_push", push_scale, PUSH_DEFAULT);
         } else if (arg && arg2) {   // /ragdoll push <key> <n>: one weapon kind
             float n = (float)atof(arg2);
             PushKind *k = push_kind(arg, 1);
             if (!k) { out_printf(o, "/ragdoll push: table full\n"); return; }
             k->n = n < 0.f ? 0.f : n > 500000.f ? 500000.f : n;
             LOG("ragdoll push: %s = %.0f%s", k->key, k->n, k->radial ? " (explosion)" : "");
+            save_kinds();
         } else if (arg) {
             out_printf(o, "usage: /ragdoll push [<x> | on | off | <weapon kind> <strength>]\n");
             return;
@@ -3605,7 +3755,7 @@ void ragdoll_slash(char *rest, Out *o) {
         } else if (arg && !strcmp(arg, "off")) shot_scale = 0.f;
         else if (arg && !strcmp(arg, "on")) shot_scale = SHOT_DEFAULT;
         else if (arg) { out_printf(o, "usage: /ragdoll shot [<x> | on | off]\n"); return; }
-        if (arg) { shot_logs = shot_miss_logs = 0; LOG("ragdoll shot: x%.2f", shot_scale); }
+        if (arg) { shot_logs = shot_miss_logs = 0; LOG("ragdoll shot: x%.2f", shot_scale); save_f("ragdoll_shot", shot_scale, SHOT_DEFAULT); }
         PushKind *hg = push_kind("HG", 0), *ar = push_kind("AR", 0), *sg = push_kind("SG", 0);
         const float common = 133.f;   // kg, a Common by GetBoneMass (build 18 log)
         out_printf(o, "/ragdoll shot: x%.2f (0-10, default %.0f, 0 = off): a shot on a body that is still a ragdoll shoves it "
@@ -3626,9 +3776,23 @@ void ragdoll_slash(char *rest, Out *o) {
     } else {
         out_printf(o, "usage: /ragdoll [on [delay]|off|status|mass [x]|gravity [x]|deadline [s]|push [x|on|off|<kind> <n>]|shot [x|on|off]|bloodbag [on|off]|blood [on|off]|dismember [on|off|limbs <min> [max]|big <0-100>|head <0-100|on|off>|pieces on|off|type <n|auto>|impulse <n>]|probe|trace [secs]]\n");
     }
+    if (save_fail) out_printf(o, "/ragdoll: could not write b4bcoop.ini (see log): this change lasts until the game closes\n");
 }
 
+static void ini_pair(const char *k, const char *v, void *ctx) { (void)ctx; if (!strncmp(k, "ragdoll", 7)) setting(k, v); }
+
 int ragdoll_init(void) {
-    LOG("ragdoll: experimental module loaded (fork build), off until /ragdoll on");
+    kinds_reset();
+    cmds_ini_each(ini_pair, NULL);   // b4bcoop.ini (build 36)
+    char kinds[600];
+    size_t m = 0;
+    kinds[0] = 0;
+    for (int i = 0; i < n_push_tab && m + 40 < sizeof kinds; i++)
+        m += (size_t)snprintf(kinds + m, sizeof kinds - m, "%s%s %.0f", i ? ", " : "", push_tab[i].key, push_tab[i].n);
+    LOG("ragdoll: experimental module loaded (fork build), %s; from b4bcoop.ini and the defaults: delay %.2f, mass x%.2f, "
+        "gravity x%.2f, deadline %.0f s, push x%.2f, shots on bodies x%.2f, blood bags %s, blood %s, dismember %s (%d-%d "
+        "limbs, big %d%%, head %d%%, pieces %s); kinds: %s", start_on ? "on at the first world (ragdoll=1)" : "off until /ragdoll on",
+        delay_s, mass_scale, grav_scale, deadline_s, push_scale, shot_scale, bloodbag_on ? "on" : "off", blood_on ? "on" : "off",
+        dism_on ? "on" : "off", dism_min, dism_max, dism_big, dism_head, dism_pieces ? "on" : "off", kinds);
     return 0;
 }
