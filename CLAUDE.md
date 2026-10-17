@@ -19,9 +19,17 @@ Detailed engine findings (addresses, obfuscated layouts, class names): `docs/NOT
   **b4bcoop co-op / Online** (#47; task dialog, `launcher.rc` manifest; co-op after 15 s with no input; remembered as ini `launch=`; Shift or
   `-b4bcoop=ask` asks anyway; `+b4bcoop_join` = co-op): co-op starts the game instead of the EAC bootstrapper,
   Online moves the agent DLLs to `<game>\b4bcoop-online\` first and lets the stub start EAC unchanged; the next co-op
-  pick moves them back. Dev: env `B4B_LAUNCHER_ANSWER=coop|online[+remember]|cancel|wait`, `-b4bcoop_test_suspend` (EAC's
-  launcher created suspended), `rundll32 xinput1_3.dll,b4bcoop_prompt_test`; `B4B_STUB=1 launch/run.sh` runs the
-  stub. docs/investigations/launch.md, online-mode.md.
+  pick moves them back. Co-op starts then **update b4bcoop before the game starts** (`auto_update()`, never on the
+  Online path): GitHub `releases/latest` (or a Steam join's `ver:` = the host's version, `upd_auto_plan`), 2 s for
+  the check, nothing shown when offline/no answer/nothing newer; a newer release in a task dialog with progress +
+  Cancel, verified and installed with the tab's code (`updinst.c`), its own mapped DLL renamed into the backup;
+  versions put back (`state.txt skip=`, `failed\`) not again by itself; result in the launcher log +
+  `b4bcoop-update\auto.txt`. Ini `auto_update` (player builds default 1, dev builds 0). Dev: env
+  `B4B_LAUNCHER_ANSWER=coop|online[+remember]|cancel|wait`, `B4B_LAUNCHER_UPDATE=off|on|cancel`, ini
+  `update_api/update_repo/update_pubkey` (as the agent), `-b4bcoop_test_suspend` (EAC's launcher created suspended),
+  `rundll32 xinput1_3.dll,b4bcoop_prompt_test`, `rundll32 xinput1_3.dll,b4bcoop_update_test <root>[|<options>]`
+  (the update alone, no stub/game); `B4B_STUB=1 launch/run.sh` runs the stub. docs/investigations/launch.md,
+  online-mode.md, updater.md §7.
   `native/build.sh` → `native/out/` (dev build); `native/build.sh --release` → `native/out/release/` (player build,
   defines `B4B_RELEASE`: no TCP command server, no dev/test commands, no `offline=1` automation; what
   `launch/package.sh` ships); both produce all three DLLs and generate `native/out/gen/b4bcoop_version.h` from
@@ -218,7 +226,10 @@ Detailed engine findings (addresses, obfuscated layouts, class names): `docs/NOT
     `thirdperson_freelook_return`): standing still the mouse orbits the camera (UpdateRotation hook eats RotationInput,
     spring arm stops following), busy → swings back. Dev `thirdperson view|aim|arm|decals|watch|use|usables|lookat|
     itemfix|freelook|look|mouse|heroes|keys`, `fnprobe`. docs/investigations/third-person.md.
-  - `updater.c` in-game updates (#34): `~` tab **Updates** (ini `updates=0` hides it). Check = GitHub
+  - `updater.c` in-game updates (#34): `~` tab **Updates** (ini `updates=0` hides it; the launcher's switch
+    **Update b4bcoop automatically when the game starts** = ini `auto_update`, its last result from
+    `b4bcoop-update\auto.txt`). HTTP, check, download, staging/swap/undo, `state.txt` and revert live in
+    `updinst.c` (Windows, no game code, no netguard), shared with the launcher. Check = GitHub
     `releases/latest` (or `tags/v<host's ver>` after a version refusal) + the release's signed manifest
     `b4bcoop-update.txt`; Download = zip + `.sig` in memory, size/SHA-256/ed25519 checked (`updcore.c`, portable:
     SHA-256, Monocypher, puff, zip, JSON; unit tests `native/test/run.sh`), then staged in `<game>\b4bcoop-update\` and

@@ -136,6 +136,8 @@ The stub `LoadLibraryW("XINPUT1_3.DLL")`s by bare name every launch, from wWinMa
    launch options contain `-b4bcoop=off`.
 
 Same arguments as the EAC path and the same direct start the `.cmd` does (verified on Windows in a real session).
+Since #47 it also asks co-op / Online (online-mode.md), and co-op starts install a newer b4bcoop first
+(updater.md §7).
 The stub has already rewritten Settings.json and checked the EAC install, both harmless. Under Proton the file is
 inert: Wine's builtin `xinput1_3` is not prefer-native.
 Risks: Windows Defender / Smart App Control can flag unsigned DLLs (applies equally to the agent itself); a stub

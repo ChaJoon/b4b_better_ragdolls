@@ -75,6 +75,9 @@ cat > "$ini" <<'INI'
 ; Hide the ~ window's Updates tab (updates from the game, only when you click).
 ;updates=0
 
+; Don't check GitHub for a newer b4bcoop at each game start (it installs one before the game opens).
+;auto_update=0
+
 ; Turn the add-on shop off (its list is fetched from GitHub once per game start, in Fort Hope).
 ;shop=0
 
@@ -157,15 +160,17 @@ ones you have; friends with the same add-on see your outfit, the others your nor
 players with any add-ons; a host can allow cosmetic ones only, or none (addons_policy=; your game checks yours before
 joining). Details: b4bcoop-COMMANDS.txt, "Add-ons".
 
-UPDATE: press ~ in game, tab Updates > Check for updates > Download and install on next start, then restart
-the game. Nothing is downloaded or changed until you click; the download must carry the b4bcoop release signature,
-and your b4bcoop.ini, add-ons and bans stay as they are. "Go back to ..." in the same tab returns to the version you
-had. Or by hand: extract the new zip over the old files. Details: b4bcoop-COMMANDS.txt, "Updates".
+UPDATE: by itself: b4bcoop checks GitHub for an update at each start and installs it before the game opens (a
+small window shows it; Cancel starts the version you have; auto_update=0 turns it off). Joining a friend through
+Steam installs your friend's version. In game: press ~, tab Updates > Check for updates > Download and install on
+next start, then restart the game. Every download must carry the b4bcoop release signature, and your b4bcoop.ini,
+add-ons and bans stay as they are. "Go back to ..." in the same tab returns to the version you had. Or by hand:
+extract the new zip over the old files. Details: b4bcoop-COMMANDS.txt, "Updates".
 
 REMOVE: delete these files from the game folder.
 1. Next to Back4Blood.exe: xinput1_3.dll, b4bcoop-README.txt, b4bcoop-COMMANDS.txt, b4bcoop-LICENSE.txt, and
-   the b4bcoop-addons folder (only there if you installed add-ons), the b4bcoop-update folder (only there if you
-   updated from the game), the b4bcoop-online folder (only there while b4bcoop is switched off for online play).
+   the b4bcoop-addons folder (only there if you installed add-ons), the b4bcoop-update folder (only there after an
+   update), the b4bcoop-online folder (only there while b4bcoop is switched off for online play).
 2. In Gobi\Binaries\Win64: X3DAudio1_7.dll, b4bcoop.ini, b4bcoop-outfits.txt (only there if you wore an add-on
    outfit), all b4bcoop-*.log files, and b4bcoop-bans.txt (only there if you banned someone).
 3. Left over from older versions, if present, in Gobi\Binaries\Win64: dwmapi.dll, "Play B4B co-op.cmd",
@@ -196,7 +201,8 @@ SAFETY
 Unofficial, not affiliated with Turtle Rock Studios or Warner Bros. Games. Offline mode only: it blocks the game's
 online services while it runs, and is moved out of the game's folders before an online start (PLAY ONLINE). By
 default nothing is opened to the network: players connect through Steam. b4bcoop itself only talks to Steam and
-GitHub (the add-on shop's list, updates). No warranty (see b4bcoop-LICENSE.txt).
+GitHub (the update check at each start, auto_update=0 turns it off; the add-on shop's list; updates). No warranty
+(see b4bcoop-LICENSE.txt).
 Source code and how to check this download: https://github.com/actuallydan/b4b-coop
 TXT
 sed -i 's/$/\r/' "$out/b4bcoop-README.txt"

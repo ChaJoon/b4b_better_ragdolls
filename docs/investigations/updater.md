@@ -1,10 +1,13 @@
 # In-game updater (#34)
 
 The `~` window's **Updates** tab checks GitHub for a release, downloads it, verifies it and swaps the files in; the
-new version runs from the next game start. Nothing happens without a click (no background check, no auto-update),
-nothing is hot-reloaded. Code: `native/src/updater.c` (HTTP, files, state, tab), `native/src/updcore.c` (portable:
-SHA-256, signature, manifest, zip, JSON, versions), netguard scope in `native/src/netguard.c`, signing in
-`tools/sign-release.sh` + `.github/workflows/release.yml`. Player docs: `docs/COMMANDS.md` "Updates", README "Update".
+new version runs from the next game start. In the game nothing happens without a click (no background check),
+nothing is hot-reloaded. Before the game starts, the launcher does the same by itself on co-op starts (§7, ini
+`auto_update`). Code: `native/src/updater.c` (tab, start check), `native/src/updinst.c` (Windows: HTTP, check,
+download, files, state, revert; shared with the launcher), `native/src/updcore.c` (portable: SHA-256, signature,
+manifest, zip, JSON, versions, the launcher's decisions), `native/launcher/redirect.c` (§7), netguard scope in
+`native/src/netguard.c`, signing in `tools/sign-release.sh` + `.github/workflows/release.yml`. Player docs:
+`docs/COMMANDS.md` "Updates", README "Update".
 
 ## 1. Spike: HTTPS from the agent
 - **WinHTTP** (loaded with `LoadLibraryW` on the first request, so no player loads it who never clicks; netguard's
@@ -92,8 +95,9 @@ release page.
   4. `b4bcoop-update\state.txt`: `installed=<new> previous=<old> pending=1 starts=0 files=<list>`.
   One install or go-back per game session (the tab greys out until a restart).
 - Rejected alternatives: swapping at the next start from DllMain can't replace the DLL that is running that DllMain
-  (it would take two restarts); the root `xinput1_3.dll` launcher runs only on Windows (Wine ignores it: builtin
-  xinput wins), so it can't be the mechanism for Proton/Steam Deck.
+  (it would take two restarts); the root `xinput1_3.dll` launcher ran only on Windows when this was written (Wine
+  ignores it: builtin xinput wins), so it couldn't be the mechanism for Proton/Steam Deck. Since #47 the agent sets
+  the DllOverride that makes Proton load it too, and the launcher installs updates before the game starts (§7).
 - **Start check / automatic revert** (`updater_early`, DllMain right after the log opens and the `-b4bcoop=off`
   check; kernel32 file calls only): if `pending=1` and `installed` is this version, `starts++`. 15 s of game ticks
   later (`updater_tick`) → `pending=0` ("started fine"). If a third start finds `starts` already at 2, the new
@@ -136,3 +140,92 @@ release page.
   netguard's async-resolve fallback. Test: any Windows PC with the release after this one: Updates → Check.
 - The first real signed release (0.6.2) is the first end-to-end run against GitHub's real assets + real key.
 - The modkit zip is out of scope (#34).
+
+## 7. Automatic update before the game starts (launcher, `auto-update` branch, 2026-10-16)
+Goal: no "start, download, quit, start again" for a small update. The root `xinput1_3.dll` (launcher,
+`native/launcher/redirect.c`) runs in Steam's launcher stub before the game process exists, so nothing of ours is
+mapped there except the launcher itself; it now installs a newer release on **co-op starts** (never on the Online
+path: no request at all when the player picks Online).
+
+**Shared code.** The tab's HTTP, release check, download, staging + swap + undo, `state.txt` and revert moved from
+`updater.c` into `native/src/updinst.c/.h` (Windows, no game code, no netguard: the agent opens netguard's scope
+around each call itself). Both the agent (`src/*.c`) and the launcher (`native/build.sh` adds `updinst.c`,
+`updcore.c`, Monocypher, puff to `xinput1_3.dll`, ~175 KB now) link it, so both apply the same rules: signed manifest,
+zip size / SHA-256 / ed25519 with the key in `signkeys.h`, `upd_install_path` (never ini, bans, add-ons, logs),
+running files → `backup\<ver>\`, any failed move undone, `state.txt` `installed= previous= pending=1 starts=0`.
+WinHTTP is loaded at run time (`LoadLibraryW`), User-Agent `b4bcoop-launcher/<ver>`, default proxy settings (no
+WPAD), no revocation checks (WinHTTP's default): the stub's only connections are `api.github.com`, `github.com` and
+GitHub's release-asset host (or the dev `update_api=`).
+
+**Flow** (`auto_update()` in redirect.c, right after the co-op path's unpark, before the game's `CreateProcessW`):
+1. On? ini `auto_update` (player builds default on; **dev builds default off**, so a release never replaces a
+   developer's build by itself, e.g. a lane install or online-test.py's stub starts; `auto_update=1` or env
+   `B4B_LAUNCHER_UPDATE=on` turns it on). Needs `Gobi\Binaries\Win64\X3DAudio1_7.dll` (a legacy `dwmapi.dll` dev
+   install is skipped). Skipped while `state.txt` has `pending=1` for this version: a fresh update that hasn't had its
+   15 s of play keeps its backup (installing again would replace the backup of the known-good version and break the
+   automatic revert).
+2. Plan (`upd_join_parse`, `upd_auto_plan` in updcore.c, unit-tested): the stub's command line carries a Steam join
+   (`+b4bcoop_join steam:<id> proto:<n> ver:<x.y.z> ...`) → the host's version, `releases/tags/v<ver>`, when it is newer
+   than ours, or older **with another protocol** (the join would be refused); our version, or older with our protocol
+   (or an unknown protocol) → no request at all. No join (or a join without `ver:`) → `releases/latest`.
+3. Check: one request on a worker thread; the stub waits **2 s at most** for all of it (WinHTTP loading, DNS, TLS,
+   reply; WinHTTP's own timeouts are 2 s each too, and a cancel flag stops the abandoned worker). No answer, an error
+   (404, rate limit, no network), or a release that isn't wanted (`upd_auto_wanted`: latest must be newer; a tag must
+   be exactly the host's version) → the game starts as before, nothing shown, one log line. A release without
+   `b4bcoop-update.txt` (≤ 0.6.1) is skipped the same way.
+4. Never again by itself (`upd_auto_blocked`): a version that was put back, i.e. `state.txt skip=<ver>` (new field,
+   written by every revert: the automatic one after two failed starts and Go back; older agents ignore unknown keys),
+   `b4bcoop-update\failed\<ver>\`, or an older agent's `result=you went back from <ver> to ...`. Without this, a
+   release that crashes would loop (install, crash twice, revert, install). The tab still installs it on a click
+   (which clears `skip=`).
+5. Window: a task dialog (comctl32 v6 through the launcher's manifest, like the prompt) "Updating b4bcoop to X" with a
+   progress bar, the state as text (getting the release, `Downloading: n of m KB`, installing) and one button
+   **Cancel: start b4bcoop <ours>** (Esc, the window's X and controller **B** too). The job starts in `TDN_CREATED`, so
+   no window = no download; without task dialogs (very old comctl32) there is no update (never silent). The worker:
+   manifest + `.sig` (verified, must name the tag's version) → zip + `.sig` (progress) → verify → install. Phases move
+   by compare-and-swap; Cancel only wins during the network part (FETCH, DL), so a cancelled job never writes a file,
+   and once the renames start the window answers Cancel with "Installing, one moment..." until they finish (or are
+   undone). Done → "installed, starting the game" (0.8 s) → the game starts with the new agent, whose `updater_early`
+   counts start 1 of the fresh update as for a tab install. Failure → the dialog says why for 4 s, the current version
+   starts. The launcher's own mapped DLL is renamed into `backup\<ours>\` like the agent's DLL in a tab install.
+6. Result: the launcher log (`Gobi\Binaries\Win64\b4bcoop-launcher.log`, `update: ...` lines) and
+   `b4bcoop-update\auto.txt` (`when=`, `result=`), written only when an update was found; the Updates tab shows it
+   ("Last automatic update") and has the switch **Update b4bcoop automatically when the game starts**
+   (`ov_setting("auto_update")`; the agent detects a launcher that can do it by the marker `auto-update-1` in its
+   `b4bcoop-launcher-features` string).
+
+Dev: `update_api=`, `update_repo=`, `update_pubkey=` in the ini apply to the launcher as to the tab (dev builds only;
+plain `http://127.0.0.1` allowed there, so `tools/update-test.py`'s fake API works). Env `B4B_LAUNCHER_UPDATE=off|on|
+cancel` (cancel = press Cancel once the download runs). `rundll32 xinput1_3.dll,b4bcoop_update_test <game
+root>\[|<launch options>]` runs `auto_update` alone, with no stub and no game (logs to the root's
+`Gobi\Binaries\Win64\b4bcoop-launcher.log`); e.g. `|+b4bcoop_join steam:1 proto:3 ver:0.6.2-test` for the join plan.
+CI: the player launcher must carry the release key and the marker, and no `B4B_LAUNCHER_UPDATE` / `update_pubkey`.
+
+Linux/Steam Deck: the launcher only loads once the agent has set the `xinput1_3` DllOverride (online.c, first start),
+so the automatic update runs from the second start on. A downgrade to a host's release older than this feature
+leaves the player on a launcher without it; the tab (or the next host's version) brings them back.
+
+**Verified (2026-10-16, no game, no network):** `native/build.sh` and `native/build.sh --release` build all three DLLs
+without warnings; `native/test/run.sh` passes (122 + 32 checks; new: join-string parsing, plan, wanted, blocked);
+the release launcher contains the release key and `auto-update-1`, the dev-only strings only in the dev build.
+
+**Not verified, needs a live test** (lane 2, `tools/update-test.py`'s fake signed release + fake API, dev build with
+`auto_update=1` or `B4B_LAUNCHER_UPDATE=on`, `B4B_STUB=1`):
+- the stub under Proton loads WinHTTP and gets HTTPS through (the in-game path is verified, the stub process isn't);
+- no answer / no network / DNS failure: the game starts within ~2 s, no window; a real `releases/latest` with the
+  same version: nothing shown;
+- a newer fake release: the window appears (with and without the co-op prompt, remembered `launch=coop`), progress
+  moves, the files are swapped while the stub's own `xinput1_3.dll` is mapped (rename of a mapped DLL in the stub),
+  the game then logs the new version and `start 1 of the freshly installed`, `started fine` after 15 s;
+- bad manifest signature / bad zip hash / bad zip signature / truncated zip: window shows the reason, nothing changed
+  (same file checks as update-test.py's), the old version starts;
+- Cancel during the download (`B4B_LAUNCHER_UPDATE=cancel`): no file changed, old version starts; controller B;
+- Steam join string with `ver:` newer, older + other protocol (downgrade), older + same protocol (no request), equal
+  (no request);
+- `pending=1` (fresh update): no request; a version in `skip=` / `failed\`: not installed; Go back then restart: not
+  reinstalled;
+- the automatic revert after an auto-installed version fails twice, and that the next start doesn't reinstall it;
+- `auto_update=0` and the tab's checkbox (writes the ini, next start honours it);
+- netguard and e2e unchanged (the agent side only moved code: `tools/e2e.py --quick`, `tools/update-test.py` 39/39,
+  `tools/shop-test.py`, since the shop uses the same HTTP path);
+- native Windows: the stub's WinHTTP + schannel, renaming the mapped launcher, the task dialog (Windows 10/11).

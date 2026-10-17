@@ -35,7 +35,7 @@ of the window, and also in your chat.
 | **Cheats** | Host: **Cheats on**, a player picker (`me`, everyone, a player) for the buttons marked `*`, then every cheat: god, heal, revive, infinite ammo, copper, cards, fly, noclip, walk, teleport, free camera, size, horde, kill all ridden, freeze, director phases, spawn, game speed, win, lose, and your own save's supply points / skull totems / burn cards / unlock all (everyone, while the host has cheats on). Also (host, no cheats needed): **Bots open pinged toolkit doors**, **Bots heal you on request** | every `/cheats` command; ini `bot_toolkit_doors`, `bot_heal_requests` |
 | **Add-ons** | One table of every add-on: the add-on shop's and the ones you have (see [Add-ons](#the--windows-add-ons-tab) below): picture, name and size, installed (version, update available), **Add**, **Update**, **Wear** / **Take off** (an outfit) / **Use** / **Stop** (a weapon look), **Remove**, **Undo**, **Turn on**; a search box, All / Installed / Available, sort by name or by when installed (**A-Z** / **Z-A**, **Newest** / **Oldest**), **Refresh**; **Load add-ons**; **Host rules**: **Model swaps allowed**, who may join with add-ons (`addons_policy`; greyed on a client) | `/addons ...`, `/models on\|off`; ini `addons`, `addons_policy`, `shop` |
 | **Settings** | The window's text size and key, the flashlight, third-person and heal-request keys; **Game start**: ask co-op or online every time, always b4bcoop co-op, always online (see [Co-op or online](#co-op-or-online-at-the-game-start)) | ini `overlay_scale`, `overlay_key`, `flashlight_key`, `thirdperson_key`, `bot_heal_key`, `launch` |
-| **Updates** | Your version; **Check for updates** (the latest release: version, protocol, short notes); **Download and install on next start**; the host's version after a "same version" refusal (**Check** it); **Go back to** the previous version. See [Updates](#updates) | ini `updates` (no chat command) |
+| **Updates** | Your version; **Check for updates** (the latest release: version, protocol, short notes); **Download and install on next start**; the host's version after a "same version" refusal (**Check** it); **Go back to** the previous version; **Update b4bcoop automatically when the game starts** (on/off) and the last automatic update. See [Updates](#updates) | ini `updates`, `auto_update` (no chat command) |
 | **Help** | Your version, a box to run any chat command (without the `/`) | `/help` |
 
 Buttons that change something for everyone or permanently (Ban, Restart, Leave, Win, Lose, Unlock all, Add supply
@@ -537,7 +537,8 @@ only your add-ons.
 
 ## Updates
 
-The **Updates** tab of the `~` window updates b4bcoop from inside the game. Nothing happens until you click, and
+b4bcoop updates itself **when the game starts** (see [below](#automatic-update-when-the-game-starts)), and the
+**Updates** tab of the `~` window does it from inside the game. In the game nothing happens until you click, and
 nothing checks in the background.
 
 1. **Check for updates** asks GitHub for the latest b4bcoop release and shows its version, its protocol and the first
@@ -559,13 +560,38 @@ What an update changes: `X3DAudio1_7.dll`, `xinput1_3.dll` and the `b4bcoop-*.tx
   `<new> did not start properly 2 times, so <old> was put back`.
 - A host with another b4bcoop version refused you (`Everyone needs the same version`): the tab shows the host's
   version with a **Check** button, which offers exactly that version.
-- The check and the download (and the add-on shop's list, fetched once per game start in Fort Hope, and its downloads) are the only time b4bcoop contacts anything besides Steam: `api.github.com`,
+- The check and the download (the tab's, the one at each game start, and the add-on shop's list, fetched once per game start in Fort Hope, and its downloads) are the only time b4bcoop contacts anything besides Steam: `api.github.com`,
   `github.com` and GitHub's download server, and only while that request runs. GitHub allows 60 checks an hour per
   internet address; the tab tells you when that's used up.
 - Releases from before the updater (0.6.1 and older) can't be installed from the tab; it links the release page
   instead.
 - `updates=0` in `b4bcoop.ini` hides the tab.
 - Updating by hand still works: extract the new zip over the old files, like the first install.
+
+### Automatic update when the game starts
+
+Every **b4bcoop co-op** start (never an **Online** start) first asks GitHub whether a newer b4bcoop release is out,
+before the game opens. This is done by the b4bcoop launcher (`xinput1_3.dll` next to `Back4Blood.exe`).
+- The question takes **2 seconds at most**. No internet, no answer in time, or no newer release: the game starts as
+  usual and you see nothing.
+- A newer release: a small window **Updating b4bcoop to X.Y.Z** shows the download. It is checked exactly like the
+  tab's download (size, SHA-256, the b4bcoop release signature), installed the same way (the old files go to
+  `b4bcoop-updateackup`; `b4bcoop.ini`, add-ons, bans and logs are never touched), and then the game starts with
+  the new version. It takes a few seconds.
+- **Cancel: start b4bcoop ...** (or Esc, the window's X, controller **B**) starts the game with the version you have.
+  Only during the last moment, while the files are being swapped, does it wait until that's done.
+- Anything goes wrong (download, check, a file that can't be moved): nothing is changed, the window says why for a few
+  seconds, and the game starts with the version you have.
+- **Joining a friend through Steam** (Join Game or an invite): it installs **your friend's version** instead of the
+  latest one, so the join works. Nothing is checked when you already have that version, or when the friend's version
+  is older but plays with yours (same protocol).
+- A version that was put back (it didn't start properly twice, or you used **Go back**) isn't installed again by
+  itself; the tab still can. No check either right after an update, until that version has run for about 15 seconds.
+- The tab's **Last automatic update** line shows the result; `Gobi\Binaries\Win64\b4bcoop-launcher.log` has the
+  details (`update: ...`).
+- Turn it off: `~` window → **Updates** → **Update b4bcoop automatically when the game starts**, or `auto_update=0`
+  in `b4bcoop.ini` (read at the next game start).
+- Linux/Steam Deck: the launcher runs from the second game start after installing (like the co-op / online question).
 
 ## b4bcoop.ini options
 
@@ -592,7 +618,7 @@ Rules:
   `flashlight_key`, `flashlight_sticky`, `bot_heal_key`, `bot_heal_requests`, `bot_toolkit_doors`,
   `flashlight_width`, `flashlight_range`, `flashlight_brightness`,
   `allow_joins`, `allow_steamids`, `presence`, `teamsize` (from the next map), `overlay`, `overlay_key`,
-  `overlay_scale`, `addons_policy`, `updates`, `host_handoff`, `launch` (read at the next game start). Only the lines you changed count: an edit doesn't undo what you set with a chat command this
+  `overlay_scale`, `addons_policy`, `updates`, `host_handoff`, `launch` and `auto_update` (both read at the next game start). Only the lines you changed count: an edit doesn't undo what you set with a chat command this
   session. Deleting or commenting out a line = back to its default.
 - **Need a game restart** (chat: `b4bcoop.ini: host_ip changed; restart the game for that`): `auto_signin`, `host`, `join`,
   `host_ip`, `steam_p2p`, `presence_addr`, `netguard`, `netguard_eos`, `netguard_allow`.
@@ -749,6 +775,7 @@ join=steam:7656119XXXXXXXXXX
 | `addons_dir` | `<game>\b4bcoop-addons` | Another add-ons folder, a full Windows path, e.g. `addons_dir=D:\b4b-addons` |
 | `addons_policy` | `any` | Host: which add-ons joiners may have: `cosmetic`, `any`, `none`, `match` (see Add-ons; joiners check themselves, `match` shows them your gameplay add-ons' ids) |
 | `updates` | `1` | `0`: hide the `~` window's Updates tab (see [Updates](#updates)) |
+| `auto_update` | `1` | `0`: don't check GitHub for a newer b4bcoop when the game starts (see [Automatic update](#automatic-update-when-the-game-starts)); the `~` Updates tab has the same switch |
 | `shop` | `1` | `0`: the add-on shop off (see [Add-ons from the shop](#add-ons-from-the-shop)): its list isn't fetched, the `~` window's Add-ons tab shows only your add-ons |
 
 ## Launch options & troubleshooting
@@ -792,7 +819,7 @@ If a game ever starts with `-b4bcoop=off` but with b4bcoop loaded (Linux/Steam D
 the `xinput1_3.dll` next to `Back4Blood.exe` missing), b4bcoop closes it before it starts, with a message, rather than
 let it go online; start it again.
 `Gobi\Binaries\Win64\b4bcoop-launcher.log` shows each start's choice (`choice: online (the prompt)`, `switched off:
-...`, `switched on: ...`).
+...`, `switched on: ...`) and the automatic update (`update: ...`).
 
 ### The log, and reporting a problem
 
