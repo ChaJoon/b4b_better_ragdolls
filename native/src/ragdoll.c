@@ -19,7 +19,7 @@
 //   /ragdoll dismember [on|off|limbs <min> [max]|big <0-100>|head <0-100|on|off>|pieces on|off|type <n|auto>|
 //                      impulse <n>]  off by default: blast victims lose min-max limbs (default 2-3, a different limb
 //                            each, big cuts big% of the time) through the game's MutilationState, each thrown as a piece;
-//                            head: the share of victims that lose their head (test, default off; see "dismemberment")
+//                            head: the share of victims that lose their head (default 50; see "dismemberment")
 //   /ragdoll probe           the nearest living Ridden: its mesh, physics asset, collision, and the death-related
 //                            functions/properties of its classes, into the log (discovery). Also (step 2 discovery):
 //                            every setting that could push a body (mesh, movement, actor), all its components (hit,
@@ -1753,7 +1753,10 @@ static void sim_on(UObject *mesh) {
 // classes (DismemberedPieceSkelMeshActor, DismemberedPieceStaticMeshActor) and build 32 took the skeletal one, so none
 // of ours flew; now the static one, for pieces that have a static mesh (all of a Common's). Head test (Joon: vanilla
 // explosions take some heads): with `head` set, that share of victims also gets a Head entry (Head is in the config's
-// ExplodeRegions; a Common has no head piece), BreakOff, then Rupture if refused, logged.
+// ExplodeRegions; a Common has no head piece), BreakOff, then Rupture if refused, logged. Build 33's run: the game took
+// every head (BreakOff accepted, cut at neck_02, no piece thrown) and Joon saw them explode; build 34: half by default.
+// Build 33's blood paint took (spared bodies' Drench Bias 0.20 -> 0.42, as the kept victims'); its pieces hung in the
+// air (see piece_learn).
 #define ADDR_GMALLOC VA(0x1469E59F0ull)     // FMalloc* GMalloc; vtable +0x20 Realloc(this, ptr, size, align) (as models.c)
 typedef void *(*GmReallocFn)(void *self, void *p, size_t n, uint32_t align);
 static void *rd_realloc(void *p, size_t n) {
@@ -1804,7 +1807,7 @@ static int dism_on;                  // /ragdoll dismember on|off
 static int dism_min = 2, dism_max = 3;   // build 32: limbs per blast victim (/ragdoll dismember limbs <min> [max])
 static int dism_pieces = 1;          // build 32: our piece for every limb the game throws none for
 static int dism_big = 75;            // build 33: % of limbs whose big cut (an "Upper" region) is tried first
-static int dism_head;                // build 33: % of blast victims that also get a Head entry (test, 0 = off)
+static int dism_head = 50;           // % of blast victims that also lose the head (build 33 test; build 34: Joon, half)
 static int dism_type = -1;           // MutilationInfo.Type set by hand (/ragdoll dismember type <n>), -1 = BreakOff
 static int dism_type_set;            // set by hand
 static float dism_imp;               // |Impulse| to write: last seen, or set by hand (0 = 5000)
@@ -2135,11 +2138,45 @@ by_name:
 
 // one piece of `pe` (a DismembermentMeshPiece) thrown from where its bone is now, away from the blast at `speed`
 // cm/s give or take, spinning, with its blood spray; 0 = thrown, else a PF_* reason (piece_why)
-enum { PF_CLASS = 1, PF_CALLS, PF_SPAWN, PF_COMP, PF_MESH };
+enum { PF_CLASS = 1, PF_CALLS, PF_SPAWN, PF_COMP, PF_MESH, PF_PHYS };
 static const char *piece_why(int r) {
     static const char *const W[] = {"thrown", "no piece class loaded", "a call is missing", "the spawn failed",
-                                    "the piece has no static mesh component", "the component refused the mesh"};
-    return r >= 0 && r <= PF_MESH ? W[r] : "?";
+                                    "the piece has no static mesh component", "the component refused the mesh",
+                                    "its physics wouldn't start (removed)"};
+    return r >= 0 && r <= PF_PHYS ? W[r] : "?";
+}
+
+// Build 33's pieces all hung where the limb had been (Joon, 17 Oct 11:41: "left frozen where it was"; log: simulating 0
+// on every one): the piece actor comes inert, and the game sets its component up when it throws one. So ours get what
+// the game's own thrown piece has: its collision profile (read once off a simulating piece of the game's; the corpses'
+// "Ragdoll" until one is seen), physics collision on, mobility Movable; a piece whose physics still won't start is
+// removed rather than left hanging, and the first ones log the component's state.
+static int comp_byte(UObject *c, const char *fn) {   // a uint8 return value (GetCollisionEnabled), -1 = none
+    Call k;
+    if (!c || !call_prep(&k, c, fn)) return -1;
+    call_go(&k);
+    uint8_t *r = carg(&k, "ReturnValue");
+    return r ? *r : -1;
+}
+static int comp_mobility(UObject *c) { int32_t o = c ? ue_prop_offset(c, "Mobility") : -1; return o < 0 ? -1 : *((uint8_t *)c + o); }
+static int is_our_piece(UObject *a) {
+    for (int i = 0; i < PIECES_MAX; i++) if (pieces[i].a == a) return 1;
+    return 0;
+}
+static FName piece_prof;            // the game's thrown piece's collision profile, once seen
+static void piece_learn(UClass *pc) {   // from a piece of the game's that simulates (one is thrown per explosion)
+    if (piece_prof.idx || !pc) return;
+    UObject *list[64];
+    int n = actors_of(pc, list, 64);
+    for (int i = 0; i < n && i < 64; i++) {
+        UObject *comp = is_our_piece(list[i]) ? NULL : ue_get_ptr(list[i], "StaticMesh");
+        if (!comp || call_bool(comp, "IsSimulatingPhysics") != 1) continue;
+        char a[160], b[96];
+        piece_prof = collision_profile(comp);
+        LOG("ragdoll dismember: the game's thrown piece %s: collision profile %s, collision enabled %d, mobility %d (2 = movable)",
+            oname(list[i], a, sizeof a), ue_name(piece_prof, b, sizeof b), comp_byte(comp, "GetCollisionEnabled"), comp_mobility(comp));
+        return;
+    }
 }
 static int throw_piece(UClass *pc, UObject *mesh, const uint8_t *pe, const float blast[3], float speed) {
     UObject *sm = mi.p_sm ? *(UObject *const *)(pe + FP_OFFSET(mi.p_sm)) : NULL;
@@ -2175,10 +2212,36 @@ static int throw_piece(UClass *pc, UObject *mesh, const uint8_t *pe, const float
     call_go(&fin);
     UObject *comp = ue_get_ptr(act, "StaticMesh");
     if (!comp) comp = comp_of(act, "StaticMeshComponent");
-    if (!comp || !call_prep(&k, comp, "SetStaticMesh")) { call_void(act, "K2_DestroyActor"); return PF_COMP; }
+    if (!comp) { call_void(act, "K2_DestroyActor"); return PF_COMP; }
+    static int state_logs;
+    char b0[96], b1[96];
+    int mob0 = comp_mobility(comp), cen0 = comp_byte(comp, "GetCollisionEnabled");
+    FName prof0 = collision_profile(comp);
+    if (mob0 != 2 && call_prep(&k, comp, "SetMobility")) { SET(&k, "NewMobility", uint8_t, 2); call_go(&k); }   // Movable
+    if (!call_prep(&k, comp, "SetStaticMesh")) { call_void(act, "K2_DestroyActor"); return PF_COMP; }
     SET(&k, "NewMesh", UObject *, sm);
     call_go(&k);
-    if (ue_get_ptr(comp, "StaticMesh") != sm) { call_void(act, "K2_DestroyActor"); return PF_MESH; }   // refused (mobility)
+    if (ue_get_ptr(comp, "StaticMesh") != sm) { call_void(act, "K2_DestroyActor"); return PF_MESH; }
+    static FName ragdoll_prof;
+    if (!ragdoll_prof.idx) ragdoll_prof = fname_of(L"Ragdoll");
+    FName prof = piece_prof.idx ? piece_prof : ragdoll_prof;
+    if (call_prep(&k, comp, "SetCollisionProfileName")) { SET(&k, "InCollisionProfileName", FName, prof); call_go(&k); }
+    int cen = comp_byte(comp, "GetCollisionEnabled");
+    if (cen >= 0 && cen < 2 && call_prep(&k, comp, "SetCollisionEnabled")) {   // physics collision: needed to simulate
+        SET(&k, "NewType", uint8_t, 3);   // QueryAndPhysics
+        call_go(&k);
+    }
+    if (call_prep(&k, comp, "SetSimulatePhysics")) { SET(&k, "bSimulate", uint8_t, 1); call_go(&k); }
+    int sim = call_bool(comp, "IsSimulatingPhysics");
+    if (state_logs < 3 || sim != 1) {
+        if (state_logs < 8) {
+            state_logs++;
+            LOG("ragdoll dismember: our piece: spawned with mobility %d, collision enabled %d, profile %s; now mobility %d, "
+                "collision enabled %d, profile %s, simulating %d", mob0, cen0, ue_name(prof0, b0, sizeof b0), comp_mobility(comp),
+                comp_byte(comp, "GetCollisionEnabled"), ue_name(collision_profile(comp), b1, sizeof b1), sim);
+        }
+    }
+    if (sim != 1) { call_void(act, "K2_DestroyActor"); return PF_PHYS; }   // never left hanging in the air
     // away from the blast, spread out and a little up; 0.6-1.2 x the body's own push
     float d[3], len = 0.f;
     for (int c = 0; c < 3; c++) { d[c] = xf[4 + c] - blast[c]; len += d[c] * d[c]; }
@@ -2188,7 +2251,6 @@ static int throw_piece(UClass *pc, UObject *mesh, const uint8_t *pe, const float
     d[2] += 0.35f;
     len = sqrtf(d[0] * d[0] + d[1] * d[1] + d[2] * d[2]);
     float v = speed * (0.6f + 0.6f * frand());
-    if (call_prep(&k, comp, "SetSimulatePhysics")) { SET(&k, "bSimulate", uint8_t, 1); call_go(&k); }
     if (call_prep(&k, comp, "SetPhysicsLinearVelocity")) {
         float *nv = carg(&k, "NewVel");
         if (nv) for (int c = 0; c < 3; c++) nv[c] = d[c] / len * v;
@@ -2430,6 +2492,7 @@ static void dismember(Tracked *t, UObject *mesh, float dv, Blast *bl) {
     t->hid = hidden_bodies(mesh);
     // a piece for every limb the game threw none for (it throws one per explosion at most)
     if (!pc && n_throw) pc = piece_class(mut);   // the game may have loaded it inside its limb code just now
+    if (n_throw) piece_learn(pc);
     for (int i = 0; i < n_throw; i++) {
         const uint8_t *pe = (const uint8_t *)pcs->data + (size_t)throw_ix[i] * mi.pel;
         int r = throw_piece(pc, mesh, pe, t->blast_at, dv > 0.f ? dv : 1000.f);
@@ -3185,7 +3248,7 @@ void ragdoll_slash(char *rest, Out *o) {
             dism_big = v < 0 ? 0 : v > 100 ? 100 : v;
         }
         else if (arg && !strcmp(arg, "head") && arg2 && (isdigit((unsigned char)arg2[0]) || !strcmp(arg2, "on") || !strcmp(arg2, "off"))) {
-            int v = !strcmp(arg2, "on") ? 100 : !strcmp(arg2, "off") ? 0 : atoi(arg2);   // % of victims (test)
+            int v = !strcmp(arg2, "on") ? 50 : !strcmp(arg2, "off") ? 0 : atoi(arg2);   // % of victims
             dism_head = v < 0 ? 0 : v > 100 ? 100 : v;
             head_logs = 0;
         }
@@ -3208,7 +3271,7 @@ void ragdoll_slash(char *rest, Out *o) {
                      dism_imp > 0 ? dism_imp : 5000.f, dism_imp_set ? " (set)" : dism_imp > 0 ? " (seen)" : " (default)");
         out_printf(o, "/ragdoll dismember: %s (default off): blast victims lose %d-%d limbs (limbs <min> [max], 1-4; one arm at "
                       "most, the game refuses a second), a different limb each; big cuts (elbow, knee) %d%% of the time, else "
-                      "wrist or ankle (big <0-100>, default 75); head test %d%% of victims (head <0-100|on|off>, default off); "
+                      "wrist or ankle (big <0-100>, default 75); heads off on %d%% of victims (head <0-100|on|off>, default 50); "
                       "pieces of ours %s (a flying piece for each limb the game throws none for); Type %d%s, impulse %.0f; so far "
                       "%d bodies, %d limbs off (%d big, %d small), %d refused, heads off %d of %d tried, pieces %d by the game + "
                       "%d by us (%d failed)\n", dism_on ? "on" : "off", dism_min, dism_max, dism_big, dism_head,
