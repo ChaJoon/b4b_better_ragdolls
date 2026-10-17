@@ -1,3 +1,62 @@
+# b4b_better_ragdolls
+
+A fork of [b4b-coop](https://github.com/actuallydan/b4b-coop) that makes the Ridden die properly: physics ragdolls,
+bodies thrown by shots and blasts, and dismemberment. Everything else is b4b-coop as released (the base version is in
+`VERSION`); its own README follows below this section.
+
+> Unofficial and experimental. Built with heavy AI help (Claude); the commits say so. Report problems with the
+> ragdolls in **this repo's Issues**, not to b4b-coop.
+
+## What it changes
+
+- **Bodies fall all the way.** The game already ragdolls Ridden at death, but its death animation steers the body,
+  and its "settled" check freezes bodies still moving at up to ~5 m/s, so most freeze mid-fall. Here the animation is
+  cut and the freeze waits until the body has really come to rest.
+- **The killing hit throws the body**, with a strength per weapon type (pistol, SMG, rifle, LMG, shotgun, sniper).
+- **Blasts** (frags, pipe bombs, barrels, propane) throw bodies from the explosion instead of turning nearby ones into
+  blood bags, and take 2-3 limbs (and sometimes the head) off through the game's own dismemberment.
+- **Shooting a body that is already down pushes it.**
+- Reeker and Exploder pops, and the gameplay of explosions, are left as the game does them.
+
+## Status
+
+- Tested in co-op (17 Oct 2026): host on Linux (Proton), two friends on native Windows, all running this build.
+  Protocol unchanged, so it also plays with players on stock b4b-coop of the same protocol.
+- Performance lightly tested: no stutters in hordes on a fairly strong PC. Not tried on weak machines.
+- The ragdolls run on each PC that has this build. Two parts come from the host and reach every player: refused blood
+  bags and lost limbs.
+
+## Install
+
+1. Install b4b-coop as its README explains (below), using the release that matches this fork's `VERSION`.
+2. With the game closed, replace both files with this fork's build (Releases):
+   - `xinput1_3.dll` next to `Back4Blood.exe`
+   - `X3DAudio1_7.dll` in `Gobi\Binaries\Win64\`
+3. Start a co-op game and type `/ragdoll on` in chat once. It stays on, and every setting is saved in `b4bcoop.ini`.
+
+Keep both files from the same build. Automatic updates are **off by default** in this fork: an update would install
+the official b4b-coop and remove the ragdolls (`auto_update=1` in `b4bcoop.ini` turns them back on). Don't take mods
+into online play.
+
+## Commands
+
+| Command | Does |
+|---|---|
+| `/ragdoll on` / `off` | turn the ragdolls on or off (remembered) |
+| `/ragdoll` | status |
+| `/ragdoll push [x]`, `/ragdoll push <kind> <n>` | how hard the killing hit throws, overall or per weapon kind; no value shows the table |
+| `/ragdoll shot [x]` | how hard shots push bodies that are already down |
+| `/ragdoll gravity [x]` | extra gravity on falling bodies (default 1.3) |
+| `/ragdoll dismember on\|off\|limbs <min> [max]\|head <0-100>` | dismemberment of blast victims |
+| `/ragdoll blood on\|off` | paint spared blast victims with blood like the others |
+
+## Building
+
+`tools/fetch-deps.sh --build`, then `native/build.sh --release` (the DLLs land in `native/out/release/`). The build is
+reproducible. All ragdoll code is in `native/src/ragdoll.c`.
+
+---
+
 # b4b-coop
 
 Unofficial private co-op for **Back 4 Blood**: play the game's offline mode together with your Steam friends, up to
