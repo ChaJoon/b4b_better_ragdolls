@@ -1,7 +1,7 @@
 // Unit tests for the updater's checks (native/src/updcore.c), run on Linux by native/test/run.sh (also in CI):
 // SHA-256 vectors, ed25519 signatures (Monocypher-made and, with run.sh's files, OpenSSL-made like release.yml's),
 // the manifest, the download check (bad signature, bad hash, truncated), the zip reader, the install filter, the
-// GitHub release JSON and version order.
+// GitHub release JSON and version order, and the launcher's automatic-update decisions.
 //   updcore_test [<dir with run.sh fixtures>]
 #include <stdio.h>
 #include <stdlib.h>
@@ -300,10 +300,55 @@ static void test_json(const char *dir) {
     }
 }
 
+// the launcher's automatic update (native/launcher/redirect.c): what to ask GitHub for, what to install, what never
+static void test_auto(void) {
+    char v[40], pr[16], t[40];
+    // Steam's join string as presence.c writes it, inside the stub's command line
+    CHECK(upd_join_parse("\"C:\\B4B\\start_protected_game.exe\" Gobi -SaveToUserDir +b4bcoop_join steam:76561198000000001 proto:3 ver:0.9.12 addons:any", v, pr)
+          && !strcmp(v, "0.9.12") && !strcmp(pr, "3"));
+    CHECK(upd_join_parse(" Gobi +b4bcoop_join \"steam:1 proto:2 ver:0.6.1-test.1\" -windowed", v, pr) && !strcmp(v, "0.6.1-test.1") && !strcmp(pr, "2"));
+    CHECK(upd_join_parse(" +b4bcoop_join steam:1 -foo ver:9.9.9", v, pr) && !v[0] && !pr[0]);     // stops at the next option
+    CHECK(upd_join_parse(" +b4bcoop_join steam:1 proto:x ver:v1.2.3", v, pr) && !v[0] && !pr[0]);   // malformed: ignored
+    CHECK(upd_join_parse(" +b4bcoop_join steam:1", v, pr) && !v[0] && !pr[0]);                      // an older host
+    CHECK(!upd_join_parse(" Gobi -SaveToUserDir ver:1.2.3", v, pr) && !v[0]);
+    CHECK(!upd_join_parse(" +b4bcoop_joined ver:1.2.3", v, pr));
+    CHECK(!upd_join_parse(NULL, v, pr));
+    // the plan
+    CHECK(upd_auto_plan("0.9.10", 3, NULL, NULL, t) == UPD_AUTO_LATEST && !t[0]);
+    CHECK(upd_auto_plan("0.9.10", 3, "", "3", t) == UPD_AUTO_LATEST);
+    CHECK(upd_auto_plan("0.9.10", 3, "0.9.10", "3", t) == UPD_AUTO_NONE);                 // the host's = ours: no check
+    CHECK(upd_auto_plan("0.9.10", 3, "0.9.12", "3", t) == UPD_AUTO_TAG && !strcmp(t, "0.9.12"));   // newer: the host's
+    CHECK(upd_auto_plan("0.9.10", 3, "1.0.0", "4", t) == UPD_AUTO_TAG && !strcmp(t, "1.0.0"));
+    CHECK(upd_auto_plan("0.9.10", 3, "0.9.8", "3", t) == UPD_AUTO_NONE);                  // older, same protocol: joins as is
+    CHECK(upd_auto_plan("0.9.10", 3, "0.9.8", "", t) == UPD_AUTO_NONE);                   // protocol unknown: no downgrade
+    CHECK(upd_auto_plan("0.9.10", 3, "0.8.0", "2", t) == UPD_AUTO_TAG && !strcmp(t, "0.8.0"));   // older, other protocol
+    // what GitHub answered
+    CHECK(upd_auto_wanted(UPD_AUTO_LATEST, "0.9.10", "", "v0.9.11"));
+    CHECK(upd_auto_wanted(UPD_AUTO_LATEST, "0.9.10", "", "0.10.0"));
+    CHECK(!upd_auto_wanted(UPD_AUTO_LATEST, "0.9.10", "", "v0.9.10"));                     // same: nothing
+    CHECK(!upd_auto_wanted(UPD_AUTO_LATEST, "0.9.10", "", "v0.9.9"));                      // older: never by itself
+    CHECK(upd_auto_wanted(UPD_AUTO_LATEST, "0.9.10-test", "", "v0.9.10"));                 // a release after its pre-release
+    CHECK(!upd_auto_wanted(UPD_AUTO_LATEST, "0.9.10", "", "nightly"));
+    CHECK(upd_auto_wanted(UPD_AUTO_TAG, "0.9.10", "0.8.0", "v0.8.0"));
+    CHECK(!upd_auto_wanted(UPD_AUTO_TAG, "0.9.10", "0.8.0", "v0.8.1"));                    // not the version asked for
+    CHECK(!upd_auto_wanted(UPD_AUTO_TAG, "0.9.10", "0.9.10", "v0.9.10"));
+    CHECK(!upd_auto_wanted(UPD_AUTO_NONE, "0.9.10", "", "v1.0.0"));
+    CHECK(!strcmp(upd_tag_version("v1.2.3"), "1.2.3") && !strcmp(upd_tag_version("1.2.3"), "1.2.3") && !strcmp(upd_tag_version(NULL), ""));
+    // versions that were put back are not installed by themselves
+    CHECK(upd_auto_blocked("0.9.11", "0.9.11", ""));
+    CHECK(!upd_auto_blocked("0.9.12", "0.9.11", ""));
+    CHECK(upd_auto_blocked("0.9.11", "", "you went back from 0.9.11 to 0.9.10"));          // an older agent's Go back
+    CHECK(!upd_auto_blocked("0.9.1", "", "you went back from 0.9.11 to 0.9.10"));
+    CHECK(!upd_auto_blocked("0.9.11", "", "0.9.11 started fine"));
+    CHECK(!upd_auto_blocked("0.9.11", NULL, NULL));
+    CHECK(upd_auto_blocked("", NULL, NULL));
+}
+
 int main(int argc, char **argv) {
     const char *dir = argc > 1 ? argv[1] : NULL;
     test_sha256();
     test_versions();
+    test_auto();
     test_install_filter();
     test_manifest_and_download();
     test_json(dir ? dir : ".");

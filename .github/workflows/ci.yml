@@ -66,15 +66,20 @@ jobs:
           [ "$got" = "$want" ] || { echo "::error::unexpected zip contents: $got"; exit 1; }
           dlls="dist/b4bcoop/Gobi/Binaries/Win64/X3DAudio1_7.dll dist/b4bcoop/xinput1_3.dll"
           for dll in $dlls; do
-            for s in "server: listening" "exec failed" "rewardtest" "steamjoin" "Dev_JoinPool" "b4bcoop_protocol_override"; do
+            for s in "server: listening" "exec failed" "rewardtest" "steamjoin" "Dev_JoinPool" "b4bcoop_protocol_override" "B4B_LAUNCHER_UPDATE" "update_pubkey"; do
               if grep -qaF -- "$s" "$dll"; then echo "::error::player build $dll contains dev string '$s'"; exit 1; fi
             done
           done
           grep -qaF "b4bcoop loaded (player build)" dist/b4bcoop/Gobi/Binaries/Win64/X3DAudio1_7.dll
           grep -qaF "CreateProcessW" dist/b4bcoop/xinput1_3.dll   # the launch redirect, not a plain proxy
+          grep -qaF "auto-update-1" dist/b4bcoop/xinput1_3.dll    # the launcher updates b4bcoop before the game starts
+          od -An -tx1 -v dist/b4bcoop/xinput1_3.dll | tr -d ' \n' |
+            grep -q "$(tools/sign-release.sh pubhex docs/release-signing.pub.pem)" ||
+            { echo "::error::the launcher does not carry docs/release-signing.pub.pem (native/src/signkeys.h)"; exit 1; }
           # and the dev build still has them (so the check above means something)
           grep -qaF "server: listening" native/out/X3DAudio1_7.dll
           grep -qaF "server: listening" native/out/dwmapi.dll
+          grep -qaF "B4B_LAUNCHER_UPDATE" native/out/xinput1_3.dll
           ls -l native/out/*.dll $dlls
           cat dist/SHA256SUMS
           # the in-game updater: the manifest release.yml signs, and the agent carries the committed release public key

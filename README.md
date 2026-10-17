@@ -97,10 +97,14 @@ survivor. By default hosts let in players with any add-ons; a host can allow cos
 All chat commands and options: [docs/COMMANDS.md](docs/COMMANDS.md).
 
 ## Update
+By itself: b4bcoop checks GitHub for an update at each start and installs it before the game opens (a small window
+shows it; **Skip update** plays the version you have; `auto_update=0` turns it off). Joining a friend through Steam
+installs your friend's version, so the join works.
+
 In game: press **`~`**, tab **Updates** → **Check for updates** → **Download and install on next start**, then
-restart the game. Nothing is downloaded or changed until you click; the download must carry the b4bcoop release
-signature, and your `b4bcoop.ini`, add-ons and bans stay as they are. **Go back to ...** in the same tab returns to
-the version you had. Details: [docs/COMMANDS.md](docs/COMMANDS.md#updates).
+restart the game. Every download must carry the b4bcoop release signature, and your `b4bcoop.ini`, add-ons and bans
+stay as they are. **Go back to ...** in the same tab returns to the version you had. Details:
+[docs/COMMANDS.md](docs/COMMANDS.md#updates).
 
 By hand: download the new zip from [Releases](../../releases) and extract it over the old files ([Install](#install),
 step 3).
@@ -113,7 +117,7 @@ Delete these files from the game folder (Steam → right-click Back 4 Blood → 
     - `b4bcoop-COMMANDS.txt`
     - `b4bcoop-LICENSE.txt`
     - the `b4bcoop-addons` folder (only there if you installed add-ons)
-    - the `b4bcoop-update` folder (only there if you updated from the game)
+    - the `b4bcoop-update` folder (only there after an update)
     - the `b4bcoop-online` folder (only there while b4bcoop is switched off for online play)
 2. In `Gobi\Binaries\Win64`:
     - `X3DAudio1_7.dll`
@@ -193,10 +197,12 @@ Making your own add-ons: see the modkit ([modkit/README.md](modkit/README.md), `
   talking and blinking faces, and first-person arms. See [modkit/README.md](modkit/README.md).
 
 **Updates and safety**
-- **In-game updater** (`~` → Updates, since 0.7.0): checks GitHub, verifies the release signature, installs on the
-  next start, and can go back; an update that doesn't start properly is reverted automatically.
+- **Updates** before the game starts (checked at each start, `auto_update=0` turns it off) and in game (`~` →
+  Updates, since 0.7.0): from GitHub, the release signature verified, and it can go back; an update that doesn't
+  start properly is reverted automatically.
 - No traffic to the game's online services: they are blocked while the mod runs, and the game's own port only
-  listens on your PC. b4bcoop itself only talks to Steam (co-op) and GitHub (the add-on shop's list, updates).
+  listens on your PC. b4bcoop itself only talks to Steam (co-op) and GitHub (the update check at each start, the add-on shop's list,
+  updates).
 
 **Limits**
 - Tested on Linux (Proton) and Steam Deck; Windows is lightly tested (see Troubleshooting).
@@ -220,9 +226,10 @@ Making your own add-ons: see the modkit ([modkit/README.md](modkit/README.md), `
   `gh attestation verify b4bcoop-<version>.zip -R actuallydan/b4b-coop`. The build is reproducible:
   `tools/fetch-deps.sh --build` then `launch/package.sh` gives the same DLL hashes (`SHA256SUMS` lists them).
 - **Why antivirus may warn.** `X3DAudio1_7.dll` is an unsigned DLL that the game loads in place of a DirectX DLL and
-  that hooks game functions; `xinput1_3.dll` changes which program Steam's launcher starts (Windows). That is also
+  that hooks game functions; `xinput1_3.dll` changes which program Steam's launcher starts and downloads b4bcoop updates. That is also
   what some malware does, so heuristic scanners sometimes flag them. There is no installer. Network traffic: the
-  co-op session over Steam, and GitHub only for the add-on shop's list (once per game start, in Fort Hope; `shop=0`
+  co-op session over Steam, and GitHub only for the update check at each start (before the game opens; it installs a
+  newer release; `auto_update=0` turns it off), the add-on shop's list (once per game start, in Fort Hope; `shop=0`
   turns it off) and for updates and add-ons you click. If you don't trust the zip, build it yourself from the source.
 - **How it loads.** The game looks for `X3DAudio1_7.dll` (DirectX audio) in its own folder first, on Windows and under
   Proton; ours forwards to the real one. On Windows, Steam's Play button starts a small launcher that would start Easy
