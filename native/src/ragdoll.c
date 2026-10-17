@@ -15,8 +15,8 @@
 //   /ragdoll push [x]        the killing hit throws the body (step 2): overall strength x (0-10, default 4, off = 0);
 //   /ragdoll push <kind> <n> one weapon kind's strength in kg cm/s (HG, SMG, AR, LMG, SG, Sni, FragGrenade, default, ...)
 //   /ragdoll bloodbag [on|off] off (default): Ridden an explosion would burst stay bodies (ragdolled, pushed)
-//   /ragdoll dismember [on|off|type <n>|impulse <n>]  experiment, off by default: blast victims lose 2 limbs through
-//                            the game's MutilationState (see "dismemberment")
+//   /ragdoll dismember [on|off|type <n|auto>|impulse <n>]  experiment, off by default: blast victims lose 2 limbs
+//                            through the game's MutilationState (see "dismemberment")
 //   /ragdoll probe           the nearest living Ridden: its mesh, physics asset, collision, and the death-related
 //                            functions/properties of its classes, into the log (discovery). Also (step 2 discovery):
 //                            every setting that could push a body (mesh, movement, actor), all its components (hit,
@@ -1898,11 +1898,12 @@ static void sim_on(UObject *mesh) {
 //      the mutilation calls (ArmorComponent.OnMutilated ...) with their parameters: the game's own values (Type,
 //      Impulse) for a limb that came off (a Tallboy's arm);
 //   2. /ragdoll dismember on (off by default): a blast victim (spared blood bag or not) gets 2 random limb regions of
-//      its own pieces appended to MutilationState with the Type last seen on a real one, an impulse away from the
-//      blast, then OnRep_MutilationState is called here. Whether the game then hides the limb and throws the piece is
+//      its own pieces appended to MutilationState as BreakOff (EMutilationType, looked up by name; the Tallboy's real
+//      arm loss is BreakOff too), an impulse away from the blast, then OnRep_MutilationState is called here. Whether the game then hides the limb and throws the piece is
 //      what the run shows (and IsRegionDismembered after it). On the host the array also replicates to clients.
 //      Build 28 (Joon, 16 Oct 23:40): the game takes those limbs off (IsRegionDismembered 1, a few hands seen flying),
 //      but the bodies then barely moved. Build 29: before the push, our physics settings again after it, speeds logged.
+//      Build 30: BreakOff from the game's enum (build 29 waited for a real limb loss or /ragdoll dismember type).
 #define ADDR_GMALLOC VA(0x1469E59F0ull)     // FMalloc* GMalloc; vtable +0x20 Realloc(this, ptr, size, align) (as models.c)
 typedef void *(*GmReallocFn)(void *self, void *p, size_t n, uint32_t align);
 static void *rd_realloc(void *p, size_t n) {
@@ -1911,8 +1912,8 @@ static void *rd_realloc(void *p, size_t n) {
 }
 
 static int dism_on;                  // /ragdoll dismember on|off
-static int dism_type = -1;           // MutilationInfo.Type to write: the last one seen on a real entry, or set by hand
-static int dism_type_set;            // set by hand (not overwritten by what is seen)
+static int dism_type = -1;           // MutilationInfo.Type set by hand (/ragdoll dismember type <n>), -1 = BreakOff
+static int dism_type_set;            // set by hand
 static float dism_imp;               // |Impulse| to write: last seen, or set by hand (0 = 5000)
 static int dism_imp_set, dism_logs, mstate_logs, n_dism, n_dism_fail, dism_traced;
 static struct {
@@ -1920,26 +1921,31 @@ static struct {
     FField *arr, *pieces;
     int32_t el, pel;
     FField *region, *type, *impulse, *point, *source, *p_region, *p_bone;
+    int breakoff;                    // EMutilationType::BreakOff (a limb off, as the Tallboy's arm: build 28), -1 unknown
 } mi;
 
 // the names of an enum property's values, so the log says what Type 2 means. Layout as tools/sdkdump.py (which dumped
 // all 1442 enums) and docs/NOTES.md: FByteProperty::Enum and FEnumProperty::UnderlyingProp at +0x78, FEnumProperty::Enum
 // at +0x80; UEnum::Names (TArray<TPair<FName, int64>>, 16-byte entries) at +0x48, stock 0x40 + 8 for this engine's
 // bigger UObject. (Build 27 read +0x40, CppType's length fields, as the array and crashed the game at the first body.)
-static void enum_names(FField *p, char *out, size_t n) {
+static UObject *prop_enum(FField *p) {   // the property's UEnum, NULL if it isn't one we can check
     char t[64], b[96];
-    out[0] = 0;
     ue_name(*(FName *)FF_CLASS(p), t, sizeof t);
     UObject *e = !strcmp(t, "EnumProperty") ? *(UObject **)((char *)p + 0x80) : !strcmp(t, "ByteProperty") ? FP_SUB(p) : NULL;
-    if (!e || U_INDEX(e) < 0 || U_INDEX(e) >= ue_num_objects() || ue_object_at(U_INDEX(e)) != e) { snprintf(out, n, "?"); return; }
+    if (!e || U_INDEX(e) < 0 || U_INDEX(e) >= ue_num_objects() || ue_object_at(U_INDEX(e)) != e) return NULL;
     cname(e, b, sizeof b);
-    if (strcmp(b, "Enum") && strcmp(b, "UserDefinedEnum")) { snprintf(out, n, "? (%s)", b); return; }
-    const TArray *names = (const TArray *)((const char *)e + 0x48);
+    return !strcmp(b, "Enum") || !strcmp(b, "UserDefinedEnum") ? e : NULL;
+}
+static const TArray *enum_list(UObject *e) {   // its Names, NULL if the size looks wrong
+    const TArray *names = e ? (const TArray *)((const char *)e + 0x48) : NULL;
+    return names && names->data && names->num > 0 && names->num <= 256 && names->max >= names->num ? names : NULL;
+}
+static void enum_names(FField *p, char *out, size_t n) {
+    char b[96];
+    UObject *e = prop_enum(p);
+    const TArray *names = enum_list(e);
+    if (!names) { snprintf(out, n, "?"); return; }
     size_t k = (size_t)snprintf(out, n, "%s:", ue_obj_name(e, b, sizeof b));
-    if (!names->data || names->num <= 0 || names->num > 256 || names->max < names->num) {
-        snprintf(out + k, n - k, " ? (%d names)", names->num);
-        return;
-    }
     for (int i = 0; i < names->num && i < 40 && k + 8 < n; i++) {
         const uint8_t *pr = (const uint8_t *)names->data + (size_t)i * 16;
         ue_name(*(const FName *)pr, b, sizeof b);
@@ -1947,12 +1953,24 @@ static void enum_names(FField *p, char *out, size_t n) {
         k += (size_t)snprintf(out + k, n - k, " %s=%lld", sh ? sh + 2 : b, (long long)*(const int64_t *)(pr + 8));
     }
 }
+static int enum_value(FField *p, const char *name) {   // the value named `name` (after "Enum::"), -1 if none
+    char b[96];
+    const TArray *names = enum_list(prop_enum(p));
+    for (int i = 0; names && i < names->num; i++) {
+        const uint8_t *pr = (const uint8_t *)names->data + (size_t)i * 16;
+        ue_name(*(const FName *)pr, b, sizeof b);
+        const char *sh = strstr(b, "::");
+        if (!strcmp(sh ? sh + 2 : b, name)) return (int)*(const int64_t *)(pr + 8);
+    }
+    return -1;
+}
 
-static void mi_init(UObject *mut) {
-    if (mi.state) return;
+static void mi_init(UClass *mc) {   // MutilationComponent's class
+    if (mi.state || !mc) return;
     mi.state = -1;
-    mi.arr = ue_find_prop(U_CLASS(mut), "MutilationState");
-    mi.pieces = ue_find_prop(U_CLASS(mut), "DismembermentMeshPieces");
+    mi.breakoff = -1;
+    mi.arr = ue_find_prop(mc, "MutilationState");
+    mi.pieces = ue_find_prop(mc, "DismembermentMeshPieces");
     FField *in = mi.arr ? *(FField **)((char *)mi.arr + 0x78) : NULL, *pin = mi.pieces ? *(FField **)((char *)mi.pieces + 0x78) : NULL;
     UStruct *st = in ? (UStruct *)FP_SUB(in) : NULL, *pst = pin ? (UStruct *)FP_SUB(pin) : NULL;
     if (!st || !pst) { LOG("ragdoll dismember: MutilationState / DismembermentMeshPieces not found: off"); return; }
@@ -1973,14 +1991,15 @@ static void mi_init(UObject *mut) {
     enum_names(mi.region, en, sizeof en);
     LOG("ragdoll dismember: Region %s", en);
     enum_names(mi.type, en, sizeof en);
-    LOG("ragdoll dismember: Type %s", en);
+    mi.breakoff = enum_value(mi.type, "BreakOff");
+    LOG("ragdoll dismember: Type %s; limbs off = BreakOff = %d", en, mi.breakoff);
 }
 
-// at ragdoll time, every body: what the game wrote (learns Type and impulse size from real entries)
+// at ragdoll time, every body: what the game wrote (learns the impulse size from real entries; the Tallboy's arm: 0)
 static void mstate_note(Tracked *t) {
     UObject *mut = comp_of(t->a, "MutilationComponent");
     if (!mut) return;
-    mi_init(mut);
+    mi_init(U_CLASS(mut));
     if (mi.state != 1) return;
     const TArray *arr = (const TArray *)((const uint8_t *)mut + FP_OFFSET(mi.arr));
     if (!arr->data || arr->num <= 0) return;
@@ -1989,7 +2008,6 @@ static void mstate_note(Tracked *t) {
         const uint8_t *e = (const uint8_t *)arr->data + (size_t)i * mi.el;
         const float *im = (const float *)(e + FP_OFFSET(mi.impulse));
         float len = sqrtf(im[0] * im[0] + im[1] * im[1] + im[2] * im[2]);
-        if (!dism_type_set) dism_type = e[FP_OFFSET(mi.type)];
         if (!dism_imp_set && len > 0.f) dism_imp = len;
         if (mstate_logs < 30) {
             fmt_prop(*(FField **)((char *)mi.arr + 0x78), e, v, sizeof v, 1);
@@ -2005,10 +2023,11 @@ static void dismember(Tracked *t, UObject *mesh) {
     if (!dism_on || !t->blast_ok) return;
     UObject *mut = comp_of(t->a, "MutilationComponent");
     if (!mut) return;
-    mi_init(mut);
+    mi_init(U_CLASS(mut));
     if (mi.state != 1) return;
-    if (dism_type < 0) {
-        if (dism_logs++ < 3) LOG("ragdoll dismember: no real dismemberment seen yet (Type unknown): shoot a limb off first, or /ragdoll dismember type <n>");
+    int type = dism_type_set ? dism_type : mi.breakoff;
+    if (type < 0) {
+        if (dism_logs++ < 3) LOG("ragdoll dismember: the game's EMutilationType has no BreakOff: /ragdoll dismember type <n>");
         return;
     }
     TArray *arr = (TArray *)((uint8_t *)mut + FP_OFFSET(mi.arr));
@@ -2039,7 +2058,7 @@ static void dismember(Tracked *t, UObject *mesh) {
         uint8_t *e = (uint8_t *)arr->data + (size_t)arr->num * (size_t)mi.el;
         memset(e, 0, (size_t)mi.el);
         e[FP_OFFSET(mi.region)] = region;
-        e[FP_OFFSET(mi.type)] = (uint8_t)dism_type;
+        e[FP_OFFSET(mi.type)] = (uint8_t)type;
         float *im = (float *)(e + FP_OFFSET(mi.impulse)), *ip = (float *)(e + FP_OFFSET(mi.point));
         for (int c = 0; c < 3; c++) { im[c] = d[c] / len * mag; ip[c] = t->blast_at[c]; }
         arr->num++;
@@ -2087,7 +2106,7 @@ static void dismember(Tracked *t, UObject *mesh) {
             q += (size_t)snprintf(res + q, sizeof res - q, "%s%d", q ? "/" : "", r);
         }
         LOG("ragdoll dismember: %s: regions %s appended (Type %d, impulse %.0f away from the blast), OnRep_MutilationState %s, "
-            "IsRegionDismembered %s, state now %d entries", oname(t->a, a, sizeof a), regs, dism_type, mag,
+            "IsRegionDismembered %s, state now %d entries", oname(t->a, a, sizeof a), regs, type, mag,
             called ? "called" : "NOT FOUND", res, arr->num);
     }
 }
@@ -2594,16 +2613,20 @@ void ragdoll_slash(char *rest, Out *o) {
             dism_on = !strcmp(arg, "on");
             dism_logs = dism_traced = dism_built_logs = vel_logs_d = vel_logs_c = 0;
         }
-        else if (arg && !strcmp(arg, "type") && arg2) { int v = atoi(arg2); dism_type = v < 0 ? -1 : v > 255 ? 255 : v; dism_type_set = dism_type >= 0; }
+        else if (arg && !strcmp(arg, "type") && arg2) {   // a number, or "auto" for BreakOff again
+            int v = strcmp(arg2, "auto") ? atoi(arg2) : -1;
+            dism_type = v < 0 ? -1 : v > 255 ? 255 : v;
+            dism_type_set = dism_type >= 0;
+        }
         else if (arg && !strcmp(arg, "impulse") && arg2) { float v = (float)atof(arg2); dism_imp = v < 0 ? 0 : v; dism_imp_set = v > 0; }
-        else if (arg) { out_printf(o, "usage: /ragdoll dismember [on|off|type <n>|impulse <n>]\n"); return; }
-        if (arg) LOG("ragdoll dismember: %s, Type %d%s, impulse %.0f%s", dism_on ? "on" : "off", dism_type,
-                     dism_type_set ? " (set)" : dism_type < 0 ? " (none seen yet)" : " (seen)", dism_imp > 0 ? dism_imp : 5000.f,
-                     dism_imp_set ? " (set)" : dism_imp > 0 ? " (seen)" : " (default)");
+        else if (arg) { out_printf(o, "usage: /ragdoll dismember [on|off|type <n|auto>|impulse <n>]\n"); return; }
+        mi_init(cls("MutilationComponent"));   // the BreakOff value, from the game's enum (once)
+        int type = dism_type_set ? dism_type : mi.breakoff;
+        const char *src = dism_type_set ? " (set)" : type >= 0 ? " (BreakOff, from the game)" : " (BreakOff not found: /ragdoll dismember type <n>)";
+        if (arg) LOG("ragdoll dismember: %s, Type %d%s, impulse %.0f%s", dism_on ? "on" : "off", type, src,
+                     dism_imp > 0 ? dism_imp : 5000.f, dism_imp_set ? " (set)" : dism_imp > 0 ? " (seen)" : " (default)");
         out_printf(o, "/ragdoll dismember: %s (experiment, default off): blast victims lose 2 limbs; Type %d%s, impulse %.0f; "
-                      "%d done, %d failed\n", dism_on ? "on" : "off", dism_type,
-                   dism_type < 0 ? " (none seen yet: shoot a limb off first)" : dism_type_set ? " (set)" : " (seen on a real one)",
-                   dism_imp > 0 ? dism_imp : 5000.f, n_dism, n_dism_fail);
+                      "%d done, %d failed\n", dism_on ? "on" : "off", type, src, dism_imp > 0 ? dism_imp : 5000.f, n_dism, n_dism_fail);
     } else if (!strcmp(verb, "bloodbag")) {
         if (arg && (!strcmp(arg, "on") || !strcmp(arg, "off"))) {
             bloodbag_on = !strcmp(arg, "on");
@@ -2653,7 +2676,7 @@ void ragdoll_slash(char *rest, Out *o) {
         if (tracing) trace_stop("restarted");
         if (trace_start(s, o) == 0) out_printf(o, "/ragdoll trace: %.0f s, kill a few Ridden now (log: \"ragdoll trace\" lines)\n", s);
     } else {
-        out_printf(o, "usage: /ragdoll [on [delay]|off|status|mass [x]|gravity [x]|deadline [s]|push [x|on|off|<kind> <n>]|bloodbag [on|off]|dismember [on|off|type <n>|impulse <n>]|probe|trace [secs]]\n");
+        out_printf(o, "usage: /ragdoll [on [delay]|off|status|mass [x]|gravity [x]|deadline [s]|push [x|on|off|<kind> <n>]|bloodbag [on|off]|dismember [on|off|type <n|auto>|impulse <n>]|probe|trace [secs]]\n");
     }
 }
 
