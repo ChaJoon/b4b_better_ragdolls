@@ -576,10 +576,10 @@ before the game opens. This is done by the b4bcoop launcher (`xinput1_3.dll` nex
   usual and you see nothing.
 - A newer release: a small window **Updating b4bcoop to X.Y.Z** shows the download. It is checked exactly like the
   tab's download (size, SHA-256, the b4bcoop release signature), installed the same way (the old files go to
-  `b4bcoop-updateackup`; `b4bcoop.ini`, add-ons, bans and logs are never touched), and then the game starts with
+  `b4bcoop-update\backup`; `b4bcoop.ini`, add-ons, bans and logs are never touched), and then the game starts with
   the new version. It takes a few seconds.
-- **Cancel: start b4bcoop ...** (or Esc, the window's X, controller **B**) starts the game with the version you have.
-  Only during the last moment, while the files are being swapped, does it wait until that's done.
+- **Skip update** (or Esc, the window's X, controller **B**) starts the game with the version you have.
+  It is greyed out only for the last moment, while the files are being swapped (under a second).
 - Anything goes wrong (download, check, a file that can't be moved): nothing is changed, the window says why for a few
   seconds, and the game starts with the version you have.
 - **Joining a friend through Steam** (Join Game or an invite): it installs **your friend's version** instead of the

@@ -98,7 +98,7 @@ All chat commands and options: [docs/COMMANDS.md](docs/COMMANDS.md).
 
 ## Update
 By itself: b4bcoop checks GitHub for an update at each start and installs it before the game opens (a small window
-shows it; **Cancel** starts the version you have; `auto_update=0` turns it off). Joining a friend through Steam
+shows it; **Skip update** plays the version you have; `auto_update=0` turns it off). Joining a friend through Steam
 installs your friend's version, so the join works.
 
 In game: press **`~`**, tab **Updates** → **Check for updates** → **Download and install on next start**, then

@@ -22,7 +22,7 @@ Detailed engine findings (addresses, obfuscated layouts, class names): `docs/NOT
   pick moves them back. Co-op starts then **update b4bcoop before the game starts** (`auto_update()`, never on the
   Online path): GitHub `releases/latest` (or a Steam join's `ver:` = the host's version, `upd_auto_plan`), 2 s for
   the check, nothing shown when offline/no answer/nothing newer; a newer release in a task dialog with progress +
-  Cancel, verified and installed with the tab's code (`updinst.c`), its own mapped DLL renamed into the backup;
+  Skip update, verified and installed with the tab's code (`updinst.c`), its own mapped DLL renamed into the backup;
   versions put back (`state.txt skip=`, `failed\`) not again by itself; result in the launcher log +
   `b4bcoop-update\auto.txt`. Ini `auto_update` (player builds default 1, dev builds 0). Dev: env
   `B4B_LAUNCHER_ANSWER=coop|online[+remember]|cancel|wait`, `B4B_LAUNCHER_UPDATE=off|on|cancel`, ini
@@ -437,6 +437,14 @@ next start, Wear over a `/model` wish kept after a restart, host Wear swap betwe
 as a client (host with the add-on sees it, a client without sees the survivor), a host with `addons_policy=none` keeps the client's Add for the next start; ~75 checks, ~12 min;
 `B4B_LANE=2 B4B_STEAM=flatpak B4B_GPU=4090 tools/shop-test.py [--no-lock]`; test paks in
 `~/.local/share/b4b-coop/shop-test/src/`, never committed).
+**Automatic update before the game starts: `tools/autoupdate-test.py`** (live, test instance 1 through the root stub,
+never online; two test releases of this tree signed with a throwaway key on a fake API, ini keys in the instance's own
+ini): the real `releases/latest` (same version: nothing shown) with the dev and the player launcher, no answer / no DNS /
+a slow API (≤ 2 s, no window), newer release with and without the prompt (window, mapped launcher renamed into the
+backup, new version runs + healthy, Updates tab), a slow download (gamescope frames every 0.5 s), refused downloads,
+Skip during the download, the four Steam join plans, pending / skip= / failed\ / Go back / automatic revert never
+reinstalled, `auto_update=0` + the tab's checkbox; window screenshots through the launcher's dev `B4B_LAUNCHER_SHOT`;
+56 checks, ~12 min; `B4B_LANE=2 B4B_STEAM=flatpak B4B_GPU=4090 tools/autoupdate-test.py [--no-lock] [--only a,b]`.
 **Launch choice co-op / Online (#47): `tools/online-test.py`** (live, test instance 1 on its own prefix and ini, never
 online: EAC's launcher is only ever created suspended, then killed): the agent's Wine DllOverride for the launcher,
 the sign-in popup's Online answered Offline (`auto_signin=0`), the stub's prompt (no input: co-op after the 15 s

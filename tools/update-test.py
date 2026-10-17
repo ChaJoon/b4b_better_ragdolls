@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
 """Live test of the in-game updater (#34, docs/investigations/updater.md "Tests") on test instance 1.
 
-Builds a "newer release" dev build (B4B_BUILD_VERSION, default 0.6.2-test), packs it like launch/package.sh (plus an
+Builds a "newer release" dev build (B4B_BUILD_VERSION, default VERSION's next patch, e.g. 0.9.11-test), packs it like
+launch/package.sh (plus an
 ini the updater must never install), signs it with a throwaway ed25519 key (tools/sign-release.sh) and serves a fake
 GitHub API on 127.0.0.1 (asset links redirect once, like github.com). The instance runs the dev build under test with
 the dev ini keys update_pubkey= (the throwaway key) and update_api= (this server). Steps:
-  1. real GitHub check over HTTPS (WinHTTP + netguard's updater scope): a reply is parsed (v0.6.1: "no in-game
-     update files"), and api.github.com is blocked again afterwards
+  1. real GitHub check over HTTPS (WinHTTP + netguard's updater scope) with the release key: the latest release's
+     signed manifest verifies (or, before 0.6.2, "no in-game update files"), and api.github.com is blocked again
+     afterwards; then the test key and the fake API are applied live
   2. refused downloads: bad manifest signature, bad zip hash, bad zip signature, truncated zip; nothing changes
   3. check -> download -> install: files swapped, backup kept, b4bcoop.ini (game folder + instance) and add-ons
      unchanged; restart: the new version runs and marks itself healthy
@@ -15,7 +17,7 @@ the dev ini keys update_pubkey= (the throwaway key) and update_api= (this server
      puts the previous version back and runs nothing; the next start is the previous version
 Needs the build under test installed in the lane's game folder (launch/install.sh) and the lane's lock (taken here
 unless --no-lock). Artifacts in /tmp/b4b-update-<time>/. Exit 1 on failure.
-  B4B_LANE=2 B4B_STEAM=flatpak B4B_GPU=4090 tools/update-test.py [--no-lock] [--version 0.6.2-test]"""
+  B4B_LANE=2 B4B_STEAM=flatpak B4B_GPU=4090 tools/update-test.py [--no-lock] [--version 0.9.11-test]"""
 import argparse, hashlib, http.server, json, os, re, shutil, socket, subprocess, sys, threading, time, zipfile
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from lane import GAME, ROOT, PORT_BASE, LANE
@@ -196,7 +198,7 @@ def newest_log():
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--no-lock", action="store_true", help="the lane's gamelock is already held")
-    ap.add_argument("--version", default="0.6.2-test")
+    ap.add_argument("--version", default="", help="the test release's version (default: VERSION's next patch -test)")
     ap.add_argument("--skip-github", action="store_true", help="skip the real api.github.com check")
     a = ap.parse_args()
     os.makedirs(OUT)
@@ -218,6 +220,9 @@ def main():
 def run(a):
     old = re.search(r'version=(\S+)', open(os.path.join(REPO, "VERSION")).read()).group(1)
     proto = int(re.search(r'protocol=(\d+)', open(os.path.join(REPO, "VERSION")).read()).group(1))
+    if not a.version:   # must be newer than the build under test, or the tab offers "this older version"
+        x, y, z = (int(n) for n in old.split("-")[0].split("."))
+        a.version = f"{x}.{y}.{z + 1}-test"
     rel = Release(a.version, proto)
     srv = serve(rel)
     api = f"update_api=http://127.0.0.1:{Handler.port}"
@@ -226,8 +231,8 @@ def run(a):
     prefix_ini = os.path.join(ROOT, "test1", "b4bcoop.ini")
     old_dll = sha(os.path.join(BIN, "X3DAudio1_7.dll"))
 
-    # 1. the real GitHub API over HTTPS, then the fake one
-    if not start_instance([key]): return check("instance 1 up", False)
+    # 1. the real GitHub API over HTTPS with the release key (the real manifest verifies), then the test key + fake API
+    if not start_instance([]): return check("instance 1 up", False)
     s = status()
     check("updater available", "unavailable=-" in s, s.strip().splitlines()[-1] if s else "no agent")
     if not a.skip_github:
@@ -250,9 +255,10 @@ def run(a):
         check("real asset download (github.com redirect) in the scope", f"sha256 {want}" in r, r.strip()[:120])
         r = agent("update", "fetch", url, "noscope", timeout=60)
         check("the same download outside the scope is blocked by netguard", "fetch failed" in r, r.strip()[:120])
-    with open(prefix_ini, "a") as f: f.write(api + "\n")
+    with open(prefix_ini, "a") as f: f.write(key + "\n" + api + "\n")
     time.sleep(4)
-    check("dev update_api applied live", f"api=http://127.0.0.1:{Handler.port}" in status())
+    s = status()
+    check("dev update_api + update_pubkey applied live", f"api=http://127.0.0.1:{Handler.port}" in s and "key=test" in s)
 
     # 2. refused downloads; nothing may change
     before = snapshot(prefix_ini)

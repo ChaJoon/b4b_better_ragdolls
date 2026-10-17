@@ -161,7 +161,7 @@ players with any add-ons; a host can allow cosmetic ones only, or none (addons_p
 joining). Details: b4bcoop-COMMANDS.txt, "Add-ons".
 
 UPDATE: by itself: b4bcoop checks GitHub for an update at each start and installs it before the game opens (a
-small window shows it; Cancel starts the version you have; auto_update=0 turns it off). Joining a friend through
+small window shows it; Skip update plays the version you have; auto_update=0 turns it off). Joining a friend through
 Steam installs your friend's version. In game: press ~, tab Updates > Check for updates > Download and install on
 next start, then restart the game. Every download must carry the b4bcoop release signature, and your b4bcoop.ini,
 add-ons and bans stay as they are. "Go back to ..." in the same tab returns to the version you had. Or by hand:
