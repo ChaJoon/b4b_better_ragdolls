@@ -328,9 +328,17 @@ static void panel(void) {
     ov_text("Installed: b4bcoop %s (protocol %d)", B4B_VERSION, B4B_PROTOCOL);
     if (test_key) ov_text_warn("Dev build: update_pubkey= test key and %s", api);
     if (unavailable) { ov_text_warn("In-game updates are not available here: %s.", unavailable); return; }
-    ov_text_dim("Releases come from GitHub and must carry the b4bcoop release signature. b4bcoop.ini, add-ons, bans and "
-                "logs are never touched. Here nothing is downloaded or changed until you click; a new version starts with "
-                "your next game start.");
+    // the automatic update first: it is what most players use (the tab's own check below is by hand)
+    int on = auto_on;
+    if (ov_checkbox("Update b4bcoop automatically when the game starts##autoupdate", &on))
+        ov_setting("auto_update", on == AUTO_DEFAULT ? NULL : on ? "1" : "0", 1);
+    ov_text_dim("Before the game opens, b4bcoop asks GitHub for a newer version (2 seconds at most) and installs it. "
+                "Joining a friend through Steam gets the friend's version.");
+    if (!launcher_auto) ov_text_warn("Needs this version's b4bcoop launcher (xinput1_3.dll next to Back4Blood.exe, in the "
+                                     "zip and in every update); it isn't there or is older.");
+#ifndef B4B_RELEASE
+    ov_text_dim("Developer build: off unless auto_update=1 (env B4B_LAUNCHER_UPDATE=off|on|cancel overrides it).");
+#endif
     if (auto_note[0]) ov_text_dim("Last automatic update: %s.", auto_note);
     if (s.result[0] && strcmp(s.installed, B4B_VERSION) == 0 && strstr(s.result, "put back"))
         ov_text_warn("Last update: %s.", s.result);
@@ -346,10 +354,12 @@ static void panel(void) {
         ov_end_disabled();
     }
 
-    ov_heading("Updates");
+    ov_heading("Update by hand");
     ov_begin_disabled(running || installed_this_session, running ? "busy" : "restart the game first");
     if (ov_button("Check for updates")) check(NULL);
     ov_end_disabled();
+    ov_text_dim("Nothing is downloaded until you click; the new version starts with your next game start. Every release "
+                "must carry the b4bcoop release signature; b4bcoop.ini, add-ons, bans and logs are never touched.");
     if (phase == P_CHECKING) ov_text_dim("%s", msg);
     else if (phase == P_DOWNLOADING) {
         LONG64 got = dl_got;
@@ -375,23 +385,12 @@ static void panel(void) {
             }
         }
     }
-    ov_heading("At the game start");
-    int on = auto_on;
-    if (ov_checkbox("Update b4bcoop automatically when the game starts##autoupdate", &on))
-        ov_setting("auto_update", on == AUTO_DEFAULT ? NULL : on ? "1" : "0", 1);
-    ov_text_dim("Before the game opens (co-op starts only), b4bcoop asks GitHub for a newer release, for 2 seconds at most, "
-                "and installs it with a progress window (Cancel starts the version you have). Joining a friend through "
-                "Steam gets the friend's version instead. Offline or no answer: the game starts as usual.");
-    if (!launcher_auto) ov_text_warn("Needs this version's b4bcoop launcher (xinput1_3.dll next to Back4Blood.exe, in the "
-                                     "zip and in every update); it isn't there or is older.");
-#ifndef B4B_RELEASE
-    ov_text_dim("Developer build: off unless auto_update=1 (env B4B_LAUNCHER_UPDATE=off|on|cancel overrides it).");
-#endif
 
     if (s.previous[0] && !strcmp(s.installed, B4B_VERSION)) {
         ov_heading("Previous version");
-        ov_text_dim("b4bcoop %s is kept in b4bcoop-update\\backup.%s", s.previous, s.pending ? " (If this version doesn't start "
-                    "properly twice, it is put back automatically.)" : "");
+        ov_text_dim("b4bcoop %s is kept in b4bcoop-update\\backup.%s After going back, %s isn't installed again by itself "
+                    "(Check for updates still can).", s.previous, s.pending ? " If this version doesn't start properly twice, it is "
+                    "put back automatically." : "", B4B_VERSION);
         char lab[80]; snprintf(lab, sizeof lab, "Go back to %s on next start##goback", s.previous);
         ov_begin_disabled(running || installed_this_session, running ? "busy" : "restart the game first");
         if (ov_button_confirm(lab, "Click again to go back")) { const char *e = go_back(); if (e) overlay_note(e); }

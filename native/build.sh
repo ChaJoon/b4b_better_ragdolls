@@ -63,6 +63,6 @@ agent dwmapi dwmapi.dll
 # code as the agent's Updates tab; WinHTTP loaded at run time)
 cc -I"$here/src" -I"$mc" -I"$mc/optional" -I"$puff" "$here/launcher/redirect.c" "$here/src/updinst.c" "$here/src/updcore.c" \
   "$mc/monocypher.c" "$mc/optional/monocypher-ed25519.c" "$puff/puff.c" \
-  "$here/launcher/launcher.rc" "$here/proxy/xinput1_3.c" "$here/proxy/xinput1_3.def" -o "$out/xinput1_3.dll"
+  "$here/launcher/launcher.rc" "$here/proxy/xinput1_3.c" "$here/proxy/xinput1_3.def" -lgdi32 -o "$out/xinput1_3.dll"
 rm -f "$out"/*.lib "$out"/*.pdb
 echo "built $out/{X3DAudio1_7,dwmapi,xinput1_3}.dll ($flavor, b4bcoop $version protocol $protocol)"
