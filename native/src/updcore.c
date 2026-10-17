@@ -138,6 +138,52 @@ int upd_version_cmp(const char *a, const char *b) {
     return *pa ? 1 : *pb ? -1 : 0;
 }
 
+const char *upd_tag_version(const char *tag) { return tag && tag[0] == 'v' ? tag + 1 : tag ? tag : ""; }
+
+// ---- automatic update at the game start (updcore.h) ----
+int upd_join_parse(const char *cmdline, char ver[40], char proto[16]) {
+    static const char tokname[] = "+b4bcoop_join";
+    ver[0] = proto[0] = 0;
+    const char *p = cmdline ? strstr(cmdline, tokname) : NULL;
+    if (!p) return 0;
+    p += sizeof tokname - 1;
+    if (*p && *p != ' ' && *p != '\t' && *p != '"') return 0;   // "+b4bcoop_joinx" is something else
+    for (;;) {   // the same token rules as presence.c's parse_connect: up to the next +option / -option
+        while (*p == ' ' || *p == '\t' || *p == '"') p++;
+        if (!*p || *p == '+' || *p == '-') break;
+        char tok[160]; size_t k = 0;
+        while (*p && *p != ' ' && *p != '\t' && *p != '"') { if (k < sizeof tok - 1) tok[k++] = *p; p++; }
+        tok[k] = 0;
+        if (!strncmp(tok, "ver:", 4) && upd_version_valid(tok + 4)) snprintf(ver, 40, "%s", tok + 4);
+        else if (!strncmp(tok, "proto:", 6) && tok[6] && strlen(tok + 6) < 6 && strspn(tok + 6, "0123456789") == strlen(tok + 6))
+            snprintf(proto, 16, "%s", tok + 6);
+    }
+    return 1;
+}
+int upd_auto_plan(const char *ours, int our_proto, const char *host_ver, const char *host_proto, char target[40]) {
+    target[0] = 0;
+    if (!host_ver || !upd_version_valid(host_ver)) return UPD_AUTO_LATEST;
+    int c = upd_version_cmp(host_ver, ours);
+    if (c == 0) return UPD_AUTO_NONE;
+    if (c < 0 && (!host_proto || !host_proto[0] || atoi(host_proto) == our_proto)) return UPD_AUTO_NONE;
+    snprintf(target, 40, "%s", host_ver);
+    return UPD_AUTO_TAG;
+}
+int upd_auto_wanted(int plan, const char *ours, const char *target, const char *tag) {
+    const char *v = upd_tag_version(tag);
+    if (!upd_version_valid(v)) return 0;
+    if (plan == UPD_AUTO_LATEST) return upd_version_cmp(v, ours) > 0;
+    if (plan == UPD_AUTO_TAG) return target && !strcmp(v, target) && strcmp(v, ours);
+    return 0;
+}
+int upd_auto_blocked(const char *ver, const char *state_skip, const char *state_result) {
+    if (!ver || !*ver) return 1;
+    if (state_skip && !strcmp(state_skip, ver)) return 1;
+    char pre[80];
+    snprintf(pre, sizeof pre, "you went back from %s to ", ver);
+    return state_result && !strncmp(state_result, pre, strlen(pre));
+}
+
 // ---- manifest ----
 int upd_manifest_parse(const char *txt, size_t n, UpdManifest *m, char *err, size_t en) {
     memset(m, 0, sizeof *m);

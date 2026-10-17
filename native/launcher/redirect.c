@@ -18,9 +18,23 @@
 // Windows loads this file by itself. Wine/Proton prefers its builtin xinput1_3 unless the prefix has a DllOverride:
 // the agent sets one for Back4Blood.exe on its first start (online.c), so Proton gets the same prompt from then on.
 // Pass-through (EAC, no prompt) when the agent isn't installed (neither in place nor switched off).
+// Automatic update (co-op starts only, never Online; docs/investigations/updater.md §7): before the game starts,
+// GitHub's releases/latest (or the Steam join's host version: releases/tags/v<ver>) is asked, with 2 s for the whole
+// check; no answer, an error or nothing newer = the game starts as before. A newer release is downloaded, verified
+// and installed exactly like the ~ window's Updates tab does it (updinst.c + updcore.c: signed manifest, zip size /
+// SHA-256 / ed25519, renames with undo, state.txt for the new agent's start check) in a small progress window with
+// Cancel (= start the current version). ini auto_update=0 turns it off (player builds; dev builds: off unless
+// auto_update=1).
 // Log: Gobi\Binaries\Win64\b4bcoop-launcher.log (rewritten every start). docs/investigations/launch.md.
 #include <windows.h>
 #include <commctrl.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include "updcore.h"
+#include "updinst.h"
+#include "signkeys.h"
+#include "b4bcoop_version.h"
 
 typedef BOOL (WINAPI *CreateProcessWFn)(LPCWSTR, LPWSTR, LPSECURITY_ATTRIBUTES, LPSECURITY_ATTRIBUTES, BOOL, DWORD,
                                          LPVOID, LPCWSTR, LPSTARTUPINFOW, LPPROCESS_INFORMATION);
@@ -32,7 +46,8 @@ static wchar_t park_dir[MAX_PATH]; // <root>b4bcoop-online\  (trailing backslash
 static HANDLE logf = INVALID_HANDLE_VALUE;
 
 // Marker the agent looks for before it offers the launch choice (online.c): this launcher knows "launch=".
-__attribute__((used)) static const char launcher_features[] = "b4bcoop-launcher-features: launch-choice-1";
+// auto-update-1: it updates b4bcoop before the game starts (updater.c's Updates tab shows its switch).
+__attribute__((used)) static const char launcher_features[] = "b4bcoop-launcher-features: launch-choice-1 auto-update-1";
 
 // b4bcoop code the game would load from its folder (relative to root). The game never ships either name in Win64.
 static const wchar_t *const AGENT[] = { L"Gobi\\Binaries\\Win64\\X3DAudio1_7.dll", L"Gobi\\Binaries\\Win64\\dwmapi.dll" };
@@ -41,8 +56,10 @@ static const wchar_t *const AGENT[] = { L"Gobi\\Binaries\\Win64\\X3DAudio1_7.dll
 enum { CH_NONE, CH_COOP, CH_ONLINE, CH_ASK, CH_CANCEL };
 static const wchar_t *const CH_NAME[] = { L"none", L"b4bcoop co-op", L"online", L"ask", L"cancel" };
 
+static CRITICAL_SECTION log_cs;    // the update's worker threads log too
 static void logw(const wchar_t *fmt, ...) {
     if (logf == INVALID_HANDLE_VALUE) return;
+    EnterCriticalSection(&log_cs);
     static wchar_t w[4200]; static char u[12600];
     va_list ap; va_start(ap, fmt);
     int n = wvsprintfW(w, fmt, ap);   // truncates at 1024 chars; command lines are shorter
@@ -50,6 +67,7 @@ static void logw(const wchar_t *fmt, ...) {
     w[n++] = L'\r'; w[n++] = L'\n';
     int m = WideCharToMultiByte(CP_UTF8, 0, w, n, u, sizeof u, NULL, NULL);
     DWORD wr; WriteFile(logf, u, m, &wr, NULL);
+    LeaveCriticalSection(&log_cs);
 }
 
 static void cat3(wchar_t *out, const wchar_t *a, const wchar_t *b) {   // out = a + b (MAX_PATH * 2)
@@ -280,6 +298,29 @@ static void ini_set_launch(const char *v) {
     if (MoveFileExW(tmp, p, MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) logw(L"remembered: launch=%S in %s", v, p);
     else { logw(L"can't replace %s: error %lu", p, GetLastError()); DeleteFileW(tmp); }
 }
+// Any other key, read like the agent reads it (cmds_ini_each): "key=value" with the key at the start of the line,
+// spaces after '=' skipped; the last such line counts. 1 = found.
+static int ini_get(const char *key, char *out, int n) {
+    wchar_t p[MAX_PATH * 2]; ini_path(p);
+    DWORD len; char *b = read_all(p, &len);
+    if (!b) return 0;
+    int kl = lstrlenA(key), found = 0;
+    for (DWORD i = 0; i < len; ) {
+        DWORD e = i;
+        while (e < len && b[e] != '\n') e++;
+        if (e - i > (DWORD)kl && !memcmp(b + i, key, kl) && b[i + kl] == '=') {
+            DWORD v = i + kl + 1, ve = e;
+            while (v < ve && b[v] == ' ') v++;
+            while (ve > v && (b[ve - 1] == '\r' || b[ve - 1] == ' ' || b[ve - 1] == '\t')) ve--;
+            int m = (int)(ve - v) < n - 1 ? (int)(ve - v) : n - 1;
+            memcpy(out, b + v, m); out[m] = 0;
+            found = 1;
+        }
+        i = e + 1;
+    }
+    HeapFree(GetProcessHeap(), 0, b);
+    return found;
+}
 
 // ---- the prompt ----
 #define ID_COOP 1001
@@ -287,6 +328,7 @@ static void ini_set_launch(const char *v) {
 typedef DWORD (WINAPI *XInputGetStateFn)(DWORD, void *);
 static XInputGetStateFn xget;
 static WORD pad_last = 0xFFFF;     // buttons held when the prompt opened count only after they were released
+static WORD pad_down(void);
 #ifndef B4B_RELEASE
 static char auto_answer[32];       // dev: B4B_LAUNCHER_ANSWER=coop|online|coop+remember|online+remember|cancel|wait
 #endif                             // (wait: no answer, the countdown decides)
@@ -348,13 +390,8 @@ static HRESULT CALLBACK td_cb(HWND h, UINT msg, WPARAM wp, LPARAM lp, LONG_PTR r
         return S_OK;
     }
 #endif
-    if (!xget) return S_OK;
     // controller (Steam Deck, couch): A = co-op, Y = online, X = remember, B = close
-    struct { DWORD packet; WORD buttons; BYTE lt, rt; SHORT lx, ly, rx, ry; } st;
-    WORD now = 0;
-    for (DWORD i = 0; i < 4; i++) if (xget(i, &st) == ERROR_SUCCESS) now |= st.buttons;
-    WORD down = now & ~pad_last;
-    pad_last = now;
+    WORD down = pad_down();
     if (down) countdown_stop(h, L"controller");
     if (down & 0x1000) SendMessageW(h, TDM_CLICK_BUTTON, ID_COOP, 0);
     else if (down & 0x8000) SendMessageW(h, TDM_CLICK_BUTTON, ID_ONLINE, 0);
@@ -367,27 +404,50 @@ static HRESULT CALLBACK td_cb(HWND h, UINT msg, WPARAM wp, LPARAM lp, LONG_PTR r
     return S_OK;
 }
 
-static int prompt(int *remember) {
-    *remember = 0;
-    // comctl32 v6 (task dialogs, themed controls): our own manifest, resource 3 (launcher.rc)
+// The windows (the prompt, the update's progress): comctl32 v6 (task dialogs, themed controls) through our own
+// manifest, resource 3 (launcher.rc), active only between ui_begin and ui_end; the controller through XInput 1.4.
+typedef HRESULT (WINAPI *TDI)(const TASKDIALOGCONFIG *, int *, int *, BOOL *);
+static HANDLE ui_ctx = INVALID_HANDLE_VALUE;
+static ULONG_PTR ui_cookie;
+static TDI ui_begin(void) {   // TaskDialogIndirect, or NULL (very old comctl32)
     wchar_t me[MAX_PATH];
     GetModuleFileNameW(self, me, MAX_PATH);
     ACTCTXW ac = { sizeof ac };
     ac.dwFlags = ACTCTX_FLAG_HMODULE_VALID | ACTCTX_FLAG_RESOURCE_NAME_VALID;
     ac.lpSource = me; ac.hModule = self; ac.lpResourceName = MAKEINTRESOURCEW(3);
-    HANDLE ctx = CreateActCtxW(&ac);
-    ULONG_PTR cookie = 0;
-    if (ctx != INVALID_HANDLE_VALUE && !ActivateActCtx(ctx, &cookie)) cookie = 0;
-    typedef HRESULT (WINAPI *TDI)(const TASKDIALOGCONFIG *, int *, int *, BOOL *);
+    ui_ctx = CreateActCtxW(&ac);
+    ui_cookie = 0;
+    if (ui_ctx != INVALID_HANDLE_VALUE && !ActivateActCtx(ui_ctx, &ui_cookie)) ui_cookie = 0;
     HMODULE cc = LoadLibraryW(L"comctl32.dll");
     TDI tdi = cc ? (TDI)(void *)GetProcAddress(cc, "TaskDialogIndirect") : NULL;
     wchar_t xp[MAX_PATH];
     UINT sl = GetSystemDirectoryW(xp, MAX_PATH);
-    if (sl && sl < MAX_PATH - 20) {
+    if (!xget && sl && sl < MAX_PATH - 20) {
         lstrcatW(xp, L"\\XInput1_4.dll");
         HMODULE x = LoadLibraryW(xp);
         if (x) xget = (XInputGetStateFn)(void *)GetProcAddress(x, "XInputGetState");
     }
+    pad_last = 0xFFFF;
+    return tdi;
+}
+static void ui_end(void) {
+    if (ui_cookie) DeactivateActCtx(0, ui_cookie);
+    if (ui_ctx != INVALID_HANDLE_VALUE) ReleaseActCtx(ui_ctx);
+    ui_cookie = 0; ui_ctx = INVALID_HANDLE_VALUE;
+}
+static WORD pad_down(void) {   // controller buttons pressed since the last look (any of 4 pads)
+    if (!xget) return 0;
+    struct { DWORD packet; WORD buttons; BYTE lt, rt; SHORT lx, ly, rx, ry; } st;
+    WORD now = 0;
+    for (DWORD i = 0; i < 4; i++) if (xget(i, &st) == ERROR_SUCCESS) now |= st.buttons;
+    WORD down = now & ~pad_last;
+    pad_last = now;
+    return down;
+}
+
+static int prompt(int *remember) {
+    *remember = 0;
+    TDI tdi = ui_begin();
     int r = CH_CANCEL;
     if (tdi) {
         static const TASKDIALOG_BUTTON buttons[] = {
@@ -425,8 +485,7 @@ static int prompt(int *remember) {
             r = m == IDYES ? CH_COOP : m == IDNO ? CH_ONLINE : CH_CANCEL;
         }
     }
-    if (cookie) DeactivateActCtx(0, cookie);
-    if (ctx != INVALID_HANDLE_VALUE) ReleaseActCtx(ctx);
+    ui_end();
     return r;
 }
 
@@ -436,6 +495,293 @@ static void fail_box(const wchar_t *text) {
     if (auto_answer[0] || GetEnvironmentVariableW(L"B4B_LAUNCHER_ANSWER", NULL, 0)) return;   // unattended tests
 #endif
     MessageBoxW(NULL, text, L"b4bcoop", MB_OK | MB_ICONWARNING | MB_SETFOREGROUND | MB_TOPMOST);
+}
+
+// ---- automatic update before a co-op start (docs/investigations/updater.md §7) ----
+// 1. On: ini auto_update (player builds default 1; dev builds default 0, so a release never replaces a developer's
+//    build by itself; dev env B4B_LAUNCHER_UPDATE=off|on|cancel overrides it, cancel = press Cancel once the download
+//    runs), X3DAudio1_7.dll in Gobi\Binaries\Win64 (not a legacy dwmapi.dll dev install), no update of this version
+//    still waiting for its first 15 s of play (state.txt pending=1).
+// 2. What to ask for (updcore.c upd_auto_plan): a Steam join's ver: = the host's version (none if it is ours, or
+//    older with our protocol), else releases/latest. One request, on a worker thread; 2 s for all of it (WinHTTP
+//    loading, DNS, TLS, the reply). No answer in time, an error, a version not newer (or not the host's) = the game
+//    starts as today, nothing shown. A version put back before (state.txt skip=, failed\<ver>\) isn't installed
+//    by itself.
+// 3. A task dialog "Updating b4bcoop to X" with a progress bar and "Cancel: start b4bcoop <ours>" (also Esc, the
+//    window's X, controller B); its worker fetches the signed manifest, the zip + .sig, verifies them and installs
+//    (updinst.c, the Updates tab's code). Cancel works until the files start moving (a second or less); a failure
+//    anywhere leaves the current version (updinst undoes every move) and the dialog says so for 4 s. The result goes
+//    to the log and to b4bcoop-update\auto.txt (the Updates tab shows it). Then the game starts, with the new agent.
+// The launcher itself (this file) is renamed into backup\<ours>\ while it runs: Windows renames a mapped DLL.
+#define AU_CHECK_MS 2000
+static const UpdiTimeouts AU_QUICK = {AU_CHECK_MS, AU_CHECK_MS, AU_CHECK_MS, AU_CHECK_MS};
+#ifdef B4B_RELEASE
+#define AU_DEFAULT 1
+#else
+#define AU_DEFAULT 0
+#endif
+static char au_api[200] = UPDI_DEFAULT_API, au_repo[100] = UPDI_DEFAULT_REPO;
+static uint8_t au_pub[32] = {B4B_RELEASE_PUBKEY_BYTES};
+#ifndef B4B_RELEASE
+static int au_dev_cancel;   // dev: B4B_LAUNCHER_UPDATE=cancel
+#endif
+
+static void au_log(const char *line) { logw(L"update: %S", line); }
+
+// The quick check: the worker owns a reference, the waiting thread the other; whoever lets go last frees it, so a
+// check that missed its 2 s just ends by itself (its result unused, nothing written).
+typedef struct { volatile LONG refs, cancel; char url[400]; int ok; char err[300]; UpdRelease rel; } AuCheck;
+static void au_check_unref(AuCheck *c) { if (!InterlockedDecrement(&c->refs)) free(c); }
+static DWORD WINAPI au_check_thread(void *p) {
+    AuCheck *c = p;
+    c->ok = updi_fetch_release(c->url, &c->rel, &AU_QUICK, &c->cancel, c->err, sizeof c->err);
+    au_check_unref(c);
+    return 0;
+}
+
+// The download + install job behind the progress window. phase moves FETCH -> DL -> INSTALL -> DONE|FAILED by the
+// worker; CANCELLED only from FETCH or DL, by the window (compare-and-swap), so a cancelled job never writes a file
+// and a job that has started moving files always finishes (or undoes) first.
+enum { AU_FETCH, AU_DL, AU_INSTALL, AU_DONE, AU_FAILED, AU_CANCELLED };
+typedef struct {
+    volatile LONG refs, cancel, phase;
+    volatile LONG64 got;
+    UpdRelease rel;
+    UpdiTarget tg;
+    char ver[40], err[300];
+    UpdState st;
+} AuJob;
+static void au_job_unref(AuJob *j) { if (!InterlockedDecrement(&j->refs)) free(j); }
+static void au_fail(AuJob *j, LONG from, const char *what, const char *err) {
+    snprintf(j->err, sizeof j->err, "%s%s", what, err);
+    if (InterlockedCompareExchange(&j->phase, AU_FAILED, from) == from) logw(L"update: failed: %S", j->err);
+}
+static DWORD WINAPI au_job_thread(void *p) {
+    AuJob *j = p;
+    char err[300];
+    uint8_t *zip = NULL; size_t zn = 0;
+    int r = updi_fetch_manifest(&j->rel, au_pub, &j->tg, NULL, &j->cancel, err, sizeof err);
+    if (r != 1) { au_fail(j, AU_FETCH, r < 0 ? "not safe to install: " : "", err); goto out; }
+    if (InterlockedCompareExchange(&j->phase, AU_DL, AU_FETCH) != AU_FETCH) goto out;   // cancelled
+    logw(L"update: downloading %S (%lu bytes)", j->tg.zip_url, (unsigned long)j->tg.m.size);
+    r = updi_download(&j->tg, au_pub, &j->got, &j->cancel, &zip, &zn, err, sizeof err);
+    if (r != 1) { au_fail(j, AU_DL, r < 0 ? "not safe to install: " : "download failed: ", err); goto out; }
+    if (InterlockedCompareExchange(&j->phase, AU_INSTALL, AU_DL) != AU_DL) goto out;     // cancelled
+    logw(L"update: %S verified (size, SHA-256, signature); installing", j->tg.m.zip);
+    if (updi_install(zip, zn, &j->tg.m, B4B_VERSION, &j->st, err, sizeof err)) {
+        logw(L"update: installed %S over %S (previous files in b4bcoop-update\\backup\\%S)", j->tg.m.version, B4B_VERSION, B4B_VERSION);
+        InterlockedExchange(&j->phase, AU_DONE);
+    } else {
+        snprintf(j->err, sizeof j->err, "not installed: %s", err);
+        logw(L"update: %S; the current version is unchanged", j->err);
+        InterlockedExchange(&j->phase, AU_FAILED);
+    }
+out:
+    free(zip);
+    au_job_unref(j);
+    return 0;
+}
+static int au_try_cancel(AuJob *j) {
+    for (;;) {
+        LONG ph = j->phase;
+        if (ph != AU_FETCH && ph != AU_DL) return 0;
+        if (InterlockedCompareExchange(&j->phase, AU_CANCELLED, ph) == ph) { InterlockedExchange(&j->cancel, 1); return 1; }
+    }
+}
+
+#define ID_AU_CANCEL 1101
+static AuJob *au_job;
+static int au_closing, au_shown = -1;
+static UINT au_close_at;
+static wchar_t au_text[600];
+static void au_set_text(HWND h, const wchar_t *t) {
+    if (!lstrcmpW(t, au_text)) return;
+    lstrcpynW(au_text, t, 600);
+    SendMessageW(h, TDM_SET_ELEMENT_TEXT, TDE_CONTENT, (LPARAM)au_text);
+}
+static HRESULT CALLBACK au_cb(HWND h, UINT msg, WPARAM wp, LPARAM lp, LONG_PTR ref) {
+    (void)lp; (void)ref;
+    AuJob *j = au_job;
+    if (msg == TDN_CREATED) {
+        SetForegroundWindow(h);
+        InterlockedIncrement(&j->refs);   // the worker's
+        HANDLE th = CreateThread(NULL, 0, au_job_thread, j, 0, NULL);
+        if (th) CloseHandle(th);
+        else { au_fail(j, AU_FETCH, "can't start the download: ", "no thread"); au_job_unref(j); }
+        return S_OK;
+    }
+    if (msg == TDN_BUTTON_CLICKED) {
+        if (au_closing) return S_OK;
+        if (au_try_cancel(j)) { logw(L"update: cancelled by the player: starting b4bcoop %S", B4B_VERSION); return S_OK; }
+        if (j->phase == AU_INSTALL) { au_set_text(h, L"Installing, one moment..."); return S_FALSE; }   // never half-installed
+        return S_OK;
+    }
+    if (msg != TDN_TIMER) return S_OK;
+    LONG ph = j->phase;
+    wchar_t t[600];
+    int pos = 0;
+    if (ph == AU_FETCH) { wsprintfW(t, L"Getting b4bcoop %S from GitHub...", j->ver); pos = 2; }
+    else if (ph == AU_DL) {
+        unsigned long got = (unsigned long)(j->got / 1024), all = (unsigned long)(j->tg.m.size / 1024);
+        wsprintfW(t, L"Downloading: %lu of %lu KB", got, all);
+        pos = all ? 5 + (int)(85.0 * got / all) : 5;
+    } else if (ph == AU_INSTALL) { lstrcpyW(t, L"Verified (release signature). Installing..."); pos = 95; }
+    else if (ph == AU_DONE) { wsprintfW(t, L"b4bcoop %S is installed. Starting the game...", j->ver); pos = 100; }
+    else if (ph == AU_FAILED) { wsprintfW(t, L"Couldn't update: %S. Starting b4bcoop %S...", j->err, B4B_VERSION); pos = 0; }
+    else return S_OK;
+    au_set_text(h, t);
+    if (pos != au_shown) { au_shown = pos; SendMessageW(h, TDM_SET_PROGRESS_BAR_POS, pos, 0); }
+    if ((ph == AU_DONE || ph == AU_FAILED) && !au_closing) { au_closing = 1; au_close_at = (UINT)wp + (ph == AU_DONE ? 800 : 4000); }
+    if (au_closing && (UINT)wp >= au_close_at) { SendMessageW(h, TDM_CLICK_BUTTON, ID_AU_CANCEL, 0); return S_OK; }
+    if (au_closing) return S_OK;
+    if (pad_down() & 0x2000) SendMessageW(h, TDM_CLICK_BUTTON, ID_AU_CANCEL, 0);   // controller B
+#ifndef B4B_RELEASE
+    else if (au_dev_cancel && ph == AU_DL && wp >= 300) {
+        au_dev_cancel = 0;
+        logw(L"update: dev B4B_LAUNCHER_UPDATE=cancel: pressing Cancel");
+        SendMessageW(h, TDM_CLICK_BUTTON, ID_AU_CANCEL, 0);
+    }
+#endif
+    return S_OK;
+}
+
+static void au_note(const char *fmt, ...) {   // b4bcoop-update\auto.txt: the last automatic update (Updates tab)
+    char r[400], b[600];
+    va_list ap; va_start(ap, fmt); vsnprintf(r, sizeof r, fmt, ap); va_end(ap);
+    SYSTEMTIME t; GetLocalTime(&t);
+    int n = snprintf(b, sizeof b, "; b4bcoop launcher: the last automatic update at a game start. Safe to delete.\r\n"
+                     "when=%04d-%02d-%02d %02d:%02d\r\nresult=%s\r\n", t.wYear, t.wMonth, t.wDay, t.wHour, t.wMinute, r);
+    wchar_t p[MAX_PATH * 2]; cat3(p, updi_dir, L"auto.txt");
+    if (!updi_write_file(p, b, n)) logw(L"update: can't write %s (%lu)", p, GetLastError());
+}
+
+static int au_enabled(const char **why) {
+    char v[16];
+    int on = AU_DEFAULT;
+    if (ini_get("auto_update", v, sizeof v) && v[0]) { on = atoi(v) != 0; *why = on ? "auto_update=1" : "auto_update=0"; }
+    else *why = AU_DEFAULT ? "on by default" : "off by default in developer builds (auto_update=1 turns it on)";
+#ifndef B4B_RELEASE
+    if (GetEnvironmentVariableA("B4B_LAUNCHER_UPDATE", v, sizeof v)) {
+        on = strcmp(v, "off") != 0;
+        au_dev_cancel = !strcmp(v, "cancel");
+        *why = "dev B4B_LAUNCHER_UPDATE";
+    }
+    // dev overrides, like the agent's (updater.c): a local test server and its key
+    if (ini_get("update_api", au_api, sizeof au_api) && au_api[0]) { size_t l = strlen(au_api); while (l && au_api[l - 1] == '/') au_api[--l] = 0; }
+    else snprintf(au_api, sizeof au_api, "%s", UPDI_DEFAULT_API);
+    if (!ini_get("update_repo", au_repo, sizeof au_repo) || !au_repo[0]) snprintf(au_repo, sizeof au_repo, "%s", UPDI_DEFAULT_REPO);
+    char hex[80];
+    if (ini_get("update_pubkey", hex, sizeof hex)) {
+        if (upd_hex_decode(hex, au_pub, 32)) logw(L"update: dev update_pubkey= test key, api %S repo %S", au_api, au_repo);
+        else logw(L"update: bad update_pubkey (64 hex digits): the release key stays");
+    }
+#endif
+    return on;
+}
+
+static void auto_update(const wchar_t *rest) {
+    const char *why;
+    if (!au_enabled(&why)) { logw(L"update: automatic update off (%S)", why); return; }
+    if (!exists(bin, L"X3DAudio1_7.dll")) { logw(L"update: no X3DAudio1_7.dll in Gobi\\Binaries\\Win64 (a developer install): no automatic update"); return; }
+    updi_set_root(root);
+    updi_set_log(au_log);
+    updi_set_user_agent("b4bcoop-launcher");
+    UpdState s; updi_state_read(&s);
+    if (s.pending && !strcmp(s.installed, B4B_VERSION)) {
+        logw(L"update: %S was just installed and hasn't had its first 15 s of play yet: no check this start", B4B_VERSION);
+        return;
+    }
+    char line[4096]; int k = 0;
+    for (; rest[k] && k < (int)sizeof line - 1; k++) line[k] = rest[k] < 128 ? (char)rest[k] : '?';
+    line[k] = 0;
+    char hv[40], hp[16], target[40];
+    int join = upd_join_parse(line, hv, hp);
+    int plan = upd_auto_plan(B4B_VERSION, B4B_PROTOCOL, join ? hv : NULL, hp, target);
+    if (plan == UPD_AUTO_NONE) {
+        logw(L"update: Steam join, the host runs b4bcoop %S (protocol %S); that works with %S: no check", hv, hp[0] ? hp : "?", B4B_VERSION);
+        return;
+    }
+    AuCheck *c = calloc(1, sizeof *c);
+    if (!c) return;
+    c->refs = 2;
+    updi_release_url(c->url, sizeof c->url, au_api, au_repo, plan == UPD_AUTO_TAG ? target : NULL);
+    logw(L"update: %S (%S): checking %S", B4B_VERSION, why, c->url);
+    if (plan == UPD_AUTO_TAG) logw(L"update: Steam join, the host runs b4bcoop %S (protocol %S): looking for that version", target, hp[0] ? hp : "?");
+    DWORD t0 = GetTickCount();
+    HANDLE th = CreateThread(NULL, 0, au_check_thread, c, 0, NULL);
+    if (!th) { free(c); return; }
+    DWORD w = WaitForSingleObject(th, AU_CHECK_MS);
+    CloseHandle(th);
+    if (w != WAIT_OBJECT_0) {
+        InterlockedExchange(&c->cancel, 1);
+        logw(L"update: no answer within %d ms (offline or slow): starting b4bcoop %S", AU_CHECK_MS, B4B_VERSION);
+        au_check_unref(c);
+        return;
+    }
+    logw(L"update: GitHub answered in %lu ms", GetTickCount() - t0);
+    if (!c->ok) {
+        if (plan == UPD_AUTO_TAG && strstr(c->err, "404")) logw(L"update: there is no b4bcoop %S release on GitHub: starting b4bcoop %S", target, B4B_VERSION);
+        else logw(L"update: check failed (%S): starting b4bcoop %S", c->err, B4B_VERSION);
+        au_check_unref(c); return;
+    }
+    const char *v = upd_tag_version(c->rel.tag);
+    if (!upd_auto_wanted(plan, B4B_VERSION, target, c->rel.tag)) {
+        logw(L"update: GitHub's release is %S, this is %S: nothing to install", c->rel.tag, B4B_VERSION);
+        au_check_unref(c); return;
+    }
+    if (!upd_release_asset(&c->rel, UPDI_MANIFEST_NAME) || !upd_release_asset(&c->rel, UPDI_MANIFEST_NAME ".sig")) {
+        logw(L"update: release %S has no update files (older than the updater): starting b4bcoop %S", c->rel.tag, B4B_VERSION);
+        au_check_unref(c); return;
+    }
+    wchar_t fd[MAX_PATH * 2], wv[40];
+    MultiByteToWideChar(CP_UTF8, 0, v, -1, wv, 40);
+    wsprintfW(fd, L"%sfailed\\%s", updi_dir, wv);
+    if (upd_auto_blocked(v, s.skip, s.result) || updi_exists(fd)) {
+        logw(L"update: %S was put back before (it didn't start properly, or you went back from it): not installing it by "
+             L"itself; the ~ window's Updates tab can", v);
+        au_check_unref(c); return;
+    }
+    AuJob *j = calloc(1, sizeof *j);
+    if (!j) { au_check_unref(c); return; }
+    j->refs = 1;
+    j->rel = c->rel;
+    snprintf(j->ver, sizeof j->ver, "%s", v);
+    au_check_unref(c);
+
+    TDI tdi = ui_begin();
+    if (!tdi) {   // never update without showing it
+        ui_end();
+        logw(L"update: b4bcoop %S is available, but no window can show the update here (no task dialogs): starting %S", j->ver, B4B_VERSION);
+        au_job_unref(j); return;
+    }
+    static wchar_t title[120], cancel_lab[120];
+    wsprintfW(title, L"Updating b4bcoop to %S", j->ver);
+    wsprintfW(cancel_lab, L"Cancel: start b4bcoop %S", B4B_VERSION);
+    TASKDIALOG_BUTTON buttons[] = { { ID_AU_CANCEL, cancel_lab } };
+    TASKDIALOGCONFIG cfg = { sizeof cfg };
+    cfg.dwFlags = TDF_ALLOW_DIALOG_CANCELLATION | TDF_CALLBACK_TIMER | TDF_SHOW_PROGRESS_BAR;
+    cfg.pszWindowTitle = L"Back 4 Blood";
+    cfg.pszMainInstruction = title;
+    cfg.pszContent = L"Getting the new version from GitHub...";
+    cfg.cButtons = 1; cfg.pButtons = buttons; cfg.nDefaultButton = ID_AU_CANCEL;
+    cfg.pszFooter = L"b4bcoop installs its new versions before the game starts. Turn that off: ~ window > Updates, or "
+                    L"auto_update=0 in b4bcoop.ini.";
+    cfg.pfCallback = au_cb;
+    au_job = j; au_closing = 0; au_shown = -1; au_text[0] = 0;
+    logw(L"update: b4bcoop %S is available: downloading, with a progress window", j->ver);
+    HRESULT hr = tdi(&cfg, NULL, NULL, NULL);
+    ui_end();
+    if (FAILED(hr)) logw(L"update: progress window failed 0x%08lx", (unsigned long)hr);
+    au_try_cancel(j);   // the window is gone: a download still running stops (nothing written)
+    for (int i = 0; i < 600 && j->phase == AU_INSTALL; i++) Sleep(50);   // never start the game halfway through the renames
+    LONG ph = j->phase;
+    if (ph == AU_DONE) au_note("installed %s over %s at the game start", j->ver, B4B_VERSION);
+    else if (ph == AU_FAILED) au_note("couldn't install %s at the game start (%s); kept %s", j->ver, j->err, B4B_VERSION);
+    else if (FAILED(hr)) au_note("%s was available; no progress window could be shown, so it was not installed", j->ver);
+    else { au_note("%s was available; you cancelled it at the game start and kept %s", j->ver, B4B_VERSION); }
+    logw(L"update: %S", ph == AU_DONE ? "done: the game starts with the new version" : "the game starts with the current version");
+    au_job = NULL;
+    au_job_unref(j);
 }
 
 static BOOL WINAPI cp_hook(LPCWSTR app, LPWSTR cmd, LPSECURITY_ATTRIBUTES pa, LPSECURITY_ATTRIBUTES ta, BOOL inh,
@@ -502,6 +848,7 @@ chosen:
                  L"or extract the b4bcoop zip again.");
         CloseHandle(logf); ExitProcess(1);
     }
+    auto_update(rest);   // a newer b4bcoop, before the game loads it (never on the Online path above)
     static wchar_t newcmd[32768];
     wsprintfW(newcmd, L"\"%sBack4Blood.exe\"", bin);
     if (lstrlenW(newcmd) + lstrlenW(rest) >= 32767) return real_cp(app, cmd, pa, ta, inh, flags, env, cwd, si, pi);
@@ -556,12 +903,36 @@ __declspec(dllexport) void CALLBACK b4bcoop_prompt_test(HWND h, HINSTANCE i, LPS
     HANDLE f = CreateFileA(arg && *arg ? arg : "prompt-test.txt", GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, 0, NULL);
     if (f != INVALID_HANDLE_VALUE) { DWORD w; WriteFile(f, line, lstrlenA(line), &w, NULL); CloseHandle(f); }
 }
+// Dev: the automatic update alone, as a co-op start would run it, without the stub or the game:
+//   rundll32 xinput1_3.dll,b4bcoop_update_test <game root>\[|<launch options, e.g. +b4bcoop_join steam:1 proto:3 ver:1.2.3>]
+// (B4B_COOP_CONFIG / <root>Gobi\Binaries\Win64\b4bcoop.ini as usual: update_api=, update_pubkey=, auto_update=1;
+// or B4B_LAUNCHER_UPDATE=on|cancel). Logs to <root>Gobi\Binaries\Win64\b4bcoop-launcher.log.
+__declspec(dllexport) void CALLBACK b4bcoop_update_test(HWND h, HINSTANCE i, LPSTR arg, int show) {
+    (void)h; (void)i; (void)show;
+    static wchar_t w[4096], rest[4096];
+    if (!arg || !MultiByteToWideChar(CP_ACP, 0, arg, -1, w, 4096)) return;
+    wchar_t *bar = wcschr(w, L'|');
+    rest[0] = L' '; rest[1] = 0;
+    if (bar) { *bar = 0; lstrcpynW(rest + 1, bar + 1, 4094); }
+    lstrcpynW(root, w, MAX_PATH - 1);
+    int n = lstrlenW(root);
+    if (n && root[n - 1] != L'\\') lstrcatW(root, L"\\");
+    lstrcpyW(bin, root); lstrcatW(bin, L"Gobi\\Binaries\\Win64\\");
+    lstrcpyW(park_dir, root); lstrcatW(park_dir, L"b4bcoop-online\\");
+    wchar_t lp[MAX_PATH * 2]; cat3(lp, bin, L"b4bcoop-launcher.log");
+    logf = CreateFileW(lp, GENERIC_WRITE, FILE_SHARE_READ, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+    logw(L"update test: game root %s, launch options%s", root, rest);
+    auto_update(rest);
+    logw(L"update test: done");
+    CloseHandle(logf); logf = INVALID_HANDLE_VALUE;
+}
 #endif
 
 BOOL WINAPI DllMain(HINSTANCE inst, DWORD reason, LPVOID _) {
     if (reason != DLL_PROCESS_ATTACH) return TRUE;
     DisableThreadLibraryCalls(inst);
     self = inst;
+    InitializeCriticalSection(&log_cs);
     // Only in the root stub: <our dir>\Back4Blood.exe with a Gobi\ tree next to it.
     wchar_t exe[MAX_PATH], me[MAX_PATH];
     if (!GetModuleFileNameW(NULL, exe, MAX_PATH) || !GetModuleFileNameW(inst, me, MAX_PATH)) return TRUE;

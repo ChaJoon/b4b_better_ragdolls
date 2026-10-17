@@ -55,6 +55,25 @@ const UpdAsset *upd_release_asset(const UpdRelease *r, const char *name);
 // Semantic versions "1.2.3" / "1.2.3-test.1": <0, 0, >0. Unparsable sorts lowest.
 int upd_version_cmp(const char *a, const char *b);
 int upd_version_valid(const char *v);
+const char *upd_tag_version(const char *tag);   // GitHub tag "v1.2.3" -> "1.2.3" (a tag without the v as it is)
+
+// ---- automatic update before the game starts (the launcher, native/launcher/redirect.c) ----
+// A Steam join on the command line: "... +b4bcoop_join steam:<id64> proto:<n> ver:<x.y.z> addons:<p> ..." (presence.c
+// writes it). 1 = a b4bcoop join is there; ver / proto = the host's ("" when missing or malformed: an older host).
+int upd_join_parse(const char *cmdline, char ver[40], char proto[16]);
+// What the launcher asks GitHub for:
+//   UPD_AUTO_LATEST  releases/latest (no join, or a join without the host's version)
+//   UPD_AUTO_TAG     releases/tags/v<target>: the host's version, when it is newer than ours, or older with another
+//                    protocol (the join would be refused otherwise)
+//   UPD_AUTO_NONE    nothing: the host runs our version, or an older one with our protocol (the join works as it is)
+enum { UPD_AUTO_NONE, UPD_AUTO_LATEST, UPD_AUTO_TAG };
+int upd_auto_plan(const char *ours, int our_proto, const char *host_ver, const char *host_proto, char target[40]);
+// The release GitHub answered with (its tag): 1 = install it. LATEST: newer than ours. TAG: exactly target, not ours.
+int upd_auto_wanted(int plan, const char *ours, const char *target, const char *tag);
+// 1 = never install ver by itself: it was put back before (state.txt skip=<ver>: it didn't start properly twice, or
+// the player went back from it), also "you went back from <ver> to ..." in result= (written by agents before 0.9.11).
+// The Updates tab still installs it on a click.
+int upd_auto_blocked(const char *ver, const char *state_skip, const char *state_result);
 
 // ---- add-on shop catalog (#36, docs/investigations/shop.md): catalog.json + catalog.json.sig (ed25519, shop key) ----
 //   {"b4bcoop-shop": 1, "updated": "2026-09-27", "addons": [{"id": "casual_joe", "name": "...", "author": "...",
