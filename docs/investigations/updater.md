@@ -242,7 +242,8 @@ launcher contains the release key and `auto-update-1`, the dev-only strings only
   put back before", not reinstalled.
 - `auto_update=0`: "automatic update off", no request. The tab's checkbox writes `auto_update=1` and removes it again
   (dev default off).
-- Regressions on the final build: see the branch's report (update-test.py, shop-test.py, e2e --quick).
+- Regressions on the final build: `tools/update-test.py` 39/39 (after refreshing its test version and real-key check),
+  `tools/shop-test.py` 75/75, `tools/e2e.py --quick` 14/14, `tools/online-test.py` 43/43.
 
 **UX found and fixed in the live run** (gamescope frames = what a Steam Deck player sees; the dialog is scaled to the
 screen there):
