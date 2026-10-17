@@ -14,6 +14,8 @@
 //   /ragdoll deadline [s]    every ragdoll still there s seconds after death is removed (12-120, default 15)
 //   /ragdoll push [x]        the killing hit throws the body (step 2): overall strength x (0-10, default 4, off = 0);
 //   /ragdoll push <kind> <n> one weapon kind's strength in kg cm/s (HG, SMG, AR, LMG, SG, Sni, FragGrenade, default, ...)
+//   /ragdoll shot [x]        shots on a body that is still a ragdoll shove it: the shooter's weapon kind's strength from
+//                            the push table x this (0-10, default 2, off = 0; see "shots on dead bodies")
 //   /ragdoll bloodbag [on|off] off (default): Ridden an explosion would burst stay bodies (ragdolled, pushed)
 //   /ragdoll blood [on|off]  on (default): those bodies get the blood the game paints on the blast victims it keeps
 //   /ragdoll dismember [on|off|limbs <min> [max]|big <0-100>|head <0-100|on|off>|pieces on|off|type <n|auto>|
@@ -177,6 +179,9 @@ typedef struct {
     uint8_t limbp;                         // build 31: limb probe: 1 at the dismember, 2 also at +0.5 s
     uint8_t painted;                       // build 33: the blood paint was looked at for it (spared blood bags)
     float push_dv;                         // build 29: cm/s the blast push gave every body (0 = no blast push)
+    float mass;                            // build 35: the whole body's kg for the shot shoves (0 = not read yet)
+    uint16_t shots;                        // build 35: shoves from shots after death
+    uint8_t relcount;                      // build 35: settle-hold releases (a shot can hold a body again)
     FName prof;
     float rel_loc[3], rel_rot[3];
 } Tracked;
@@ -206,10 +211,11 @@ static float world_gz;   // the world's gravity, cm/s^2, read once per map; 0 = 
 static int n_grav_fail;
 
 static void pieces_reset(void);
+static void shot_reset(void);
 static int world_check(void) {   // new map: every old pointer is gone
     static UObject *last_w;
     UObject *w = ue_world();
-    if (w != last_w) { last_w = w; ntr = 0; scan_at = 0; n_body_lists = 0; world_gz = 0; pieces_reset(); }
+    if (w != last_w) { last_w = w; ntr = 0; scan_at = 0; n_body_lists = 0; world_gz = 0; pieces_reset(); shot_reset(); }
     return w != NULL;
 }
 
@@ -706,6 +712,12 @@ static Blast blasts[8];
 static int blast_at;
 static double last_blast_t(void) { double t = 0; for (int i = 0; i < 8; i++) if (blasts[i].t > t) t = blasts[i].t; return t ? t : -1e9; }
 
+// ---- shots on dead bodies (build 35): the hit, from the corpse manager (see "shots on dead bodies" below) ----
+static UFunction *corpse_hit_fn;   // UCorpseManager::OnCorpseHit(HitActor): bound to every registered corpse's hits
+static FField *corpse_hit_actor_f;
+static void shot_note(UObject *o, UFunction *fn, void *params);
+static void shot_resolve(void);
+
 // ---- what an explosion creates (discovery, build 23, while a trace runs) ----
 // The red arcs on spared blood bags were no effect component of theirs at death (build 22: only an inactive
 // CharacterEmitter). So: every object of an effect-like class (particles, decals, gore, gibs, dynamic materials...)
@@ -875,6 +887,7 @@ static void pe_detour(UObject *o, UFunction *fn, void *params) {
         memcpy(b->at, (uint8_t *)params + FP_OFFSET(blast_loc_f), sizeof b->at);
         if (tracing) fx_flush(b->t);
     }
+    if (fn == corpse_hit_fn && corpse_hit_fn && params && mode_on) shot_note(o, fn, params);   // build 35
     if (tracing && o && fn && !own_call()) trace_call(o, fn, params);
     orig_pe(o, fn, params);
 }
@@ -883,7 +896,8 @@ static void pe_detour(UObject *o, UFunction *fn, void *params) {
 static int pe_enabled;
 static int pe_update(void) {
     juice_resolve();
-    int want = tracing || (mode_on && explode_fn);   // with the ragdoll on: blast centres
+    shot_resolve();
+    int want = tracing || (mode_on && (explode_fn || corpse_hit_fn));   // with the ragdoll on: blast centres, shots on bodies
     if (want && !hook_made) {
         InitializeCriticalSection(&tcs);
         if (MH_CreateHook((void *)ADDR_PROCESSEVENT, (void *)pe_detour, (void **)&orig_pe) != MH_OK) {
@@ -1520,7 +1534,8 @@ static PushKind *kind_of(UObject *dtype, char *name, size_t n) {
     for (int j = 0; j < 16; j++) { if (!strcmp(unknown[j], name)) seen = 1; if (slot < 0 && !unknown[j][0]) slot = j; }
     if (!seen && slot >= 0) {
         snprintf(unknown[slot], sizeof unknown[slot], "%s", name);
-        LOG("ragdoll push: unknown damage type %s: default strength (add it with /ragdoll push %s <n>)", name, code[0] ? code : name);
+        LOG("ragdoll push: unknown kind %s (a damage type, or a weapon for shots on bodies): default strength (add it with "
+            "/ragdoll push %s <n>)", name, code[0] ? code : name);
     }
     return push_kind("default", 0);
 }
@@ -1570,6 +1585,21 @@ static int bone_loc(UObject *mesh, FName bone, float out[3]) {
     return 0;
 }
 
+// the bone that takes a push: the hit bone, or its nearest parent with a body (8 steps up at most), else the first
+// body (the root); with no body list the bone stays as it is (None = the engine's root body)
+static FName body_bone(UObject *mesh, const BodyList *bl, FName bone) {
+    Call k;
+    for (int up = 0; bone.idx && bl && !has_body(bl, bone) && up < 8; up++) {
+        if (!call_prep(&k, mesh, "GetParentBone")) { bone = (FName){0, 0}; break; }
+        SET(&k, "BoneName", FName, bone);
+        call_go(&k);
+        FName *r = carg(&k, "ReturnValue");
+        bone = r ? *r : (FName){0, 0};
+    }
+    if (bl && (!bone.idx || !has_body(bl, bone))) bone = bl->bone[0];
+    return bone;
+}
+
 static float entry_key(const uint8_t *e) {   // larger = the killing hit
     if (dinfo.prev_hp) return -*(const float *)(e + FP_OFFSET(dinfo.prev_hp));
     if (dinfo.index) return (float)*(const int32_t *)(e + FP_OFFSET(dinfo.index));
@@ -1607,16 +1637,8 @@ static void push_body(Tracked *t, UObject *mesh) {
     const BodyList *bl = bodies_of(mesh);
     FName bone = dinfo.bone ? *(const FName *)(best + FP_OFFSET(dinfo.bone)) : (FName){0, 0};
     ue_name(bone, hb, sizeof hb);
-    // the bone that takes the push: the hit bone, or its nearest parent with a body, else the first body (the root)
     Call k;
-    for (int up = 0; bone.idx && bl && !has_body(bl, bone) && up < 8; up++) {
-        if (!call_prep(&k, mesh, "GetParentBone")) { bone = (FName){0, 0}; break; }
-        SET(&k, "BoneName", FName, bone);
-        call_go(&k);
-        FName *r = carg(&k, "ReturnValue");
-        bone = r ? *r : (FName){0, 0};
-    }
-    if (bl && (!bone.idx || !has_body(bl, bone))) bone = bl->bone[0];
+    bone = body_bone(mesh, bl, bone);
     // where it was hit, and where from
     float pt[3], org[3], dr[3];
     const char *from;
@@ -2896,6 +2918,7 @@ static void undo(Tracked *t) {
     LOG("ragdoll: WARNING %s came back alive after its ragdoll (the game reuses Ridden actors): physics undone", oname(t->a, a, sizeof a));
     t->ragdolled = 0; t->done = 0; t->died_at = 0; t->rest = 0; t->released = 0; t->checks = 0; t->spared = 0; t->ended = 0;
     t->dism = 0; t->hid = 0; t->blast_ok = 0; t->painted = 0;
+    t->mass = 0; t->shots = 0; t->relcount = 0;
 }
 
 // ---- settle hold: the game swaps a ragdoll for its stand-in only once the body is at rest ----
@@ -2989,6 +3012,7 @@ static int settle_hold(Tracked *x) {
     }
     if (!why) return 1;
     x->released = 1;
+    if (x->relcount < 255 && x->relcount++) return 0;   // build 35: released again after a shot held it: counted once
     if (x->rest >= SETTLE_CHECKS) n_at_rest++; else n_capped++;
     settle_sum += age;
     if (age > settle_max) settle_max = age;
@@ -3077,6 +3101,245 @@ static void settle_arm(void) {   // game thread, at /ragdoll on; the hook stays 
     corpse_arm();   // only with the hold: without it bodies leave the budget the game's way
 }
 
+// ---- shots on dead bodies (build 35): every hit on a ragdoll that still simulates shoves it ----
+// Dead bodies take no damage event (build 14 trace): the game tells only its corpse manager, through the corpse's
+// ProceduralHitReactionComponent: UCorpseManager::OnCorpseHit(HitActor), no direction, bone or point. The game's own
+// nudge on a simulating body is tiny (Joon, 16 Oct: the same at /ragdoll push 0). Joon's choice (17 Oct): our own
+// shove, not finding and scaling the game's nudge first. The hit is queued in the ProcessEvent hook; the tick finds
+// who fired:
+//   aim trace     a hero whose aim (GetActorEyesViewPoint: where shots start and go, measured with bullet holes in
+//                 thirdperson.c; bots and other players too) runs through the body (K2_LineTraceComponent on its
+//                 mesh, i.e. its physics bodies): that bone, at that point;
+//   closest bone  else the hero whose aim passes closest to one of the body's bones, within SHOT_CONE degrees (or
+//                 SHOT_NEAR cm): shotgun pellets off the centre, recoil, a body that slid since the shot.
+// The shove is a real impulse along that aim (AddImpulseAtLocation, kg cm/s, as the killing hit's), on that bone or its
+// nearest parent with a body. Strength = the shooter's weapon kind (InventoryComponent.SelectedItemActor's class:
+// AR02_1_BP_C -> "AR", the push table's keys) x /ragdoll shot. All hits on one body in one frame (a shotgun's pellets)
+// make one shove. Left out: hits within SHOT_AFTER_DEATH of the death (the killing hit's, already pushed) and hits near
+// an explosion of the last SHOT_BLAST_S (the explosion's own, not anyone's aim). A body the settle hold had released
+// (at rest, the game's swap coming) is held again, so steady fire keeps it physical up to the SETTLE_CAP; one already
+// swapped for the stand-in can't move (a PoseableMesh), and its hidden real body has no collision to be hit.
+// Co-op: whether a client's game calls OnCorpseHit at all is unknown (the status line counts the hits).
+#define SHOT_DEFAULT      2.f      // x the push table per shove: about half a killing hit's throw per shot (first guess)
+#define SHOT_RANGE        10000.f  // cm along a hero's aim
+#define SHOT_CONE         10.f     // degrees off the aim, for the closest bone
+#define SHOT_NEAR         40.f     // cm off the aim, always close enough (short range)
+#define SHOT_AFTER_DEATH  0.05     // s: hits this close to the death are the killing hit's
+#define SHOT_BLAST_S      0.25     // s around an explosion: hits within BLAST_RANGE of it are its own
+#define SHOT_LOGS         40       // shoves logged per /ragdoll on
+#define SHOT_MISS_LOGS    20       // hits with no shooter found, logged per /ragdoll on
+#define SHOT_DUMPS        3        // OnCorpseHit calls logged with their parameters per /ragdoll on
+#define RC_SETTLED        0x1D2    // URagdollComponent: set by the swap (code dump; build 32 saw it on 12 of 12 swaps)
+#define SHOTQ             64
+#define DEG               57.29578f
+static float shot_scale = SHOT_DEFAULT;
+static int shot_state;   // OnCorpseHit: 0 not looked up, 1 ok, -1 missing (looked up again at /ragdoll on)
+static int lt_state;     // K2_LineTraceComponent: 0 not tried, 1 ok, -1 missing (closest bone only)
+static struct { UObject *a; double t; } shotq[SHOTQ];
+static int n_shotq;
+static int n_shot_hits, n_shoves, n_shove_trace, n_shove_near, n_shot_reheld, n_shot_noshooter, n_shot_early, n_shot_frozen,
+           n_shot_blast, n_shot_notours, n_shot_fail, n_shot_dropped, shot_logs, shot_miss_logs, shot_dumps;
+typedef struct { UObject *h; float eye[3], aim[3]; UObject *item; } Shooter;
+
+static void shot_reset(void) { n_shotq = 0; }
+
+static void shot_resolve(void) {
+    static const char *const MGR[] = {"CorpseManager", "GobiCorpseManager", NULL};
+    char cn[96], pn[64], t[64], line[512];
+    if (shot_state) return;
+    shot_state = -1;
+    UFunction *fn = NULL;
+    for (int i = 0; MGR[i] && !fn; i++) { UClass *c = cls(MGR[i]); fn = c ? ue_find_function(c, "OnCorpseHit") : NULL; }
+    FField *af = fn ? ue_find_prop(fn, "HitActor") : NULL;
+    for (FField *p = fn && !af ? US_CHILDPROPS(fn) : NULL; p; p = FF_NEXT(p))   // else its first object parameter
+        if ((FP_FLAGS(p) & CPF_PARM_) && !strcmp(ue_name(*(FName *)FF_CLASS(p), t, sizeof t), "ObjectProperty")) { af = p; break; }
+    if (!fn || !af) {
+        LOG("ragdoll shot: %s: shots on dead bodies off", fn ? "OnCorpseHit has no object parameter" : "no CorpseManager.OnCorpseHit");
+        return;
+    }
+    size_t k = (size_t)snprintf(line, sizeof line, "ragdoll shot: hits on bodies from %s.OnCorpseHit(", ue_obj_name(U_OUTER(fn), cn, sizeof cn));
+    for (FField *p = US_CHILDPROPS(fn); p && k + 64 < sizeof line; p = FF_NEXT(p))
+        if (FP_FLAGS(p) & CPF_PARM_)
+            k += (size_t)snprintf(line + k, sizeof line - k, "%s%s:%s@0x%x", p == US_CHILDPROPS(fn) ? "" : " ",
+                                  ue_name(FF_NAME(p), pn, sizeof pn), ue_name(*(FName *)FF_CLASS(p), t, sizeof t), FP_OFFSET(p));
+    LOG("%s), the body = %s", line, ue_name(FF_NAME(af), pn, sizeof pn));
+    corpse_hit_fn = fn;
+    corpse_hit_actor_f = af;
+    shot_state = 1;
+}
+
+// in the ProcessEvent hook: queue the hit for the tick (nothing heavy inside someone else's call)
+static void shot_note(UObject *o, UFunction *fn, void *params) {
+    n_shot_hits++;
+    UObject *a = corpse_hit_actor_f ? *(UObject **)((uint8_t *)params + FP_OFFSET(corpse_hit_actor_f)) : NULL;
+    if (!a || GetCurrentThreadId() != game_tid) { n_shot_dropped++; return; }
+    if (shot_dumps < SHOT_DUMPS) {
+        Tracked *x = dead_tracked(a);
+        shot_dumps++;
+        log_params("corpsehit", x ? now_s() - x->died_at : 0, a, o, fn, params);
+    }
+    if (shot_scale <= 0.f) return;
+    if (n_shotq == SHOTQ) { n_shot_dropped++; return; }
+    shotq[n_shotq].a = a;
+    shotq[n_shotq].t = now_s();
+    n_shotq++;
+}
+
+// every hero (players and bots): where its shots start and go, and what it holds
+static int shooters(Shooter *s, int max) {
+    UObject *hs[8];
+    int n = actors_of(cls("HeroCharacter"), hs, 8), k = 0;
+    for (int i = 0; i < n && i < 8 && k < max; i++) {
+        Call c;
+        if (!hs[i] || !call_prep(&c, hs[i], "GetActorEyesViewPoint")) continue;
+        call_go(&c);
+        float *l = carg(&c, "OutLocation"), *r = carg(&c, "OutRotation");
+        if (!l || !r) continue;
+        Shooter *x = &s[k++];
+        x->h = hs[i];
+        memcpy(x->eye, l, sizeof x->eye);
+        float p = r[0] / DEG, y = r[1] / DEG;   // FRotator (pitch, yaw, roll) in degrees
+        x->aim[0] = cosf(p) * cosf(y); x->aim[1] = cosf(p) * sinf(y); x->aim[2] = sinf(p);
+        UObject *inv = call_obj(hs[i], "GetInventoryComponent");
+        x->item = inv ? ue_get_ptr(inv, "SelectedItemActor") : NULL;
+    }
+    return k;
+}
+
+static float d3(const float a[3], const float b[3]) {
+    float x = a[0] - b[0], y = a[1] - b[1], z = a[2] - b[2];
+    return sqrtf(x * x + y * y + z * z);
+}
+
+// along a hero's aim through the body's mesh: 1 = hit (point, bone, distance), 0 = missed, -1 = can't trace
+static int aim_trace(UObject *mesh, const Shooter *s, float hit[3], FName *bone, float *dist) {
+    Call k;
+    if (lt_state < 0) return -1;
+    float *st = NULL, *en = NULL;
+    if (call_prep(&k, mesh, "K2_LineTraceComponent")) { st = carg(&k, "TraceStart"); en = carg(&k, "TraceEnd"); }
+    if (!st || !en) { lt_state = -1; LOG("ragdoll shot: no PrimitiveComponent.K2_LineTraceComponent(TraceStart, TraceEnd): the closest bone only"); return -1; }
+    for (int c = 0; c < 3; c++) { st[c] = s->eye[c]; en[c] = s->eye[c] + s->aim[c] * SHOT_RANGE; }
+    SET(&k, "bTraceComplex", uint8_t, 0);
+    SET(&k, "bShowTrace", uint8_t, 0);
+    SET(&k, "bPersistentShowTrace", uint8_t, 0);
+    call_go(&k);
+    uint8_t *r = carg(&k, "ReturnValue");
+    float *hl = carg(&k, "HitLocation");
+    FName *bn = carg(&k, "BoneName");
+    if (!lt_state) { lt_state = 1; LOG("ragdoll shot: aim traces with K2_LineTraceComponent (HitLocation %s, BoneName %s)", hl ? "yes" : "NO", bn ? "yes" : "NO"); }
+    if (!r || !*r || !hl) return 0;
+    memcpy(hit, hl, 3 * sizeof(float));
+    *bone = bn ? *bn : (FName){0, 0};
+    *dist = d3(hit, s->eye);
+    return 1;
+}
+
+static void shove(UObject *a, int hits, double first, double now, Shooter *sh, int *nsh) {
+    char ab[160], hb[160], kb[96], bb[64], pb[64], how[200];
+    Tracked *x = dead_tracked(a);
+    if (!x || !x->ragdolled || x->ended || !x->mesh) { n_shot_notours++; return; }   // bosses, pops, not seen dying
+    if (first < x->died_at + SHOT_AFTER_DEATH) { n_shot_early++; return; }
+    if ((x->rc && *((const uint8_t *)x->rc + RC_SETTLED)) || call_bool(x->mesh, "IsSimulatingPhysics") != 1) { n_shot_frozen++; return; }
+    const BodyList *bl = x->bodies ? x->bodies : bodies_of(x->mesh);
+    float at[3];   // where the body is: its first body (the root), else the actor
+    int have = bl && !bone_loc(x->mesh, bl->bone[0], at);
+    if (!have && actor_loc(x->a, at)) { n_shot_fail++; return; }
+    for (int i = 0; i < 8; i++)
+        if (blasts[i].t && fabs(first - blasts[i].t) <= SHOT_BLAST_S && d3(at, blasts[i].at) < BLAST_RANGE) { n_shot_blast++; return; }
+    if (*nsh < 0) *nsh = shooters(sh, 8);
+    int best = -1, mode = 0;
+    float pt[3] = {0}, along = 0, off_cm = 0, off_deg = 0;
+    FName bone = {0, 0};
+    for (int i = 0; i < *nsh; i++) {   // 1. an aim that runs through the body; the nearest shooter if several
+        float h[3], d;
+        FName b;
+        if (aim_trace(x->mesh, &sh[i], h, &b, &d) == 1 && (best < 0 || d < along)) {
+            best = i; mode = 1; along = d; bone = b;
+            memcpy(pt, h, sizeof pt);
+        }
+    }
+    if (best < 0 && bl) {   // 2. the aim that passes closest to one of its bones
+        float bp[MAX_BODIES][3], ang_best = 1e30f;
+        uint32_t ok = 0;
+        for (int j = 0; j < bl->n && j < MAX_BODIES; j++)
+            if (!((x->hid >> j) & 1) && !bone_loc(x->mesh, bl->bone[j], bp[j])) ok |= 1u << j;   // parts cut off: not aimed at
+        for (int i = 0; i < *nsh; i++)
+            for (int j = 0; j < bl->n && j < MAX_BODIES; j++) {
+                if (!((ok >> j) & 1)) continue;
+                float v[3] = {bp[j][0] - sh[i].eye[0], bp[j][1] - sh[i].eye[1], bp[j][2] - sh[i].eye[2]};
+                float t = v[0] * sh[i].aim[0] + v[1] * sh[i].aim[1] + v[2] * sh[i].aim[2];
+                if (t <= 0.f || t > SHOT_RANGE) continue;
+                float q[3] = {v[0] - t * sh[i].aim[0], v[1] - t * sh[i].aim[1], v[2] - t * sh[i].aim[2]};
+                float perp = sqrtf(q[0] * q[0] + q[1] * q[1] + q[2] * q[2]), ang = atan2f(perp, t) * DEG;
+                if ((perp > SHOT_NEAR && ang > SHOT_CONE) || ang >= ang_best) continue;
+                ang_best = ang; best = i; mode = 2; bone = bl->bone[j]; along = t; off_cm = perp; off_deg = ang;
+                memcpy(pt, bp[j], sizeof pt);
+            }
+    }
+    if (best < 0) {
+        n_shot_noshooter++;
+        if (shot_miss_logs < SHOT_MISS_LOGS) {
+            char ws[480];
+            size_t m = 0;
+            ws[0] = 0;
+            for (int i = 0; i < *nsh && m + 120 < sizeof ws; i++) {
+                float v[3] = {at[0] - sh[i].eye[0], at[1] - sh[i].eye[1], at[2] - sh[i].eye[2]}, d = d3(at, sh[i].eye);
+                float c = d > 0 ? (v[0] * sh[i].aim[0] + v[1] * sh[i].aim[1] + v[2] * sh[i].aim[2]) / d : 1;
+                m += (size_t)snprintf(ws + m, sizeof ws - m, "%s%s %.0f deg off, %.0f cm", i ? "; " : "", oname(sh[i].h, hb, sizeof hb),
+                                      acosf(c > 1 ? 1 : c < -1 ? -1 : c) * DEG, d);
+            }
+            shot_miss_logs++;
+            LOG("ragdoll shot: %s +%.2fs after death: %d hit(s), no hero aims at it (%d heroes: %s): not shoved",
+                oname(x->a, ab, sizeof ab), now - x->died_at, hits, *nsh, *nsh ? ws : "none found");
+        }
+        return;
+    }
+    PushKind *kind = kind_of(sh[best].item, kb, sizeof kb);   // nothing held: "None", the default strength
+    if (kind->radial) kind = push_kind("default", 0);         // a weapon is no blast
+    float strength = kind->n * shot_scale;
+    if (strength <= 0.f) return;
+    FName on = body_bone(x->mesh, bl, bone);
+    Call k;
+    float *ip = NULL, *lp = NULL;
+    if (call_prep(&k, x->mesh, "AddImpulseAtLocation")) { ip = carg(&k, "Impulse"); lp = carg(&k, "Location"); }
+    if (!ip || !lp) { n_shot_fail++; return; }
+    for (int c = 0; c < 3; c++) ip[c] = sh[best].aim[c] * strength;
+    memcpy(lp, pt, sizeof pt);
+    SET(&k, "BoneName", FName, on);
+    call_go(&k);
+    call_void(x->mesh, "WakeAllRigidBodies");
+    int reheld = x->released && now - x->died_at < SETTLE_CAP;   // at rest, about to be frozen: held again
+    if (reheld) { x->released = 0; x->rest = 0; n_shot_reheld++; }
+    if (!x->mass) x->mass = body_mass(x->mesh, bl);
+    n_shoves++; x->shots++;
+    if (mode == 1) n_shove_trace++; else n_shove_near++;
+    if (shot_logs < SHOT_LOGS) {
+        shot_logs++;
+        if (mode == 1) snprintf(how, sizeof how, "its aim runs through %s, %.0f cm away", bone.idx ? ue_name(bone, bb, sizeof bb) : "the body", along);
+        else snprintf(how, sizeof how, "its aim passes %.0f cm from %s (%.1f deg off), %.0f cm away", off_cm, ue_name(bone, bb, sizeof bb), off_deg, along);
+        LOG("ragdoll shot: %s +%.2fs after death: %d hit(s) this frame; shooter %s holding %s (%s %.0f x%.2f): %s; pushed on %s, "
+            "body %.1f kg (~%.0f cm/s for the whole body), shove #%d on it%s", oname(x->a, ab, sizeof ab), now - x->died_at, hits,
+            oname(sh[best].h, hb, sizeof hb), kb, kind->key, kind->n, shot_scale, how, on.idx ? ue_name(on, pb, sizeof pb) : "the root body",
+            x->mass, x->mass > 0 ? strength / x->mass : -1.f, x->shots, reheld ? "; it was at rest: held again" : "");
+    }
+}
+
+static void shot_tick(double now) {   // game thread: this frame's hits, one shove per body
+    if (!n_shotq) return;
+    Shooter sh[8];
+    int nsh = -1;   // the heroes, looked at once per tick when a hit needs them
+    for (int i = 0; i < n_shotq; i++) {
+        UObject *a = shotq[i].a;
+        if (!a) continue;
+        int hits = 0;
+        double first = shotq[i].t;
+        for (int j = i; j < n_shotq; j++)
+            if (shotq[j].a == a) { hits++; if (shotq[j].t < first) first = shotq[j].t; shotq[j].a = NULL; }
+        shove(a, hits, first, now, sh, &nsh);
+    }
+    n_shotq = 0;
+}
+
 // ---- deadline: every ragdoll is gone a fixed time after death, whatever the game does ----
 // The 10 s cap above is only looked at inside the game's settle check, so a body whose RagdollComponent never starts
 // that timer (seen: Retches, 16 Oct, never removed at any gravity) was held forever, and so was its extra gravity.
@@ -3119,6 +3382,7 @@ static void end_body(Tracked *x, double age) {
 void ragdoll_tick(float dt) {
     (void)dt;
     tick_n++;
+    game_tid = GetCurrentThreadId();   // the tick runs on the game thread (shot_note checks it)
     if (!mode_on && !tracing && !any_ragdolled()) return;
     if (tracing && now_s() > trace_end) trace_stop("time up");
     if (!world_check()) { for (int i = 0; i < 6; i++) if (watches[i].actor) watch_end(&watches[i]); return; }
@@ -3163,6 +3427,7 @@ void ragdoll_tick(float dt) {
         if (is_boss(x->a) || special_death(x)) continue;
         if (apply(x) == 0) n_applied++; else n_failed++;
     }
+    shot_tick(t);   // build 35: after the deaths of this tick are ragdolled
 }
 
 void ragdoll_slash(char *rest, Out *o) {
@@ -3184,6 +3449,11 @@ void ragdoll_slash(char *rest, Out *o) {
                    bloodbag_on ? "on" : bag_state < 0 ? "off but NOT AVAILABLE (see log)" : bag_state ? "off" : "off (not armed yet)",
                    n_bags_spared, blood_on ? (paint_state < 0 ? "NOT AVAILABLE" : "on") : "off", n_painted, stack_id,
                    tracing ? ", tracing" : "", n_overflow ? ", tracking list full" : "");
+        out_printf(o, "/ragdoll shots on bodies x%.2f%s: %d shoves from %d hits (%d by aim trace, %d by the closest bone; %d held "
+                      "again), %d with no shooter found, %d with the killing hit, %d already frozen, %d near an explosion, %d not "
+                      "ours, %d failed, %d dropped\n", shot_scale, shot_state < 0 ? " (NOT AVAILABLE: see log)" : "", n_shoves,
+                   n_shot_hits, n_shove_trace, n_shove_near, n_shot_reheld, n_shot_noshooter, n_shot_early, n_shot_frozen,
+                   n_shot_blast, n_shot_notours, n_shot_fail, n_shot_dropped);
     } else if (!strcmp(verb, "on")) {
         float d = arg ? (float)atof(arg) : 0.f;
         delay_s = d < 0 ? 0 : d > 10 ? 10 : d;
@@ -3191,6 +3461,10 @@ void ragdoll_slash(char *rest, Out *o) {
         detail_left = DETAIL_LOGS;
         settle_logs = 0;
         push_logs = hit_dumps = left_logs = bag_logs = 0;
+        shot_logs = shot_miss_logs = shot_dumps = 0;
+        if (shot_state < 0) shot_state = 0;   // look OnCorpseHit up again
+        shot_reset();
+        game_tid = GetCurrentThreadId();   // chat commands run on the game thread
         settle_arm();
         bag_arm();
         pe_update();
@@ -3324,6 +3598,21 @@ void ragdoll_slash(char *rest, Out *o) {
                                   push_tab[i].radial ? " (blast)" : "");
         out_printf(o, "/ragdoll push: x%.2f (0-10, default %.0f, 0 = off) on bodies that die from now on; kg cm/s per weapon "
                       "kind: %s\n", push_scale, PUSH_DEFAULT, line);
+    } else if (!strcmp(verb, "shot")) {   // build 35: shots on bodies that are still ragdolls
+        if (arg && (isdigit((unsigned char)arg[0]) || arg[0] == '.')) {
+            float x = (float)atof(arg);
+            shot_scale = x < 0.f ? 0.f : x > 10.f ? 10.f : x;
+        } else if (arg && !strcmp(arg, "off")) shot_scale = 0.f;
+        else if (arg && !strcmp(arg, "on")) shot_scale = SHOT_DEFAULT;
+        else if (arg) { out_printf(o, "usage: /ragdoll shot [<x> | on | off]\n"); return; }
+        if (arg) { shot_logs = shot_miss_logs = 0; LOG("ragdoll shot: x%.2f", shot_scale); }
+        PushKind *hg = push_kind("HG", 0), *ar = push_kind("AR", 0), *sg = push_kind("SG", 0);
+        const float common = 133.f;   // kg, a Common by GetBoneMass (build 18 log)
+        out_printf(o, "/ragdoll shot: x%.2f (0-10, default %.0f, 0 = off): a shot on a body that is still a ragdoll shoves it "
+                      "with the shooter's weapon strength from /ragdoll push's table x this; per shot a Common gets about %.0f "
+                      "cm/s from a pistol, %.0f from a rifle, %.0f from a shotgun%s; so far %d shoves\n", shot_scale, SHOT_DEFAULT,
+                   hg ? hg->n * shot_scale / common : 0.f, ar ? ar->n * shot_scale / common : 0.f, sg ? sg->n * shot_scale / common : 0.f,
+                   shot_state < 0 ? "; NOT AVAILABLE in this game (see log)" : "", n_shoves);
     } else if (!strcmp(verb, "probe")) {
         world_check();
         if (!mode_on && !tracing) for (int k = 0; k < 64; k++) scan_step();   // not scanning in the background: a full pass now
@@ -3335,7 +3624,7 @@ void ragdoll_slash(char *rest, Out *o) {
         if (tracing) trace_stop("restarted");
         if (trace_start(s, o) == 0) out_printf(o, "/ragdoll trace: %.0f s, kill a few Ridden now (log: \"ragdoll trace\" lines)\n", s);
     } else {
-        out_printf(o, "usage: /ragdoll [on [delay]|off|status|mass [x]|gravity [x]|deadline [s]|push [x|on|off|<kind> <n>]|bloodbag [on|off]|blood [on|off]|dismember [on|off|limbs <min> [max]|big <0-100>|head <0-100|on|off>|pieces on|off|type <n|auto>|impulse <n>]|probe|trace [secs]]\n");
+        out_printf(o, "usage: /ragdoll [on [delay]|off|status|mass [x]|gravity [x]|deadline [s]|push [x|on|off|<kind> <n>]|shot [x|on|off]|bloodbag [on|off]|blood [on|off]|dismember [on|off|limbs <min> [max]|big <0-100>|head <0-100|on|off>|pieces on|off|type <n|auto>|impulse <n>]|probe|trace [secs]]\n");
     }
 }
 
