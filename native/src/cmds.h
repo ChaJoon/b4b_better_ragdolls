@@ -46,6 +46,7 @@ int presence_live(const char *key, const char *val);
 int teamsize_live(const char *key, const char *val);
 int overlay_live(const char *key, const char *val);
 int addons_live(const char *key, const char *val);
+int ragdoll_live(const char *key, const char *val);   // fork: ragdoll.c, b4bcoop.ini ragdoll* keys
 // online.c (#47): the launch choice co-op / online (launcher: native/launcher/redirect.c). online_early from DllMain
 // (1 = the game is being closed: -b4bcoop=off/online but we were loaded), online_init from the init thread, ini
 // launch=ask|coop|online, its section in the ~ window's Settings tab.
