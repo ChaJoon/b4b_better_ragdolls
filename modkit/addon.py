@@ -223,7 +223,7 @@ def classify(items):
             else:
                 reasons.append(f"{what}: {base}")
         elif ext == ".uexp":
-            if stem + ".uasset" not in lower:
+            if stem + ".uasset" not in lower and stem + ".umap" not in lower:   # a map's header is its .umap
                 reasons.append(f"part of a package without its .uasset: {base}")
         elif ext in (".ubulk", ".uptnl"):
             pass
@@ -312,9 +312,9 @@ def check_names(names):
     lower = {n.lower() for n in names}
     for n in names:
         base, ext = os.path.splitext(n)
-        if ext.lower() == ".uasset" and (base + ".uexp").lower() not in lower:
-            warns.append(f"{n}: no {os.path.basename(base)}.uexp next to it (cooked packages come as .uasset + .uexp)")
-        if ext.lower() in (".uexp", ".ubulk") and (base + ".uasset").lower() not in lower:
+        if ext.lower() in (".uasset", ".umap") and (base + ".uexp").lower() not in lower:
+            warns.append(f"{n}: no {os.path.basename(base)}.uexp next to it (cooked packages come as {ext.lower()} + .uexp)")
+        if ext.lower() in (".uexp", ".ubulk") and (base + ".uasset").lower() not in lower and (base + ".umap").lower() not in lower:
             warns.append(f"{n}: no {os.path.basename(base)}.uasset next to it: part of a package only, mixes with the "
                          "game's own .uasset (may crash)")
     return errs, warns

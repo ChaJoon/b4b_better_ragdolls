@@ -87,7 +87,8 @@ static class Commands
 {
     public static UAsset Load(string p) => new UAsset(p, EngineVersion.VER_UE4_25);
 
-    // /Game/X/Y[.Y] or a file path -> (file on disk, path relative to the game root: Gobi/Content/X/Y.uasset)
+    // /Game/X/Y[.Y] or a file path -> (file on disk, path relative to the game root: Gobi/Content/X/Y.uasset, or
+    // Gobi/Content/X/Y.umap for a map: a map's header file is its .umap)
     public static (string file, string rel) Resolve(Opts o, string asset, string outdir = null)
     {
         string rel;
@@ -96,10 +97,13 @@ static class Commands
             var p = asset[6..];
             int dot = p.LastIndexOf('.'); if (dot > p.LastIndexOf('/')) p = p[..dot];
             rel = "Gobi/Content/" + p + ".uasset";
+            var map = "Gobi/Content/" + p + ".umap";
+            bool Has(string r) => (outdir != null && File.Exists(Path.Combine(outdir, r))) || File.Exists(Path.Combine(o.Src, r));
+            if (!Has(rel) && Has(map)) rel = map;
         }
         else
         {
-            var full = Path.GetFullPath(asset.EndsWith(".uasset") ? asset : Path.ChangeExtension(asset, ".uasset"));
+            var full = Path.GetFullPath(asset.EndsWith(".uasset") || asset.EndsWith(".umap") ? asset : Path.ChangeExtension(asset, ".uasset"));
             int k = full.Replace('\\', '/').LastIndexOf("/Gobi/Content/", StringComparison.OrdinalIgnoreCase);
             if (k < 0) throw new Exception($"{asset}: not under a Gobi/Content/ folder, can't tell its game path");
             if (!File.Exists(full)) throw new Exception($"{full}: not found");
@@ -118,7 +122,7 @@ static class Commands
         return (f, rel);
     }
 
-    public static string GamePath(string rel) => "/Game/" + rel["Gobi/Content/".Length..^".uasset".Length];
+    public static string GamePath(string rel) => "/Game/" + rel["Gobi/Content/".Length..^Path.GetExtension(rel).Length];
 
     static NormalExport MainExport(UAsset a) => a.Exports.OfType<NormalExport>().FirstOrDefault(e => e.bIsAsset)
         ?? a.Exports.OfType<NormalExport>().First();
@@ -329,13 +333,15 @@ static class Commands
         var (newPkg, newName) = Split(newPath);
         // name map entries: the package path and the asset's name, plus each --ref (an import's package and name).
         // Entries are changed in place, so every FName index in the export data stays valid.
-        var map = new Dictionary<string, string> { [oldPkg] = newPkg, [oldName] = newName };
+        // Also the full object path (/Game/X/Y.Y): soft references are one FName holding it (a map's actors pointing at
+        // each other through soft pointers, e.g. /Game/X/MAP_Y.MAP_Y with a PersistentLevel.Actor sub-path).
+        var map = new Dictionary<string, string> { [oldPkg] = newPkg, [oldName] = newName, [$"{oldPkg}.{oldName}"] = $"{newPkg}.{newName}" };
         foreach (var r in o.Refs)
         {
             int eq = r.IndexOf('=');
             if (eq < 0) throw new UsageException($"--ref {r}: expected /Game/old=/Game/new");
             var (op, on) = Split(r[..eq]); var (np, nn) = Split(r[(eq + 1)..]);
-            map[op] = np; map[on] = nn;
+            map[op] = np; map[on] = nn; map[$"{op}.{on}"] = $"{np}.{nn}";
         }
         var names = a.GetNameMapIndexList();
         int changed = 0;
@@ -367,7 +373,7 @@ static class Commands
                         if (ov.StartsWith("/Game/") && rec.TagMap[k].Contains(ov + "."))
                             rec.TagMap[k] = rec.TagMap[k].Replace(ov + "." + ov[(ov.LastIndexOf('/') + 1)..], nv2 + "." + nv2[(nv2.LastIndexOf('/') + 1)..]);
             }
-        var newRel = "Gobi/Content/" + newPkg["/Game/".Length..] + ".uasset";
+        var newRel = "Gobi/Content/" + newPkg["/Game/".Length..] + Path.GetExtension(rel);   // .uasset, or .umap for a map
         var e = MainExport(a);
         Console.WriteLine($"{oldPkg} -> {newPkg}: {changed} name(s) changed ({ClassOf(a, e)})");
         if (ClassOf(a, e) == "Texture2D")

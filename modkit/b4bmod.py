@@ -323,8 +323,13 @@ def extract(patterns, out=None, quiet=False):
 
 
 def asset_file(asset):
+    """The extracted header of a /Game/ package: its .uasset, or its .umap for a map."""
     p = pak_path(asset)
-    return os.path.join(src_dir(), *(p + ".uasset").split("/")) if p else asset
+    if not p:
+        return asset
+    f = os.path.join(src_dir(), *(p + ".uasset").split("/"))
+    m = f[:-len(".uasset")] + ".umap"
+    return m if not os.path.exists(f) and os.path.exists(m) else f
 
 
 def ensure(asset, folder=False):
