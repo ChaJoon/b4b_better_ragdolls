@@ -227,6 +227,7 @@ sent to the host.
 | `/ready vote` | Readies everyone for the post-round vote | `/ready vote` |
 | `/restart` | Restarts the current chapter (counts as a wipe) | `/restart` |
 | `/say <message>` | A message every player sees in their chat | `/say back in 5 min` |
+| `/map [<path> [easy\|normal\|hard\|veryhard\|plain] [?option=value]\|back]` | (Fork build, for custom-map tests.) Alone: the current map's path, game mode and options. With a path: loads that map (`/Game/Folder/MAP_Name`; from the game's files or an add-on) as a mission (the war table's travel without the campaign run; difficulty easy by default), or with `plain` under the map's own game mode. Words starting with `?` are added to the travel URL. `back`: to the map `/map` last left. Players in your game follow and need the same add-on. Refused if the path is in no file. | `/map /Game/b4bcoop/maps/test/MAP_Test` |
 | `/handoff <player>` | That player hosts from now on and everyone moves to them; in a mission the run goes on (see below) | `/handoff 2` |
 | `/model <player> <name\|reset>` | Changes a player's or a bot's look; everyone is told | `/model 2 doc_elite_03` |
 | `/models on\|off` | Allows or stops model swaps for everyone (on by default) | `/models off` |

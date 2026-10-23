@@ -123,6 +123,8 @@ void chat_tick(float dt);
 int ragdoll_init(void);
 void ragdoll_tick(float dt);
 void ragdoll_slash(char *rest, Out *o);
+// maptest.c (fork, custom-map tests): /map, host only: the current map, or a server travel to a map path
+void maptest_slash(char *rest, Out *o);
 int chat_cmd(const char *verb, char *rest, Out *o);
 void chat_local(const char *fmt, ...);  // local-only chat line(s)
 #define CHAT_NOTICE_TYPE L"b4bcoop"      // ClientTeamMessage Type of host notices (shown by chat.c on the receiver)

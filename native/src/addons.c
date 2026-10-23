@@ -254,6 +254,8 @@ static void classify(Addon *a, HANDLE h, const Ent *ents) {
     for (int i = 0; i < a->nfiles; i++) {
         size_t l = strlen(a->keys[i]);
         if (l > 7 && !strcmp(a->keys[i] + l - 7, ".uasset")) { Slot *s = slot_of(assets, cap, a->keys[i], l - 7); s->key = a->keys[i]; s->kl = l - 7; }
+        // a map's header is its .umap: its .uexp is a whole package too (the add-on is "gameplay: map", not "part of a package")
+        if (l > 5 && !strcmp(a->keys[i] + l - 5, ".umap")) { Slot *s = slot_of(assets, cap, a->keys[i], l - 5); s->key = a->keys[i]; s->kl = l - 5; }
     }
     for (int i = 0; i < a->nfiles; i++) {
         const char *k = a->keys[i];
