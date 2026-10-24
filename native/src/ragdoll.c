@@ -20,9 +20,9 @@
 //   /ragdoll carry [x]       build 38: a Ridden that dies running keeps its speed: x its running speed (0-2, default 1,
 //                            off = 0; see "momentum carry")
 //   /ragdoll carry keep <s>  build 39: how long a run's speed survives a stagger before the kill (0-3, default 1)
-//   /ragdoll tone [on|off|time <s>|strength <x>|legs <0.1-1>|kinds <K,K>]   build 38 experiment, off by default: bodies
-//                            killed by the listed weapon kinds (default HG,SMG) hold their pose and give out over time
-//                            s (legs first) instead of going limp at once (see "muscle tone")
+//   /ragdoll wounds [on|off|kinds <K,K>|small <K,K>|heads <K,K>|living off|arms|all|blast on|off]   build 40, on by
+//                            default: shots by SG, Sni, LMG, AR take off or open what they hit; HG, SMG only heads; blast
+//                            victims get 1-2 open wounds (see "wounds by weapon")
 //   /ragdoll bloodbag [on|off] off (default): Ridden an explosion would burst stay bodies (ragdolled, pushed)
 //   /ragdoll blood [on|off]  on (default): those bodies get the blood the game paints on the blast victims it keeps
 //   /ragdoll dismember [on|off|limbs <min> [max]|big <0-100>|head <0-100|on|off>|pieces on|off|type <n|auto>|
@@ -189,19 +189,15 @@ typedef struct {
     float mass;                            // build 35: the whole body's kg for the shot shoves (0 = not read yet)
     uint16_t shots;                        // build 35: shoves from shots after death
     uint8_t relcount;                      // build 35: settle-hold releases (a shot can hold a body again)
-    // build 38: momentum carry and muscle tone
+    // build 38: momentum carry (the muscle-tone experiment of build 38 was removed in build 40)
     UObject *mov;                          // its CharacterMovement (at scan time): the running speed while alive
-    int32_t movi, paci;                    // their object indexes (still the same objects?), as ai / lsi
+    int32_t movi;                          // its object index (still the same object?), as ai / lsi
     float run_v[3];                        // the movement's velocity at the last tick it was alive, cm/s
     double run_t;                          // when that was read (0 = never)
     float mem_v[3];                        // build 39: the fastest recent speed (fades over /ragdoll carry keep)
     double mem_t;                          // when it was read (0 = never)
     float carry;                           // cm/s of running speed given to the ragdoll (0 = none)
     char kind[24];                         // the killing hit's kind (a push table key), "" = not known
-    uint8_t tone;                          // muscle tone: 1 holding / giving out, 2 done (limp)
-    uint8_t tonep;                         // tone probe: samples done (bits), 0x80 = not probed
-    double tone_t0, tone_next;             // tone start; next drive update
-    UObject *pac;                          // its PhysicalAnimationComponent (tone)
     FName prof;
     float rel_loc[3], rel_rot[3];
 } Tracked;
@@ -248,6 +244,9 @@ static void note_corpse_class(UObject *ridden);
 static int is_corpse(UObject *o) { for (int k = 0; k < n_corpse_cls; k++) if (ue_is_a(o, corpse_cls[k])) return 1; return 0; }
 
 static int tracked_has(UObject *a) { for (int i = 0; i < ntr; i++) if (tr[i].a == a) return 1; return 0; }
+static void dmg_learn(UObject *actor);                                // build 40: wounds on living Ridden (below)
+static void wound_hook(UObject *o, UFunction *fn, void *params);
+static int wound_hook_wanted(void);
 
 static void scan_step(void) {
     int32_t n = ue_num_objects();
@@ -265,6 +264,7 @@ static void scan_step(void) {
         tr[ntr].mov = ue_get_ptr(o, "CharacterMovement");   // build 38: its running speed is read every tick
         tr[ntr].movi = tr[ntr].mov ? U_INDEX(tr[ntr].mov) : -1;
         ntr++;
+        dmg_learn(o);   // build 40: its class's OnDamage event (living hits)
     }
     scan_at = end;
 }
@@ -910,6 +910,7 @@ static void pe_detour(UObject *o, UFunction *fn, void *params) {
         if (tracing) fx_flush(b->t);
     }
     if (fn == corpse_hit_fn && corpse_hit_fn && params && mode_on) shot_note(o, fn, params);   // build 35
+    if (params && mode_on) wound_hook(o, fn, params);                                          // build 40
     if (tracing && o && fn && !own_call()) trace_call(o, fn, params);
     orig_pe(o, fn, params);
 }
@@ -919,7 +920,7 @@ static int pe_enabled;
 static int pe_update(void) {
     juice_resolve();
     shot_resolve();
-    int want = tracing || (mode_on && (explode_fn || corpse_hit_fn));   // with the ragdoll on: blast centres, shots on bodies
+    int want = tracing || (mode_on && (explode_fn || corpse_hit_fn || wound_hook_wanted()));   // blast centres, shots, living hits
     if (want && !hook_made) {
         InitializeCriticalSection(&tcs);
         if (MH_CreateHook((void *)ADDR_PROCESSEVENT, (void *)pe_detour, (void **)&orig_pe) != MH_OK) {
@@ -1421,6 +1422,7 @@ static const PushKind PUSH_DEF[] = {   // x the scale (default 4); a Common weig
     // Blasts, as strong as a frag until Joon picks (first guess). Gas cans kill by fire over seconds, 5-8 m away:
     // a burning body collapses where it stands, so no push (first guess too; /ragdoll push GasCan <n> to change)
     {"ExplodingBarrel", 60000, 1}, {"Exploder", 60000, 1}, {"GasCan", 0, 0},
+    {"Molotov", 0, 0},   // build 40: fire, like GasCan (build 38 log: Molotov_DamageType_C kills got the default 8000)
     {"Stumble", 0, 0}, {"default", 8000, 0},   // default: melee and any weapon not named here
 };
 #define N_PUSH_DEF ((int)(sizeof PUSH_DEF / sizeof PUSH_DEF[0]))
@@ -1635,17 +1637,14 @@ static float entry_key(const uint8_t *e) {   // larger = the killing hit
 }
 
 
-static int tone_on;   // build 38: /ragdoll tone (see "muscle tone"); it needs the killing hit's kind even with no push
+static int wounds_on = 1;   // build 40: /ragdoll wounds (see "wounds by weapon"); needs the killing hit even with no push
 
-static void push_body(Tracked *t, UObject *mesh) {
-    char a[160], tn[96], bn[64], hb[64], sn[96], sc[96];
-    if (push_scale <= 0.f && !tone_on) return;
-    UObject *hc = call_obj(t->a, "GetHealthComponent");
-    if (!hc || dinfo_init(hc) != 1) { n_push_fail++; return; }
-    const TArray *arr = (const TArray *)((char *)hc + dinfo.arr_off);
+// the killing hit in a body's RecentDamageInfo: the newest entry that isn't a stumble event (build 40: shared with the
+// wounds); NULL = none. `dump`: every entry into the log (the first deaths per /ragdoll on)
+static const uint8_t *killing_entry(Tracked *t, const TArray *arr, int dump) {
+    char a[160], sn[96];
     const uint8_t *best = NULL;
-    int dump = hit_dumps < HIT_DUMPS;
-    if (dump) { hit_dumps++; LOG("ragdoll push: %s: RecentDamageInfo, %d entries:", oname(t->a, a, sizeof a), arr->num); }
+    if (dump) LOG("ragdoll push: %s: RecentDamageInfo, %d entries:", oname(t->a, a, sizeof a), arr->num);
     for (int i = 0; arr->data && i < arr->num && i < 16; i++) {
         const uint8_t *e = (const uint8_t *)arr->data + (size_t)i * dinfo.elsize;
         if (dump) log_hit("entry", i, e);
@@ -1655,13 +1654,25 @@ static void push_body(Tracked *t, UObject *mesh) {
         if (dinfo.type) { PushKind *sk = kind_of(obj_field(dinfo.type, e), sn, sizeof sn); if (sk && !strcmp(sk->key, "Stumble")) continue; }
         if (!best || entry_key(e) >= entry_key(best)) best = e;   // ties: the later entry
     }
+    return best;
+}
+
+static void push_body(Tracked *t, UObject *mesh) {
+    char a[160], tn[96], bn[64], hb[64], sn[96], sc[96];
+    if (push_scale <= 0.f) return;
+    UObject *hc = call_obj(t->a, "GetHealthComponent");
+    if (!hc || dinfo_init(hc) != 1) { n_push_fail++; return; }
+    const TArray *arr = (const TArray *)((char *)hc + dinfo.arr_off);
+    int dump = hit_dumps < HIT_DUMPS;
+    if (dump) hit_dumps++;
+    const uint8_t *best = killing_entry(t, arr, dump);
     if (!best) {
         n_push_nohit++;
         if (push_logs < PUSH_LOGS) { push_logs++; LOG("ragdoll push: %s: no usable hit in RecentDamageInfo (%d entries): not pushed", oname(t->a, a, sizeof a), arr->num); }
         return;
     }
     PushKind *kind = dinfo.type ? kind_of(obj_field(dinfo.type, best), tn, sizeof tn) : (snprintf(tn, sizeof tn, "unknown"), push_kind("default", 0));
-    snprintf(t->kind, sizeof t->kind, "%s", kind->key);   // build 38: muscle tone picks bodies by it
+    snprintf(t->kind, sizeof t->kind, "%s", kind->key);   // the killing hit's kind, kept with the body
     float strength = kind->n * push_scale;
     if (strength <= 0.f) return;
     const BodyList *bl = bodies_of(mesh);
@@ -2387,11 +2398,14 @@ static void str_add(char *s, size_t n, const char *add) {
 
 static uint8_t piece_region(const TArray *pcs, int i) { return ((const uint8_t *)pcs->data + (size_t)i * mi.pel)[FP_OFFSET(mi.p_region)]; }
 
-// one MutilationInfo entry for `region` (Impulse away from the blast at `mag`, ImpactPoint the blast), then the game's
-// limb code; 1 = the region is off now (IsRegionDismembered, or the game appended its own copy), 0 = refused, -1 = no memory
-static int mstate_apply(Tracked *t, UObject *mut, TArray *arr, uint8_t region, int type, const float at[3], float mag, int watch, int *called) {
+// one MutilationInfo entry for `region` (Impulse from `from` toward `at` at `mag`, ImpactPoint `point`), then the game's
+// limb code; 1 = the region is off now (IsRegionDismembered, or the game appended its own copy), 0 = refused, -1 = no memory.
+// Build 40: a Rupture (an open wound) doesn't make the region "dismembered": judged by the game's appended copy.
+static int mstate_apply(Tracked *t, UObject *mut, TArray *arr, uint8_t region, int type, const float at[3], const float from[3],
+                        const float point[3], float mag, int watch, int *called) {
+    (void)t;
     float d[3];
-    for (int c = 0; c < 3; c++) d[c] = at[c] - t->blast_at[c];
+    for (int c = 0; c < 3; c++) d[c] = at[c] - from[c];
     float len = sqrtf(d[0] * d[0] + d[1] * d[1] + d[2] * d[2]);
     if (len < 1.f) { d[0] = 0; d[1] = 0; d[2] = 1; len = 1.f; }
     int32_t n0 = arr->num;
@@ -2400,8 +2414,9 @@ static int mstate_apply(Tracked *t, UObject *mut, TArray *arr, uint8_t region, i
     e[FP_OFFSET(mi.region)] = region;
     e[FP_OFFSET(mi.type)] = (uint8_t)type;
     float *im = (float *)(e + FP_OFFSET(mi.impulse)), *ip = (float *)(e + FP_OFFSET(mi.point));
-    for (int c = 0; c < 3; c++) { im[c] = d[c] / len * mag; ip[c] = t->blast_at[c]; }
+    for (int c = 0; c < 3; c++) { im[c] = d[c] / len * mag; ip[c] = point[c]; }
     *called = mstate_onrep(mut, watch);
+    if (type == mi.rupture) return arr->num > n0 + 1;
     int off = region_off(mut, region);
     return off >= 0 ? off : arr->num > n0 + 1;   // no IsRegionDismembered: the game appends its copy of what it applies
 }
@@ -2425,7 +2440,7 @@ static int head_try(Tracked *t, UObject *mut, TArray *arr, UObject *mesh, int ty
     for (int i = 0; i < 2 && !done; i++) {   // Rupture only if BreakOff was refused
         if (types[i] < 0 || (i && types[i] == type)) continue;
         int32_t n0 = arr->num;
-        int r = mstate_apply(t, mut, arr, (uint8_t)mi.head, types[i], at, mag, 0, &called);
+        int r = mstate_apply(t, mut, arr, (uint8_t)mi.head, types[i], at, t->blast_at, t->blast_at, mag, 0, &called);
         if (r < 0) return 0;
         int na = hidden_cuts(mesh, after, 24);
         nf = 0;
@@ -2451,6 +2466,322 @@ static int head_try(Tracked *t, UObject *mut, TArray *arr, UObject *mesh, int ty
             off ? "OFF" : "still on", cut_s, seen < 0 || now_n < 0 ? "?" : now_n > seen ? "yes" : "no");
     }
     return off;
+}
+
+// ---- wounds by weapon (build 40) ----
+// Joon (24 Oct, build 39): shotguns took nothing off, not even heads; snipers took limbs and heads but never opened a
+// body hit; a headshot (sniper, rifle) took the head AND opened the chest; explosions left the body whole apart from
+// the limbs. Wanted: what comes off or opens is where the shot lands. The game's own entries (build 38 log, rifle kills):
+// headshot = Head BreakOff (|Impulse| 2000) + Chest Rupture (20000) + often an upper arm Rupture; a thigh hit =
+// LeftLowerLeg BreakOff; a spine_03 hit = Stomach Rupture. So a Rupture is the open wound and a BreakOff a part off; the
+// game allows 2 ruptures per body (MaxRuptureWounds) and one arm off per Common (build 28).
+// For the wound kinds (push table keys, default SG,Sni,LMG,AR; "small" ones, default LMG,AR, get a weaker Impulse: a
+// guess at a smaller wound) the hit bone decides:
+//   head, neck              -> Head BreakOff                    (a dead body only: the killing shot, or one already down)
+//   hand                    -> <side>LowerArm BreakOff (wrist)
+//   forearm, upper arm      -> <side>UpperArm BreakOff (elbow: a Common has no shoulder cut)
+//   foot                    -> <side>LowerLeg BreakOff (ankle)
+//   calf, thigh             -> <side>UpperLeg BreakOff (knee: no hip cut)
+//   clavicle, spine_02/03   -> Chest Rupture
+//   spine_01, pelvis        -> Stomach Rupture
+// Head-only kinds (default HG,SMG, Joon 24 Oct): a killing headshot takes the head, nothing else.
+// Where the hits come from: the killing shot (RecentDamageInfo at the ragdoll, host and client, before the push: limbs
+// taken after a push took the push away, build 28), shots on bodies already down (build 35's aim trace: the bone, the
+// shooter's weapon), and hits on living Ridden (host only: the game's OnDamage event on the Ridden; /ragdoll wounds
+// living off | arms (arms and open wounds, default) | all (legs too: a living Ridden without shins walks on stumps)).
+// Heads never come off a living Ridden. A part already off is left alone (also a head the game's head-explosion card
+// took). Blast victims (/ragdoll dismember) also get 1 or 2 open wounds, chest and/or stomach (/ragdoll wounds blast).
+// The game's own random wounds still come on top (the headshot's chest rupture): each weapon damage type's settings are
+// logged once ("ragdoll wounds: damage type ...") to find what decides them, and the wound config once.
+// On a host every change replicates (MutilationState), so clients see the same wounds.
+#define WOUND_KINDS_DEF  "SG,Sni,LMG,AR"
+#define WOUND_SMALL_DEF  "LMG,AR"
+#define WOUND_HEADS_DEF  "HG,SMG"
+#define WOUND_LIVING_DEF 1
+#define WOUND_IMP_FULL   20000.f   // the game's own Rupture entries (build 38 log)
+#define WOUND_IMP_SMALL  5000.f    // a guess: if the Impulse sizes the wound, a smaller one
+#define WOUND_IMP_LIMB   2000.f    // the game's own BreakOff entries
+#define WOUND_LOGS       40
+#define WOUNDQ           64
+static const char *const LIVING_NAME[3] = {"off", "arms", "all"};
+static char wound_kinds[64] = WOUND_KINDS_DEF, wound_small[64] = WOUND_SMALL_DEF, wound_heads[64] = WOUND_HEADS_DEF;
+static int wound_living = WOUND_LIVING_DEF, wound_blast = 1;
+static int n_wound_hits, n_wound_off, n_wound_rupt, n_wound_refused, n_wound_already, n_wound_skip, n_wound_nomap,
+           n_wound_pieces, n_blast_rupt, wound_logs, wound_nomap_logs;
+
+static int kind_in(const char *list, const char *kind) {   // the kind is in the list (any case; "all" = every kind)
+    if (!kind || !kind[0]) return 0;
+    size_t kl = strlen(kind);
+    for (const char *p = list; *p; ) {
+        while (*p == ',' || *p == ' ') p++;
+        size_t n = 0;
+        while (p[n] && p[n] != ',' && p[n] != ' ') n++;
+        if (n && ((n == 3 && !_strnicmp(p, "all", 3)) || (n == kl && !_strnicmp(p, kind, n)))) return 1;
+        p += n;
+    }
+    return 0;
+}
+
+enum { WC_NONE, WC_HEAD, WC_ARM, WC_LEG, WC_BODY };
+// the region a hit on this bone opens or takes off ("RightUpperArm"), *rupture = an open wound; WC_NONE = nothing
+static int wound_class(const char *bone, char *region, size_t n, int *rupture) {
+    char low[64];
+    size_t i = 0;
+    for (; bone[i] && i + 1 < sizeof low; i++) low[i] = (char)tolower((unsigned char)bone[i]);
+    low[i] = 0;
+    const char *us = strrchr(low, '_');
+    const char *side = us && us[1] && !us[2] ? (us[1] == 'l' ? "Left" : us[1] == 'r' ? "Right" : NULL) : NULL;
+    *rupture = 0;
+    if (strstr(low, "head") || strstr(low, "neck")) { snprintf(region, n, "Head"); return WC_HEAD; }
+    if (strstr(low, "hand") && side) { snprintf(region, n, "%sLowerArm", side); return WC_ARM; }
+    if ((strstr(low, "lowerarm") || strstr(low, "upperarm") || strstr(low, "shoulder")) && side) { snprintf(region, n, "%sUpperArm", side); return WC_ARM; }
+    if ((strstr(low, "foot") || strstr(low, "ball") || strstr(low, "toe")) && side) { snprintf(region, n, "%sLowerLeg", side); return WC_LEG; }
+    if ((strstr(low, "calf") || strstr(low, "thigh")) && side) { snprintf(region, n, "%sUpperLeg", side); return WC_LEG; }
+    *rupture = 1;
+    if (strstr(low, "clavicle") || strstr(low, "spine_02") || strstr(low, "spine_03") || strstr(low, "chest")) { snprintf(region, n, "Chest"); return WC_BODY; }
+    if (strstr(low, "spine") || strstr(low, "pelvis") || strstr(low, "hip")) { snprintf(region, n, "Stomach"); return WC_BODY; }
+    *rupture = 0;
+    return WC_NONE;
+}
+
+static int mstate_has(const TArray *arr, uint8_t region, int type) {   // an entry for this region and type already
+    for (int i = 0; arr->data && i < arr->num; i++) {
+        const uint8_t *e = (const uint8_t *)arr->data + (size_t)i * mi.el;
+        if (e[FP_OFFSET(mi.region)] == region && e[FP_OFFSET(mi.type)] == (uint8_t)type) return 1;
+    }
+    return 0;
+}
+
+// discovery: every property of an object (its class chain down to Object), with values; `tag` names it in the log
+static void dump_obj(const char *tag, UObject *o) {
+    char b[128], pn[96], v[700], a[160];
+    if (!o) return;
+    LOG("ragdoll wounds: %s %s (%s):", tag, oname(o, a, sizeof a), cname(o, b, sizeof b));
+    for (UStruct *s = (UStruct *)U_CLASS(o); s; s = US_SUPER(s)) {
+        ue_obj_name(s, b, sizeof b);
+        if (!strcmp(b, "Object")) break;
+        for (FField *p = US_CHILDPROPS(s); p; p = FF_NEXT(p)) {
+            fmt_prop(p, (const uint8_t *)o, v, sizeof v, 2);
+            LOG("ragdoll wounds:   %s %s.%s = %s", tag, b, ue_name(FF_NAME(p), pn, sizeof pn), v);
+        }
+    }
+}
+static void dtype_probe(UObject *dtype) {   // each damage type once: what could decide the game's own wounds
+    static UClass *seen[32];
+    static int n_seen;
+    if (!dtype || n_seen >= 32) return;
+    UClass *c = U_CLASS(dtype);
+    for (int i = 0; i < n_seen; i++) if (seen[i] == c) return;
+    seen[n_seen++] = c;
+    dump_obj("damage type", dtype);
+}
+
+// What a hit by `kind` on `bone` does to the body (see above). alive: a living Ridden. from: where the shot came from.
+// 2 = a part came off, 1 = a wound opened, 0 = nothing
+static int wound_apply(Tracked *t, UObject *mesh, const char *kind, FName bone, const float from[3], int alive, const char *when) {
+    char a[160], c[96], bn[64], region[32], piece_s[64] = "";
+    if (!wounds_on || !mesh || !kind || !kind[0]) return 0;
+    int heads_only = kind_in(wound_heads, kind);
+    if (!heads_only && !kind_in(wound_kinds, kind)) return 0;
+    if (alive && !wound_living) return 0;
+    int rup = 0, wc = wound_class(ue_name(bone, bn, sizeof bn), region, sizeof region, &rup);
+    n_wound_hits++;
+    if (wc == WC_NONE) {
+        n_wound_nomap++;
+        if (wound_nomap_logs < 10) { wound_nomap_logs++; LOG("ragdoll wounds: %s hit on bone %s: no wound for it", when, bn); }
+        return 0;
+    }
+    if (heads_only && wc != WC_HEAD) return 0;
+    if (alive && (wc == WC_HEAD || (wc == WC_LEG && wound_living < 2))) { n_wound_skip++; return 0; }
+    UObject *mut = comp_of(t->a, "MutilationComponent");
+    if (!mut) return 0;
+    mi_init(U_CLASS(mut));
+    if (mi.state != 1) return 0;
+    static int cfg_dumped;
+    if (!cfg_dumped++) dump_obj("wound config", ue_get_ptr(mut, "WoundConfigsData"));
+    int type = rup ? mi.rupture : mi.breakoff, r = mi.region ? enum_value(mi.region, region) : -1;
+    if (type < 0 || r < 0 || r > 255) { n_wound_nomap++; return 0; }
+    TArray *arr = (TArray *)((uint8_t *)mut + FP_OFFSET(mi.arr));
+    if (rup ? mstate_has(arr, (uint8_t)r, type) : region_off(mut, (uint8_t)r) == 1) { n_wound_already++; return 0; }
+    float at[3];
+    if (bone_loc(mesh, bone, at) && actor_loc(t->a, at)) return 0;
+    int small = kind_in(wound_small, kind);
+    float mag = rup ? (small ? WOUND_IMP_SMALL : WOUND_IMP_FULL) : WOUND_IMP_LIMB;
+    UClass *pc = rup ? NULL : piece_class(mut);
+    int seen = pc ? actors_of(pc, NULL, 0) : -1, called = 0;
+    int32_t n0 = arr->num;
+    int off = mstate_apply(t, mut, arr, (uint8_t)r, type, at, from, at, mag, 0, &called);
+    if (off < 0) return 0;
+    if (!off) n_wound_refused++;
+    else if (rup) n_wound_rupt++;
+    else {
+        n_wound_off++;
+        int now_n = pc ? actors_of(pc, NULL, 0) : -1;
+        if (pc && seen >= 0 && now_n > seen) snprintf(piece_s, sizeof piece_s, ", a piece thrown by the game");
+        else if (dism_pieces && pc) {   // ours: the body's piece for this region, thrown away from the shot
+            const TArray *pcs = (const TArray *)((const uint8_t *)mut + FP_OFFSET(mi.pieces));
+            for (int i = 0; pcs->data && i < pcs->num && i < 64; i++) {
+                if (piece_region(pcs, i) != (uint8_t)r) continue;
+                const uint8_t *pe = (const uint8_t *)pcs->data + (size_t)i * mi.pel;
+                int pr = throw_piece(pc, mesh, pe, from, 600.f);
+                if (!pr) n_wound_pieces++;
+                snprintf(piece_s, sizeof piece_s, ", our piece: %s", piece_why(pr));
+                break;
+            }
+        }
+    }
+    if (off && t->ragdolled) {   // the limb code may have changed the body's physics: ours again (as dismember)
+        anim_off(ue_get_ptr(mesh, "AnimScriptInstance"), comp_of(t->a, "PhysicalAnimationComponent"));
+        sim_on(mesh);
+        call_void(mesh, "WakeAllRigidBodies");
+        t->hid = hidden_bodies(mesh);
+    }
+    if (wound_logs < WOUND_LOGS) {
+        wound_logs++;
+        LOG("ragdoll wounds: %s (%s) %s, %s on %s: %s %s%s -> %s (state %d -> %d entries, dismembered %d)%s",
+            oname(t->a, a, sizeof a), cname(t->a, c, sizeof c), when, kind, bn, region, rup ? "Rupture" : "BreakOff",
+            rup ? (small ? " (small)" : " (full)") : "", off ? (rup ? "opened" : "off") : "REFUSED", n0, arr->num,
+            region_off(mut, (uint8_t)r), piece_s);
+    }
+    return off ? (rup ? 1 : 2) : 0;
+}
+
+// the killing shot (at the ragdoll, before the push): its kind and bone from the body's RecentDamageInfo
+static void wound_kill(Tracked *t, UObject *mesh) {
+    char tn[96];
+    if (!wounds_on) return;
+    UObject *hc = call_obj(t->a, "GetHealthComponent");
+    if (!hc || dinfo_init(hc) != 1 || !dinfo.bone) return;
+    const uint8_t *best = killing_entry(t, (const TArray *)((char *)hc + dinfo.arr_off), 0);
+    if (!best) return;
+    UObject *dt = dinfo.type ? obj_field(dinfo.type, best) : NULL;
+    PushKind *kind = dinfo.type ? kind_of(dt, tn, sizeof tn) : push_kind("default", 0);
+    if (kind->radial) return;   // blasts: /ragdoll dismember
+    dtype_probe(dt);
+    FName bone = *(const FName *)(best + FP_OFFSET(dinfo.bone));
+    float from[3];
+    const float *sl = dinfo.srcloc ? (const float *)(best + FP_OFFSET(dinfo.srcloc)) : NULL;
+    UObject *src = dinfo.source ? obj_field(dinfo.source, best) : NULL;
+    if (sl && (sl[0] != 0.f || sl[1] != 0.f || sl[2] != 0.f)) memcpy(from, sl, sizeof from);
+    else if (!src || actor_loc(owner_actor(src) ? owner_actor(src) : src, from)) {
+        if (actor_loc(t->a, from)) return;
+        from[0] -= 100.f;   // no source: somewhere off the body
+    }
+    wound_apply(t, mesh, kind->key, bone, from, 0, "killing shot");
+}
+
+// blast victims: 1 or 2 open wounds (chest, stomach in a random order), the number of wounds opened; names into `out`
+static int blast_wounds(Tracked *t, UObject *mut, TArray *arr, UObject *mesh, char *out, size_t n) {
+    char rn[48];
+    if (!wounds_on || !wound_blast || mi.rupture < 0 || !mi.region) return 0;
+    int regs[2] = {enum_value(mi.region, "Chest"), enum_value(mi.region, "Stomach")}, want = 1 + rnd_below(2), got = 0, called = 0;
+    if (rnd_below(2)) { int x = regs[0]; regs[0] = regs[1]; regs[1] = x; }
+    static FName spine;
+    if (!spine.idx) spine = fname_of(L"spine_02");
+    float at[3];
+    if (bone_loc(mesh, spine, at) && actor_loc(t->a, at)) return 0;
+    for (int i = 0; i < 2 && got < want; i++) {
+        if (regs[i] < 0 || regs[i] > 255 || mstate_has(arr, (uint8_t)regs[i], mi.rupture)) continue;
+        if (mstate_apply(t, mut, arr, (uint8_t)regs[i], mi.rupture, at, t->blast_at, t->blast_at, WOUND_IMP_FULL, 0, &called) == 1) {
+            got++;
+            str_add(out, n, region_name(regs[i], rn, sizeof rn));
+        }
+    }
+    n_blast_rupt += got;
+    return got;
+}
+
+// ---- living hits (host): the game's OnDamage event on a Ridden (BndEvt__Health_..._OnDamageSignature, build 14) ----
+// Its DamageInfo has the bone and the damage type (server only: clients get the host's wounds by replication).
+// Learned per Ridden class as the scan finds them; the ProcessEvent hook compares the function pointer only and
+// queues the hit; the tick handles it (Ridden still alive only: a killing hit is the ragdoll's).
+static UFunction *dmg_fns[32];
+static int n_dmg_fns;
+static UClass *dmg_seen[48];
+static int n_dmg_seen;
+static struct { int state; FField *info, *bone, *type, *stumble, *point, *dir; } dmgi;
+typedef struct { UObject *a, *dtype; FName bone; float from[3]; } WoundHit;
+static WoundHit woundq[WOUNDQ];
+static int n_woundq, n_woundq_drop, n_living_hits;
+
+static void dmg_fields(UFunction *fn) {
+    char t[64], sn[96], fnm[64], line[1024];
+    if (dmgi.state) return;
+    dmgi.state = -1;
+    FField *p = ue_find_prop(fn, "DamageInfo");
+    UStruct *st = p && !strcmp(ue_name(*(FName *)FF_CLASS(p), t, sizeof t), "StructProperty") ? (UStruct *)FP_SUB(p) : NULL;
+    if (!st) { LOG("ragdoll wounds: the OnDamage event has no DamageInfo struct: no wounds on living Ridden"); return; }
+    dmgi.info = p;
+    dmgi.bone = ue_find_prop(st, "BoneName");
+    dmgi.type = ue_find_prop(st, "DamageType");
+    dmgi.stumble = ue_find_prop(st, "bStumbleEvent");
+    dmgi.point = ue_find_prop(st, "ImpactPoint");
+    dmgi.dir = ue_find_prop(st, "ImpactDirection");
+    size_t k = (size_t)snprintf(line, sizeof line, "ragdoll wounds: living hits from %s(DamageInfo: %s):", ue_obj_name(fn, fnm, sizeof fnm),
+                                ue_obj_name(st, sn, sizeof sn));
+    FField *f[5] = {dmgi.bone, dmgi.type, dmgi.stumble, dmgi.point, dmgi.dir};
+    const char *nm[5] = {"BoneName", "DamageType", "bStumbleEvent", "ImpactPoint", "ImpactDirection"};
+    for (int i = 0; i < 5; i++) k += (size_t)snprintf(line + k, sizeof line - k, " %s%s", nm[i], f[i] ? "" : " MISSING");
+    LOG("%s", line);
+    if (dmgi.bone && dmgi.type) dmgi.state = 1;
+}
+
+static void dmg_learn(UObject *actor) {   // game thread (the scan): this Ridden class's OnDamage events
+    char b[160];
+    UClass *c = actor ? U_CLASS(actor) : NULL;
+    if (!c) return;
+    for (int i = 0; i < n_dmg_seen; i++) if (dmg_seen[i] == c) return;
+    if (n_dmg_seen < 48) dmg_seen[n_dmg_seen++] = c;
+    for (UStruct *s = (UStruct *)c; s; s = US_SUPER(s)) {
+        ue_obj_name(s, b, sizeof b);
+        if (!strcmp(b, "GobiCharacter") || !strcmp(b, "Character") || !strcmp(b, "Object")) break;
+        for (UObject *f = US_CHILDREN(s); f; f = UF_NEXT(f)) {
+            ue_obj_name(f, b, sizeof b);
+            if (strncmp(b, "BndEvt__", 8) || !strstr(b, "OnDamageSignature")) continue;
+            int dup = 0;
+            for (int i = 0; i < n_dmg_fns; i++) if (dmg_fns[i] == (UFunction *)f) dup = 1;
+            if (dup || n_dmg_fns >= 32) continue;
+            dmg_fns[n_dmg_fns++] = (UFunction *)f;
+            dmg_fields((UFunction *)f);
+            if (n_dmg_fns == 1) pe_update();   // the hook may be off (no blast or corpse-hit function found)
+        }
+    }
+}
+
+static void wound_note(UObject *o, void *params) {   // in the ProcessEvent hook: queue it, nothing heavy here
+    if (GetCurrentThreadId() != game_tid) return;
+    const uint8_t *di = (const uint8_t *)params + FP_OFFSET(dmgi.info);
+    if (dmgi.stumble && bool_at(dmgi.stumble, di) == 1) return;
+    FName bone = *(const FName *)(di + FP_OFFSET(dmgi.bone));
+    if (!bone.idx) return;
+    if (n_woundq == WOUNDQ) { n_woundq_drop++; return; }
+    WoundHit *h = &woundq[n_woundq++];
+    h->a = o;
+    h->dtype = obj_field(dmgi.type, di);
+    h->bone = bone;
+    const float *pt = dmgi.point ? (const float *)(di + FP_OFFSET(dmgi.point)) : NULL;
+    const float *dr = dmgi.dir ? (const float *)(di + FP_OFFSET(dmgi.dir)) : NULL;
+    for (int c = 0; c < 3; c++) h->from[c] = (pt ? pt[c] : 0.f) - (dr ? dr[c] * 100.f : 0.f);
+}
+
+static void wound_tick(void) {   // game thread, after this tick's deaths are ragdolled
+    char kn[96];
+    for (int i = 0; i < n_woundq; i++) {
+        WoundHit *h = &woundq[i];
+        Tracked *x = any_tracked(h->a);
+        if (!x || x->died_at || x->done || !ue_object_usable(x->a, x->ai) || call_bool(x->ls, "IsAlive") != 1) continue;
+        PushKind *k = kind_of(h->dtype, kn, sizeof kn);
+        if (k->radial || !strcmp(k->key, "Stumble")) continue;
+        n_living_hits++;
+        wound_apply(x, ue_get_ptr(x->a, "Mesh"), k->key, h->bone, h->from, 1, "alive");
+    }
+    n_woundq = 0;
+}
+
+static int wound_hook_wanted(void) { return wounds_on && wound_living && n_dmg_fns > 0; }
+static void wound_hook(UObject *o, UFunction *fn, void *params) {   // in the ProcessEvent hook (any call while on)
+    if (!wounds_on || !wound_living || dmgi.state != 1) return;
+    for (int i = 0; i < n_dmg_fns; i++) if (fn == dmg_fns[i]) { wound_note(o, params); return; }
 }
 
 static void dismember(Tracked *t, UObject *mesh, float dv, Blast *bl) {
@@ -2508,7 +2839,7 @@ static void dismember(Tracked *t, UObject *mesh, float dv, Blast *bl) {
             FName bone = *(const FName *)(pe + FP_OFFSET(mi.p_bone));
             float at[3];
             if (bone_loc(mesh, bone, at) && actor_loc(t->a, at)) continue;
-            int off = mstate_apply(t, mut, arr, region, type, at, mag, watch, &called);
+            int off = mstate_apply(t, mut, arr, region, type, at, t->blast_at, t->blast_at, mag, watch, &called);
             if (off < 0) { LOG("ragdoll dismember: allocation failed"); oi = no; break; }
             region_name(region, rn, sizeof rn);
             if (!off) { refused++; str_add(refs, sizeof refs, rn); continue; }   // (our entry stays: harmless, see build 31)
@@ -2527,6 +2858,8 @@ static void dismember(Tracked *t, UObject *mesh, float dv, Blast *bl) {
         }
     }
     int head = dism_head > 0 && rnd_below(100) < dism_head ? 1 + head_try(t, mut, arr, mesh, type, mag, pc) : 0;   // 0 untried, 1 on, 2 off
+    char wnames[48] = "";
+    int wn = blast_wounds(t, mut, arr, mesh, wnames, sizeof wnames);   // build 40: open wounds (chest, stomach)
     n_limbs_off += got;
     n_limbs_refused += refused;
     n_big += big; n_small += small;
@@ -2535,7 +2868,7 @@ static void dismember(Tracked *t, UObject *mesh, float dv, Blast *bl) {
         bl->heads += head > 0; bl->heads_off += head == 2;
         if (refused) str_add(bl->refused_s, sizeof bl->refused_s, refs);
     }
-    if (!got && head != 2) {
+    if (!got && head != 2 && !wn) {
         n_dism_fail++;
         if (dism_logs < 40) { dism_logs++; LOG("ragdoll dismember: %s: no limb came off (refused: %s)", oname(t->a, a, sizeof a), refs[0] ? refs : "none tried"); }
         return;
@@ -2574,9 +2907,10 @@ static void dismember(Tracked *t, UObject *mesh, float dv, Blast *bl) {
     if (dism_probed < 3) { dism_probed++; t->limbp = 1; limb_probe(t, "at the dismember", regs); }
     if (dism_logs < 40) {
         dism_logs++;
-        LOG("ragdoll dismember: %s: %d of %d limbs off (%s; %d big, %d small)%s%s%s; pieces: %d by the game, %d by us%s%s; "
-            "OnRep_MutilationState %s, state now %d entries, %d bodies under the cuts", oname(t->a, a, sizeof a), got, want, offs,
-            big, small, refused ? ", refused " : "", refs, head == 2 ? ", head OFF" : head ? ", head still on" : "", game_pc,
+        LOG("ragdoll dismember: %s: %d of %d limbs off (%s; %d big, %d small)%s%s%s, open wounds: %s; pieces: %d by the game, %d "
+            "by us%s%s; OnRep_MutilationState %s, state now %d entries, %d bodies under the cuts", oname(t->a, a, sizeof a), got, want,
+            offs, big, small, refused ? ", refused " : "", refs, head == 2 ? ", head OFF" : head ? ", head still on" : "",
+            wn ? wnames : "none", game_pc,
             our_pc, pc_fail ? " (some failed)" : "", pc_skel ? " (skeletal pieces skipped)" : "", called ? "called" : "NOT FOUND",
             arr->num, __builtin_popcount(t->hid));
     }
@@ -2827,7 +3161,7 @@ static void vel_probe_tick(Tracked *x, double now) {
             "%.0f; push %.0f cm/s, running speed carried %.0f cm/s%s; simulating %d, montage %d, physical animation x%s",
             oname(x->a, a, sizeof a), x->push_dv > 0.f ? (x->dism ? "dismembered" : "not dismembered") : "died running",
             VEL_T[i], sqrtf(sum[0] * sum[0] + sum[1] * sum[1] + sum[2] * sum[2]), sum[2], sqrtf(sum[0] * sum[0] + sum[1] * sum[1]),
-            top, x->push_dv, x->carry, x->tone == 1 ? ", muscle tone on" : "",
+            top, x->push_dv, x->carry, "",
             call_bool(x->mesh, "IsSimulatingPhysics"), ai ? call_bool(ai, "IsAnyMontagePlaying") : -1, pm);
     }
 }
@@ -3012,279 +3346,6 @@ static void carry_body(Tracked *t, UObject *mesh) {
     }
 }
 
-// ---- muscle tone (build 38 experiment: /ragdoll tone, off by default) ----
-// Joon (24 Oct): weak-gun kills (HG, SMG) shouldn't go limp at once but hold on and give out, legs first (to the
-// knees, staggering under more shots), as in L4D2, with no animation of B4B's or L4D2's. The game's own
-// PhysicalAnimationComponent (Unreal's; it drove the vanilla "lunge") is used as muscles: for a body killed by one of
-// the tone kinds every joint gets an orientation drive local to its parent body (bIsLocalSimulation: a joint angle,
-// not a string pulling the body to a place in the world) toward the pose the animation holds, at a strength that fades
-// as 1 - (age / its time)^2 (holds, then buckles): the legs (thighs and below) over legs x time, the rest over the whole
-// time. Updated every TONE_STEP (ApplyPhysicalAnimationSettingsBelow); at the end the drive multiplier goes to 0: the
-// ragdoll as before. Shots during it shove the body (build 35) and the drives pull it back (the stagger). The settle
-// hold keeps the game's swap away until the tone is done. Blast victims are thrown, never toned.
-// Unknown before the run, logged ("ragdoll tone probe", 3 bodies per change; "ragdoll tone" lines):
-//   - what pose the drives aim at after the game pauses the animation (~0.25 s after death, build 6 watch): the death
-//     pose kept (what we want: the body sags against it), or the body's own pose (no hold at all: the drives do nothing);
-//   - whether the game detaches the component or zeroes its multiplier again (its death reaction did at ~0.25-0.5 s):
-//     both are put back at every update, and counted;
-//   - the strength: TONE_ORIENT is Unreal's own profile default, a first guess (/ragdoll tone strength <x> live).
-#define TONE_TIME_DEF   1.5f
-#define TONE_STR_DEF    1.f
-#define TONE_LEGS_DEF   0.4f
-#define TONE_KINDS_DEF  "HG,SMG"
-#define TONE_ORIENT     1000.f   // OrientationStrength at x1
-#define TONE_ANGVEL     100.f    // AngularVelocityStrength at x1 (the drive's damping)
-#define TONE_MAXF       1e9f     // MaxAngularForce: no real limit (whether 0 means "none" or "zero" here isn't known)
-#define TONE_STEP       0.1      // s between drive updates
-#define TONE_LOGS       20
-static float tone_time = TONE_TIME_DEF, tone_str = TONE_STR_DEF, tone_legs = TONE_LEGS_DEF;
-static char tone_kinds[64] = TONE_KINDS_DEF;
-static int n_toned, n_tone_done, n_tone_reattach, n_tone_rezero, n_tone_montage, n_tone_wake, n_tone_gone, n_tone_fail, n_tone_nopac,
-           tone_logs, tone_fix_logs, tone_probes;
-static struct {
-    int state;                                // 0 not looked up, 1 ok, -1 missing (logged)
-    FField *p_body, *p_data, *p_self;         // ApplyPhysicalAnimationSettingsBelow(BodyName, PhysicalAnimationData, bIncludeSelf)
-    FField *f_or, *f_av, *f_ma, *f_local;     // FPhysicalAnimationData's fields
-    FField *tt_ret; int32_t tt_trans;         // GetBodyTargetTransform's FTransform and its Translation (NULL: no probe)
-    int32_t mult_off;                         // StrengthMultiplyer, -1 unknown
-    FField *mesh_f;                           // its SkeletalMeshComponent (detached by the game?), NULL unknown
-} pa;
-
-static int pa_init(UObject *pac) {
-    if (pa.state) return pa.state;
-    char t[64], sn[96], fn[64], line[1024];
-    pa.state = -1;
-    UClass *c = U_CLASS(pac);
-    UFunction *f = ue_find_function(c, "ApplyPhysicalAnimationSettingsBelow");
-    pa.p_body = f ? ue_find_prop(f, "BodyName") : NULL;
-    pa.p_data = f ? ue_find_prop(f, "PhysicalAnimationData") : NULL;
-    pa.p_self = f ? ue_find_prop(f, "bIncludeSelf") : NULL;
-    UStruct *st = pa.p_data && !strcmp(ue_name(*(FName *)FF_CLASS(pa.p_data), t, sizeof t), "StructProperty") ? (UStruct *)FP_SUB(pa.p_data) : NULL;
-    if (!pa.p_body || !st || !pa.p_self) {
-        LOG("ragdoll tone: no %s.ApplyPhysicalAnimationSettingsBelow(BodyName, PhysicalAnimationData, bIncludeSelf): muscle tone off",
-            ue_obj_name(c, sn, sizeof sn));
-        return -1;
-    }
-    size_t k = (size_t)snprintf(line, sizeof line, "ragdoll tone: %s (%d bytes):", ue_obj_name(st, sn, sizeof sn), US_PROPSSIZE(st));
-    for (FField *p = US_CHILDPROPS(st); p && k + 64 < sizeof line; p = FF_NEXT(p))
-        k += (size_t)snprintf(line + k, sizeof line - k, " %s:%s@0x%x", ue_name(FF_NAME(p), fn, sizeof fn),
-                              ue_name(*(FName *)FF_CLASS(p), t, sizeof t), FP_OFFSET(p));
-    LOG("%s", line);
-    pa.f_or = ue_find_prop(st, "OrientationStrength");
-    pa.f_av = ue_find_prop(st, "AngularVelocityStrength");
-    pa.f_ma = ue_find_prop(st, "MaxAngularForce");
-    pa.f_local = ue_find_prop(st, "bIsLocalSimulation");
-    if (!pa.f_or || !pa.f_av || !pa.f_local || FBP_SIZE(pa.f_local) != 1 || !FBP_MASK(pa.f_local) ||
-        !ue_find_function(c, "SetStrengthMultiplyer")) {
-        LOG("ragdoll tone: no OrientationStrength / AngularVelocityStrength / a settable bIsLocalSimulation, or no "
-            "SetStrengthMultiplyer: muscle tone off");
-        return -1;
-    }
-    pa.mult_off = ue_prop_offset(pac, "StrengthMultiplyer");
-    pa.mesh_f = ue_find_prop(c, "SkeletalMeshComponent");
-    UFunction *g = ue_find_function(c, "GetBodyTargetTransform");
-    FField *r = g ? ue_find_prop(g, "ReturnValue") : NULL;
-    FField *tl = r && !strcmp(ue_name(*(FName *)FF_CLASS(r), t, sizeof t), "StructProperty") ? ue_find_prop((UStruct *)FP_SUB(r), "Translation") : NULL;
-    if (tl) { pa.tt_ret = r; pa.tt_trans = FP_OFFSET(tl); }
-    LOG("ragdoll tone: drives through %s.ApplyPhysicalAnimationSettingsBelow; its multiplier %s; its mesh %s; target probe %s",
-        ue_obj_name(c, sn, sizeof sn), pa.mult_off >= 0 ? "readable" : "NOT readable",
-        pa.mesh_f ? "readable (attached again if the game detaches it)" : "NOT readable (attached once at the start)",
-        tl ? "with GetBodyTargetTransform" : "none (no GetBodyTargetTransform)");
-    return pa.state = 1;
-}
-
-static int tone_kind(const char *kind) {   // the killing hit's kind is in tone_kinds (any case; "all" = every kind)
-    if (!kind[0]) return 0;
-    size_t kl = strlen(kind);
-    for (const char *p = tone_kinds; *p; ) {
-        while (*p == ',' || *p == ' ') p++;
-        size_t n = 0;
-        while (p[n] && p[n] != ',' && p[n] != ' ') n++;
-        if (n && ((n == 3 && !_strnicmp(p, "all", 3)) || (n == kl && !_strnicmp(p, kind, n)))) return 1;
-        p += n;
-    }
-    return 0;
-}
-
-static int pa_attached(UObject *pac, UObject *mesh) {   // 1 yes, 0 no, -1 can't tell
-    return pa.mesh_f ? *(UObject **)((char *)pac + FP_OFFSET(pa.mesh_f)) == mesh : -1;
-}
-static void pa_attach(UObject *pac, UObject *mesh) {   // SetSkeletalMeshComponent (erases the component's drives)
-    Call k;
-    char t[64];
-    if (!call_prep(&k, pac, "SetSkeletalMeshComponent")) return;
-    UObject **m = carg(&k, "InSkeletalMeshComponent");
-    for (FField *p = m ? NULL : US_CHILDPROPS(k.fn); p && !m; p = FF_NEXT(p))   // else its first object parameter
-        if ((FP_FLAGS(p) & CPF_PARM_) && !strcmp(ue_name(*(FName *)FF_CLASS(p), t, sizeof t), "ObjectProperty")) m = (UObject **)(k.p + FP_OFFSET(p));
-    if (m) { *m = mesh; call_go(&k); }
-}
-static void pa_mult(UObject *pac, float m) {
-    Call k;
-    if (call_prep(&k, pac, "SetStrengthMultiplyer")) { SET(&k, "InStrengthMultiplyer", float, m); call_go(&k); }
-}
-// a drive of strength s (x TONE_ORIENT) on the body of `bone` and every body below it
-static void tone_drive(UObject *pac, FName bone, float s) {
-    Call k;
-    if (!call_prep(&k, pac, "ApplyPhysicalAnimationSettingsBelow")) return;
-    *(FName *)(k.p + FP_OFFSET(pa.p_body)) = bone;
-    uint8_t *d = k.p + FP_OFFSET(pa.p_data);
-    *(float *)(d + FP_OFFSET(pa.f_or)) = TONE_ORIENT * s;
-    *(float *)(d + FP_OFFSET(pa.f_av)) = TONE_ANGVEL * s;
-    if (pa.f_ma) *(float *)(d + FP_OFFSET(pa.f_ma)) = TONE_MAXF;
-    d[FP_OFFSET(pa.f_local) + FBP_BYTEOFF(pa.f_local)] |= FBP_MASK(pa.f_local);
-    k.p[FP_OFFSET(pa.p_self)] = 1;
-    call_go(&k);
-}
-
-// a body's index in the list whose bone name contains `part` (any case), -1 none
-static int body_named(const BodyList *bl, const char *part) {
-    char b[64];
-    const char *keys[2] = {part, NULL};
-    for (int i = 0; bl && i < bl->n; i++) if (name_has(ue_name(bl->bone[i], b, sizeof b), keys)) return i;
-    return -1;
-}
-
-static float tone_fade(float u) { return u >= 1.f ? 0.f : u <= 0.f ? 1.f : 1.f - u * u; }
-
-static void tone_update(Tracked *x, double age) {
-    char a[160];
-    const BodyList *bl = bodies_of(x->mesh);
-    if (!bl) return;
-    float s_all = tone_str * tone_fade((float)(age / tone_time)), s_legs = tone_str * tone_fade((float)(age / (tone_time * tone_legs)));
-    if (pa_attached(x->pac, x->mesh) == 0) {
-        pa_attach(x->pac, x->mesh);
-        n_tone_reattach++;
-        if (tone_fix_logs < 10) { tone_fix_logs++; LOG("ragdoll tone: %s +%.2fs: the physical animation was detached (the game?): attached again", oname(x->a, a, sizeof a), age); }
-    }
-    // the component moves its drive targets in its own tick: switched off (the game's death code?), the targets stay put
-    int act = call_bool(x->pac, "IsActive"), tk = call_bool(x->pac, "IsComponentTickEnabled");
-    if (act == 0 || tk == 0) {
-        Call k;
-        if (act == 0 && call_prep(&k, x->pac, "Activate")) { SET(&k, "bReset", uint8_t, 0); call_go(&k); }
-        if (tk == 0 && call_prep(&k, x->pac, "SetComponentTickEnabled")) { SET(&k, "bEnabled", uint8_t, 1); call_go(&k); }
-        n_tone_wake++;
-        if (tone_fix_logs < 10) { tone_fix_logs++; LOG("ragdoll tone: %s +%.2fs: the physical animation was %s (the game?): switched on again -> active %d, ticking %d",
-                                                       oname(x->a, a, sizeof a), age, act == 0 ? (tk == 0 ? "inactive, not ticking" : "inactive") : "not ticking",
-                                                       call_bool(x->pac, "IsActive"), call_bool(x->pac, "IsComponentTickEnabled")); }
-    }
-    if (age > 0 && pa.mult_off >= 0 && *(float *)((char *)x->pac + pa.mult_off) != 1.f) {
-        n_tone_rezero++;
-        if (tone_fix_logs < 10) { tone_fix_logs++; LOG("ragdoll tone: %s +%.2fs: its drive multiplier was %.2f (the game?): back to 1", oname(x->a, a, sizeof a), age, *(float *)((char *)x->pac + pa.mult_off)); }
-        pa_mult(x->pac, 1.f);
-    }
-    UObject *ai = ue_get_ptr(x->mesh, "AnimScriptInstance");
-    if (ai && age > 0 && call_bool(ai, "IsAnyMontagePlaying") == 1) { anim_off(ai, NULL); n_tone_montage++; }   // it would be the target
-    int root = body_named(bl, "pelvis"), l1 = body_named(bl, "thigh_l"), l2 = body_named(bl, "thigh_r");
-    tone_drive(x->pac, bl->bone[root >= 0 ? root : 0], s_all);
-    if (l1 >= 0) tone_drive(x->pac, bl->bone[l1], s_legs);
-    if (l2 >= 0) tone_drive(x->pac, bl->bone[l2], s_legs);
-}
-
-// the probe: 3 bodies per /ragdoll tone change, at these times after the tone started: where 3 of its bodies are and
-// where the drives want them (GetBodyTargetTransform), and how far each moved since the last sample
-static const double TPROBE_T[] = {0.0, 0.1, 0.25, 0.5, 1.0};
-#define N_TPROBE ((int)(sizeof TPROBE_T / sizeof TPROBE_T[0]))
-static struct { UObject *a; float pb[3][3], pt[3][3]; } tpr[3];
-
-static int target_loc(UObject *pac, FName bone, float out[3]) {
-    Call k;
-    if (!pa.tt_ret || !call_prep(&k, pac, "GetBodyTargetTransform")) return -1;
-    SET(&k, "BodyName", FName, bone);
-    call_go(&k);
-    memcpy(out, k.p + FP_OFFSET(pa.tt_ret) + pa.tt_trans, 3 * sizeof(float));
-    return 0;
-}
-
-static void tone_probe(Tracked *x, double age) {
-    int i = 0;
-    while (i < N_TPROBE && (x->tonep & (1u << i))) i++;
-    if (i >= N_TPROBE) { x->tonep = 0x80; return; }
-    if (age < TPROBE_T[i]) return;
-    x->tonep |= (uint8_t)(1u << i);
-    int s = -1;
-    for (int j = 0; j < 3 && s < 0; j++) if (tpr[j].a == x->a) s = j;
-    for (int j = 0; j < 3 && s < 0; j++) if (!tpr[j].a) { s = j; memset(&tpr[j], 0, sizeof tpr[j]); tpr[j].a = x->a; }
-    if (s < 0) { x->tonep = 0x80; return; }
-    const BodyList *bl = bodies_of(x->mesh);
-    if (!bl) { x->tonep = 0x80; return; }
-    int pick[3] = {body_named(bl, "head"), body_named(bl, "calf_l"), body_named(bl, "hand_r")};
-    if (pick[0] < 0) pick[0] = body_named(bl, "neck");
-    char line[1400], a[160], bn[64], pm[16];
-    FField *pf = ue_find_prop(U_CLASS(x->mesh), "bPauseAnims");
-    UObject *ai = ue_get_ptr(x->mesh, "AnimScriptInstance");
-    if (pa.mult_off >= 0) snprintf(pm, sizeof pm, "%.2f", *(float *)((char *)x->pac + pa.mult_off)); else snprintf(pm, sizeof pm, "?");
-    int att = pa_attached(x->pac, x->mesh);
-    size_t k = (size_t)snprintf(line, sizeof line, "ragdoll tone probe %s +%.2fs: drive multiplier %s, attached %s, active %d, ticking %d, "
-                                "animation paused %d, montage %d, simulating %d;", oname(x->a, a, sizeof a), age, pm,
-                                att < 0 ? "?" : att ? "yes" : "NO", call_bool(x->pac, "IsActive"), call_bool(x->pac, "IsComponentTickEnabled"),
-                                pf ? bool_at(pf, (const uint8_t *)x->mesh) : -1, ai ? call_bool(ai, "IsAnyMontagePlaying") : -1,
-                                call_bool(x->mesh, "IsSimulatingPhysics"));
-    for (int j = 0; j < 3 && k + 200 < sizeof line; j++) {
-        if (pick[j] < 0) continue;
-        FName b = bl->bone[pick[j]];
-        float pb[3], pt[3];
-        if (bone_loc(x->mesh, b, pb)) continue;
-        int ht = !target_loc(x->pac, b, pt);
-        float mb[3] = {pb[0] - tpr[s].pb[j][0], pb[1] - tpr[s].pb[j][1], pb[2] - tpr[s].pb[j][2]};
-        float mt[3] = {pt[0] - tpr[s].pt[j][0], pt[1] - tpr[s].pt[j][1], pt[2] - tpr[s].pt[j][2]};
-        float ap[3] = {pt[0] - pb[0], pt[1] - pb[1], pt[2] - pb[2]};
-        if (ht) k += (size_t)snprintf(line + k, sizeof line - k, " %s: body (%.0f %.0f %.0f), target (%.0f %.0f %.0f), %.0f cm apart, moved %.0f / target %.0f cm;",
-                                      ue_name(b, bn, sizeof bn), pb[0], pb[1], pb[2], pt[0], pt[1], pt[2], len3(ap), i ? len3(mb) : 0.f, i ? len3(mt) : 0.f);
-        else k += (size_t)snprintf(line + k, sizeof line - k, " %s: body (%.0f %.0f %.0f), no target;", ue_name(b, bn, sizeof bn), pb[0], pb[1], pb[2]);
-        memcpy(tpr[s].pb[j], pb, sizeof pb);
-        if (ht) memcpy(tpr[s].pt[j], pt, sizeof pt);
-    }
-    LOG("%s", line);
-}
-
-static void tone_start(Tracked *t, UObject *mesh, UObject *pac) {
-    char a[160], c[160], b[64];
-    if (!tone_on || !tone_kind(t->kind) || t->push_dv > 0.f || t->dism) return;   // blast victims are thrown, not toned
-    if (!pac) { n_tone_nopac++; return; }
-    const BodyList *bl = bodies_of(mesh);
-    if (pa_init(pac) != 1 || !bl) { n_tone_fail++; return; }
-    if (pa_attached(pac, mesh) != 1) pa_attach(pac, mesh);   // not readable: attached once
-    pa_mult(pac, 1.f);   // anim_off put it at 0
-    t->pac = pac;
-    t->paci = U_INDEX(pac);
-    t->tone = 1;
-    t->tone_t0 = now_s();
-    t->tone_next = t->tone_t0 + TONE_STEP;
-    t->tonep = tone_probes < 3 ? 0 : 0x80;
-    if (!t->tonep) tone_probes++;
-    tone_update(t, 0.0);
-    n_toned++;
-    if (tone_logs < TONE_LOGS) {
-        tone_logs++;
-        int l1 = body_named(bl, "thigh_l"), l2 = body_named(bl, "thigh_r"), root = body_named(bl, "pelvis");
-        LOG("ragdoll tone: %s (%s) killed by %s: holds for %.2f s, legs give out by %.2f s, strength x%.2f; drives from %s%s",
-            oname(t->a, a, sizeof a), cname(t->a, c, sizeof c), t->kind, tone_time, tone_time * tone_legs, tone_str,
-            ue_name(bl->bone[root >= 0 ? root : 0], b, sizeof b), l1 >= 0 && l2 >= 0 ? ", legs from thigh_l and thigh_r" : " (NO thigh bodies: the legs fade with the rest)");
-    }
-}
-
-static void tone_tick(Tracked *x, double now) {
-    char a[160];
-    double age = now - x->tone_t0;
-    if (!ue_object_usable(x->pac, x->paci)) {   // the game destroyed the component: nothing to drive (or to switch off)
-        x->tone = 2;
-        n_tone_gone++;
-        if (tone_fix_logs < 10) { tone_fix_logs++; LOG("ragdoll tone: %s +%.2fs: its physical animation component is gone (destroyed by the game?): limp now", oname(x->a, a, sizeof a), age); }
-        return;
-    }
-    if (x->tonep != 0x80) tone_probe(x, age);
-    if (age >= tone_time) {
-        pa_mult(x->pac, 0.f);   // limp, as without the tone
-        x->tone = 2;
-        n_tone_done++;
-        if (tone_logs < TONE_LOGS) { tone_logs++; LOG("ragdoll tone: %s limp at +%.2fs (%d shove(s) from shots during it)", oname(x->a, a, sizeof a), age, x->shots); }
-        return;
-    }
-    if (now < x->tone_next) return;
-    x->tone_next = now + TONE_STEP;
-    tone_update(x, age);
-}
-
 // ---- the ragdoll ----
 static int apply(Tracked *t) {
     char a[160], c[160];
@@ -3345,9 +3406,10 @@ static int apply(Tracked *t) {
     }
     if (sim != 1) { LOG("ragdoll: %s is not simulating after the calls", oname(t->a, a, sizeof a)); return -1; }
     mstate_note(t);       // build 27: what the game wrote on the body (limbs it took off)
+    t->hid = hidden_bodies(mesh);   // build 40: parts lost while alive stay out of the rest test
+    wound_kill(t, mesh);  // build 40: the killing shot opens a wound or takes a part off where it hit, before the push
     carry_body(t, mesh);  // build 38: it keeps its running speed, before the push
     push_body(t, mesh);   // step 2: the killing hit throws the body (blast victims: /ragdoll dismember first)
-    tone_start(t, mesh, pac);   // build 38: weak-gun kills hold their pose and give out (/ragdoll tone)
     return 0;
 }
 
@@ -3382,13 +3444,12 @@ static void undo(Tracked *t) {
         if (call_prep(&k, t->a, "SetActorHiddenInGame")) { SET(&k, "bNewHidden", uint8_t, 0); call_go(&k); }
         if (call_prep(&k, t->a, "SetActorEnableCollision")) { SET(&k, "bNewActorEnableCollision", uint8_t, 1); call_go(&k); }
     }
-    if (t->tone == 1 && t->pac && ue_object_usable(t->pac, t->paci)) pa_mult(t->pac, 0.f);   // build 38: our drives off the living body
     n_revived++;
     LOG("ragdoll: WARNING %s came back alive after its ragdoll (the game reuses Ridden actors): physics undone", oname(t->a, a, sizeof a));
     t->ragdolled = 0; t->done = 0; t->died_at = 0; t->rest = 0; t->released = 0; t->checks = 0; t->spared = 0; t->ended = 0;
     t->dism = 0; t->hid = 0; t->blast_ok = 0; t->painted = 0;
     t->mass = 0; t->shots = 0; t->relcount = 0;
-    t->carry = 0; t->tone = 0; t->tonep = 0; t->kind[0] = 0; t->run_t = 0; t->mem_t = 0; t->velp = 0; t->push_dv = 0;
+    t->carry = 0; t->kind[0] = 0; t->run_t = 0; t->mem_t = 0; t->velp = 0; t->push_dv = 0;
 }
 
 // ---- settle hold: the game swaps a ragdoll for its stand-in only once the body is at rest ----
@@ -3498,8 +3559,7 @@ static void settle_detour(UObject *rc) {   // game thread: timers run inside the
     }
     Tracked *x = NULL;
     for (int i = 0; rc && i < ntr; i++) if (tr[i].rc == rc) { x = &tr[i]; break; }
-    // the timer fires again in 0.5 s; build 38: never during a muscle tone (the game would freeze the body mid-fall)
-    if (x && x->ragdolled && !x->released && x->mesh && (x->tone == 1 || settle_hold(x))) return;
+    if (x && x->ragdolled && !x->released && x->mesh && settle_hold(x)) return;   // the timer fires again in 0.5 s
     orig_settle(rc);
 }
 
@@ -3767,9 +3827,13 @@ static void shove(UObject *a, int hits, double first, double now, Shooter *sh, i
     }
     PushKind *kind = kind_of(sh[best].item, kb, sizeof kb);   // nothing held: "None", the default strength
     if (kind->radial) kind = push_kind("default", 0);         // a weapon is no blast
+    // build 40: the shot opens a wound or takes a part off where it lands (wound kinds), before the push
+    int w = wound_apply(x, x->mesh, kind->key, bone, sh[best].eye, 0, "downed");
     float strength = kind->n * shot_scale;
     if (strength <= 0.f) return;
     FName on = body_bone(x->mesh, bl, bone);
+    for (int j = 0; w == 2 && bl && j < bl->n && j < 32; j++)   // that part came off (its body simulates on, unseen): push the rest
+        if (bl->bone[j].idx == on.idx && bl->bone[j].num == on.num && ((x->hid >> j) & 1)) { on = bl->bone[0]; break; }
     Call k;
     float *ip = NULL, *lp = NULL;
     if (call_prep(&k, x->mesh, "AddImpulseAtLocation")) { ip = carg(&k, "Impulse"); lp = carg(&k, "Location"); }
@@ -3864,7 +3928,7 @@ static void end_body(Tracked *x, double age) {
 //   ragdoll_limbs=2-3, ragdoll_big=75, ragdoll_head=50   as /ragdoll dismember limbs|big|head
 //   ragdoll_carry                      build 38: x the running speed (0-2)
 //   ragdoll_carry_keep                 build 39: s a remembered running speed takes to fade (0-3)
-//   ragdoll_tone, ragdoll_tone_time, ragdoll_tone_strength, ragdoll_tone_legs, ragdoll_tone_kinds=HG,SMG   build 38
+//   ragdoll_wounds, ragdoll_wounds_kinds|small|heads=K,K, ragdoll_wounds_living=off|arms|all, ragdoll_wounds_blast   build 40
 // Not saved: trace, probe, dismember type|impulse (the dismember experiment's test knobs).
 static int start_on;     // ragdoll=1 read: the tick turns the ragdoll on, once
 static int start_done;   // that happened, or the player turned it on or off himself
@@ -3878,16 +3942,16 @@ static int onoff(const char *v, int def) {
     if (!_stricmp(v, "off") || !_stricmp(v, "false")) return 0;
     return atoi(v) != 0;
 }
-// build 38: the weapon kinds whose kills get the muscle tone: letters, digits and _, comma-separated (spaces dropped)
-static void set_tone_kinds(const char *v) {
+// a list of weapon kinds (push table keys): letters, digits and _, comma-separated (spaces dropped); build 40 (wounds)
+static void set_kinds(char *dst, size_t size, const char *v) {
     size_t m = 0;
-    for (; *v && m + 1 < sizeof tone_kinds; v++) {
+    for (; *v && m + 1 < size; v++) {
         char ch = *v;
-        if (isalnum((unsigned char)ch) || ch == '_') tone_kinds[m++] = ch;
-        else if ((ch == ',' || ch == ' ') && m && tone_kinds[m - 1] != ',') tone_kinds[m++] = ',';
+        if (isalnum((unsigned char)ch) || ch == '_') dst[m++] = ch;
+        else if ((ch == ',' || ch == ' ') && m && dst[m - 1] != ',') dst[m++] = ',';
     }
-    while (m && tone_kinds[m - 1] == ',') m--;
-    tone_kinds[m] = 0;
+    while (m && dst[m - 1] == ',') m--;
+    dst[m] = 0;
 }
 
 static void set_limbs(int lo, int hi) {   // 1-4 each, in order
@@ -3963,11 +4027,13 @@ static int setting(const char *k, const char *v) {
     else if (!strcmp(k, "ragdoll_head")) dism_head = v ? clampi(atoi(v), 0, 100) : DISM_HEAD_DEF;
     else if (!strcmp(k, "ragdoll_carry")) carry_scale = v ? clampf((float)atof(v), 0.f, 2.f) : CARRY_DEFAULT;
     else if (!strcmp(k, "ragdoll_carry_keep")) carry_keep = v ? clampf((float)atof(v), 0.f, 3.f) : CARRY_KEEP_DEF;
-    else if (!strcmp(k, "ragdoll_tone")) tone_on = onoff(v, 0);
-    else if (!strcmp(k, "ragdoll_tone_time")) tone_time = v ? clampf((float)atof(v), 0.3f, 5.f) : TONE_TIME_DEF;
-    else if (!strcmp(k, "ragdoll_tone_strength")) tone_str = v ? clampf((float)atof(v), 0.f, 20.f) : TONE_STR_DEF;
-    else if (!strcmp(k, "ragdoll_tone_legs")) tone_legs = v ? clampf((float)atof(v), 0.1f, 1.f) : TONE_LEGS_DEF;
-    else if (!strcmp(k, "ragdoll_tone_kinds")) set_tone_kinds(v ? v : TONE_KINDS_DEF);
+    else if (!strcmp(k, "ragdoll_wounds")) wounds_on = onoff(v, 1);
+    else if (!strcmp(k, "ragdoll_wounds_kinds")) set_kinds(wound_kinds, sizeof wound_kinds, v ? v : WOUND_KINDS_DEF);
+    else if (!strcmp(k, "ragdoll_wounds_small")) set_kinds(wound_small, sizeof wound_small, v ? v : WOUND_SMALL_DEF);
+    else if (!strcmp(k, "ragdoll_wounds_heads")) set_kinds(wound_heads, sizeof wound_heads, v ? v : WOUND_HEADS_DEF);
+    else if (!strcmp(k, "ragdoll_wounds_living")) wound_living = !v ? WOUND_LIVING_DEF : !_stricmp(v, "off") ? 0 : !_stricmp(v, "arms") ? 1 :
+                                                  !_stricmp(v, "all") ? 2 : clampi(atoi(v), 0, 2);
+    else if (!strcmp(k, "ragdoll_wounds_blast")) wound_blast = onoff(v, 1);
     else return 0;
     return 1;
 }
@@ -3980,8 +4046,8 @@ static void turn_on(float delay) {   // game thread: /ragdoll on, or ragdoll=1 a
     settle_logs = 0;
     push_logs = hit_dumps = left_logs = bag_logs = 0;
     shot_logs = shot_miss_logs = shot_dumps = 0;
-    carry_logs = vel_logs_r = tone_logs = tone_fix_logs = tone_probes = 0;   // build 38
-    memset(tpr, 0, sizeof tpr);
+    carry_logs = vel_logs_r = 0;   // build 38
+    wound_logs = wound_nomap_logs = 0;   // build 40
     if (shot_state < 0) shot_state = 0;   // look OnCorpseHit up again
     shot_reset();
     game_tid = GetCurrentThreadId();
@@ -4038,7 +4104,6 @@ void ragdoll_tick(float dt) {
         }
         if (x->done) {
             if (x->ragdolled && (x->push_dv > 0.f || x->carry > 0.f) && !(x->velp & 0x80) && !x->ended) vel_probe_tick(x, t);
-            if (x->ragdolled && x->tone == 1 && !x->ended) tone_tick(x, t);   // build 38
             if (x->ragdolled && x->limbp == 1 && !x->ended) limb_probe_tick(x, t);
             if (x->ragdolled && !x->ended && t - x->died_at >= deadline_s) { end_body(x, t - x->died_at); continue; }
             if (x->ragdolled && !x->released && x->mesh && grav_scale != 1.f && !n_grav_fail) extra_gravity(x);
@@ -4058,6 +4123,7 @@ void ragdoll_tick(float dt) {
         if (apply(x) == 0) n_applied++; else n_failed++;
     }
     shot_tick(t);   // build 35: after the deaths of this tick are ragdolled
+    wound_tick();   // build 40: hits on living Ridden (host)
 }
 
 void ragdoll_slash(char *rest, Out *o) {
@@ -4086,13 +4152,15 @@ void ragdoll_slash(char *rest, Out *o) {
                    n_shot_hits, n_shove_trace, n_shove_near, n_shot_reheld, n_shot_noshooter, n_shot_early, n_shot_frozen,
                    n_shot_blast, n_shot_notours, n_shot_fail, n_shot_dropped);
         out_printf(o, "/ragdoll carry x%.2f keep %.2f s%s: %d died running and kept it (%d from before a stagger), %d already faster, "
-                      "%d standing still, %d with no speed read, %d failed; "
-                      "tone %s (%s, %.2f s, legs %.2f, x%.2f)%s: %d toned, %d done; put back: %d attachments, %d multipliers, %d "
-                      "switched on again, %d montages stopped; %d lost their component; %d failed, %d with no physical animation\n", carry_scale,
+                      "%d standing still, %d with no speed read, %d failed\n", carry_scale,
                    carry_keep, mov_vel_off == -1 ? " (NOT AVAILABLE: see log)" : "", n_carried, n_carry_mem, n_carry_faster,
-                   n_carry_still, n_carry_nomov, n_carry_fail,
-                   tone_on ? "on" : "off", tone_kinds, tone_time, tone_legs, tone_str, pa.state < 0 ? " (NOT AVAILABLE: see log)" : "",
-                   n_toned, n_tone_done, n_tone_reattach, n_tone_rezero, n_tone_wake, n_tone_montage, n_tone_gone, n_tone_fail, n_tone_nopac);
+                   n_carry_still, n_carry_nomov, n_carry_fail);
+        out_printf(o, "/ragdoll wounds %s (%s; small %s; heads only %s; living %s; blasts %s): %d hits looked at, %d parts off, %d open "
+                      "wounds (+%d on blast victims), %d refused, %d already done, %d left alone on living Ridden, %d with no wound "
+                      "for the bone; %d living hits (%d dropped, %d OnDamage events known%s); our pieces %d\n",
+                   wounds_on ? "on" : "off", wound_kinds, wound_small, wound_heads, LIVING_NAME[wound_living], wound_blast ? "on" : "off",
+                   n_wound_hits, n_wound_off, n_wound_rupt, n_blast_rupt, n_wound_refused, n_wound_already, n_wound_skip, n_wound_nomap,
+                   n_living_hits, n_woundq_drop, n_dmg_fns, dmgi.state < 0 ? ", NOT AVAILABLE: see log" : "", n_wound_pieces);
     } else if (!strcmp(verb, "on")) {
         turn_on(arg ? (float)atof(arg) : 0.f);
         start_on = 1;
@@ -4272,38 +4340,32 @@ void ragdoll_slash(char *rest, Out *o) {
                       "fading to nothing over this time; so far %d did (%d from before a stagger), %d were already faster%s\n",
                    carry_scale, CARRY_DEFAULT, CARRY_MAX, carry_keep, CARRY_KEEP_DEF, n_carried, n_carry_mem, n_carry_faster,
                    mov_vel_off == -1 ? "; NOT AVAILABLE in this game (see log)" : "");
-    } else if (!strcmp(verb, "tone")) {   // build 38 experiment: muscle tone
+    } else if (!strcmp(verb, "wounds")) {   // build 40: wounds by weapon
         char *arg2 = arg ? strtok(NULL, " ") : NULL;
-        if (arg && (!strcmp(arg, "on") || !strcmp(arg, "off"))) {
-            tone_on = !strcmp(arg, "on");
-            save_i("ragdoll_tone", tone_on, 0);
-        } else if (arg && !strcmp(arg, "time") && arg2) {
-            tone_time = clampf((float)atof(arg2), 0.3f, 5.f);
-            save_f("ragdoll_tone_time", tone_time, TONE_TIME_DEF);
-        } else if (arg && !strcmp(arg, "strength") && arg2) {
-            tone_str = clampf((float)atof(arg2), 0.f, 20.f);
-            save_f("ragdoll_tone_strength", tone_str, TONE_STR_DEF);
-        } else if (arg && !strcmp(arg, "legs") && arg2) {
-            tone_legs = clampf((float)atof(arg2), 0.1f, 1.f);
-            save_f("ragdoll_tone_legs", tone_legs, TONE_LEGS_DEF);
-        } else if (arg && !strcmp(arg, "kinds") && arg2) {
-            set_tone_kinds(arg2);
-            save("ragdoll_tone_kinds", strcmp(tone_kinds, TONE_KINDS_DEF) ? tone_kinds : NULL);
-        } else if (arg) {
-            out_printf(o, "usage: /ragdoll tone [on|off|time <s>|strength <x>|legs <0.1-1>|kinds <K,K>]\n");
+        if (arg && (!strcmp(arg, "on") || !strcmp(arg, "off"))) { wounds_on = !strcmp(arg, "on"); save_i("ragdoll_wounds", wounds_on, 1); pe_update(); }
+        else if (arg && !strcmp(arg, "kinds") && arg2) { set_kinds(wound_kinds, sizeof wound_kinds, arg2); save("ragdoll_wounds_kinds", strcmp(wound_kinds, WOUND_KINDS_DEF) ? wound_kinds : NULL); }
+        else if (arg && !strcmp(arg, "small") && arg2) { set_kinds(wound_small, sizeof wound_small, arg2); save("ragdoll_wounds_small", strcmp(wound_small, WOUND_SMALL_DEF) ? wound_small : NULL); }
+        else if (arg && !strcmp(arg, "heads") && arg2) { set_kinds(wound_heads, sizeof wound_heads, arg2); save("ragdoll_wounds_heads", strcmp(wound_heads, WOUND_HEADS_DEF) ? wound_heads : NULL); }
+        else if (arg && !strcmp(arg, "living") && arg2 && (!strcmp(arg2, "off") || !strcmp(arg2, "arms") || !strcmp(arg2, "all"))) {
+            wound_living = !strcmp(arg2, "off") ? 0 : !strcmp(arg2, "arms") ? 1 : 2;
+            save("ragdoll_wounds_living", wound_living == WOUND_LIVING_DEF ? NULL : LIVING_NAME[wound_living]);
+            pe_update();
+        }
+        else if (arg && !strcmp(arg, "blast") && arg2 && (!strcmp(arg2, "on") || !strcmp(arg2, "off"))) { wound_blast = !strcmp(arg2, "on"); save_i("ragdoll_wounds_blast", wound_blast, 1); }
+        else if (arg) {
+            out_printf(o, "usage: /ragdoll wounds [on|off|kinds <K,K>|small <K,K>|heads <K,K>|living off|arms|all|blast on|off]\n");
             return;
         }
         if (arg) {
-            tone_logs = tone_fix_logs = tone_probes = 0;
-            memset(tpr, 0, sizeof tpr);
-            LOG("ragdoll tone: %s, kinds %s, %.2f s, legs give out by %.2f s, strength x%.2f", tone_on ? "on" : "off", tone_kinds,
-                tone_time, tone_time * tone_legs, tone_str);
+            wound_logs = wound_nomap_logs = 0;
+            LOG("ragdoll wounds: %s, kinds %s, small %s, heads only %s, living %s, blasts %s", wounds_on ? "on" : "off", wound_kinds,
+                wound_small, wound_heads, LIVING_NAME[wound_living], wound_blast ? "on" : "off");
         }
-        out_printf(o, "/ragdoll tone: %s (experiment, default off): kills by %s hold their pose and give out over %.2f s (time "
-                      "<s>, 0.3-5), the legs by %.2f s (legs <share of the time>, default %.1f), strength x%.2f (strength <x>, "
-                      "default 1); kinds <K,K> as in /ragdoll push (all = every kind); so far %d toned%s\n",
-                   tone_on ? "on" : "off", tone_kinds[0] ? tone_kinds : "(none)", tone_time, tone_time * tone_legs, TONE_LEGS_DEF,
-                   tone_str, n_toned, pa.state < 0 ? "; NOT AVAILABLE in this game (see log)" : "");
+        out_printf(o, "/ragdoll wounds: %s (default on): shots by %s take off or open what they hit (head, arm, leg, chest, "
+                      "stomach); small wounds for %s; %s only take heads (a killing headshot); on living Ridden: %s (off | arms: "
+                      "arms and open wounds | all: legs too; never heads); blast victims get 1-2 open wounds: %s. Lists: kinds|small|"
+                      "heads <K,K> (none = empty); so far %d parts off, %d wounds opened\n", wounds_on ? "on" : "off", wound_kinds,
+                   wound_small, wound_heads, LIVING_NAME[wound_living], wound_blast ? "on" : "off", n_wound_off, n_wound_rupt + n_blast_rupt);
     } else if (!strcmp(verb, "probe")) {
         world_check();
         if (!mode_on && !tracing) for (int k = 0; k < 64; k++) scan_step();   // not scanning in the background: a full pass now
@@ -4315,7 +4377,7 @@ void ragdoll_slash(char *rest, Out *o) {
         if (tracing) trace_stop("restarted");
         if (trace_start(s, o) == 0) out_printf(o, "/ragdoll trace: %.0f s, kill a few Ridden now (log: \"ragdoll trace\" lines)\n", s);
     } else {
-        out_printf(o, "usage: /ragdoll [on [delay]|off|status|mass [x]|gravity [x]|deadline [s]|push [x|on|off|<kind> <n>]|shot [x|on|off]|carry [x|on|off|keep <s>]|tone [on|off|time <s>|strength <x>|legs <0.1-1>|kinds <K,K>]|bloodbag [on|off]|blood [on|off]|dismember [on|off|limbs <min> [max]|big <0-100>|head <0-100|on|off>|pieces on|off|type <n|auto>|impulse <n>]|probe|trace [secs]]\n");
+        out_printf(o, "usage: /ragdoll [on [delay]|off|status|mass [x]|gravity [x]|deadline [s]|push [x|on|off|<kind> <n>]|shot [x|on|off]|carry [x|on|off|keep <s>]|wounds [on|off|kinds <K,K>|small <K,K>|heads <K,K>|living off|arms|all|blast on|off]|bloodbag [on|off]|blood [on|off]|dismember [on|off|limbs <min> [max]|big <0-100>|head <0-100|on|off>|pieces on|off|type <n|auto>|impulse <n>]|probe|trace [secs]]\n");
     }
     if (save_fail) out_printf(o, "/ragdoll: could not write b4bcoop.ini (see log): this change lasts until the game closes\n");
 }
@@ -4332,10 +4394,11 @@ int ragdoll_init(void) {
         m += (size_t)snprintf(kinds + m, sizeof kinds - m, "%s%s %.0f", i ? ", " : "", push_tab[i].key, push_tab[i].n);
     LOG("ragdoll: experimental module loaded (fork build), %s; from b4bcoop.ini and the defaults: delay %.2f, mass x%.2f, "
         "gravity x%.2f, deadline %.0f s, push x%.2f, shots on bodies x%.2f, blood bags %s, blood %s, dismember %s (%d-%d "
-        "limbs, big %d%%, head %d%%, pieces %s), carry x%.2f keep %.2f s, tone %s (%s, %.2f s, legs %.2f, x%.2f); kinds: %s",
+        "limbs, big %d%%, head %d%%, pieces %s), carry x%.2f keep %.2f s, wounds %s (%s; small %s; heads only %s; living %s; blasts "
+        "%s); kinds: %s",
         start_on ? "on at the first world (ragdoll=1)" : "off until /ragdoll on",
         delay_s, mass_scale, grav_scale, deadline_s, push_scale, shot_scale, bloodbag_on ? "on" : "off", blood_on ? "on" : "off",
         dism_on ? "on" : "off", dism_min, dism_max, dism_big, dism_head, dism_pieces ? "on" : "off", carry_scale, carry_keep,
-        tone_on ? "on" : "off", tone_kinds, tone_time, tone_legs, tone_str, kinds);
+        wounds_on ? "on" : "off", wound_kinds, wound_small, wound_heads, LIVING_NAME[wound_living], wound_blast ? "on" : "off", kinds);
     return 0;
 }
