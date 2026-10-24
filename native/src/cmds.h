@@ -47,6 +47,7 @@ int teamsize_live(const char *key, const char *val);
 int overlay_live(const char *key, const char *val);
 int addons_live(const char *key, const char *val);
 int ragdoll_live(const char *key, const char *val);   // fork: ragdoll.c, b4bcoop.ini ragdoll* keys
+int barks_live(const char *key, const char *val);     // fork: barks.c, b4bcoop.ini barks_* keys
 // online.c (#47): the launch choice co-op / online (launcher: native/launcher/redirect.c). online_early from DllMain
 // (1 = the game is being closed: -b4bcoop=off/online but we were loaded), online_init from the init thread, ini
 // launch=ask|coop|online, its section in the ~ window's Settings tab.
@@ -123,6 +124,11 @@ void chat_tick(float dt);
 int ragdoll_init(void);
 void ragdoll_tick(float dt);
 void ragdoll_slash(char *rest, Out *o);
+// barks.c (fork, build 41): survivor barks muted on this machine (/dialogue barks, anyone; ini barks_mute*)
+int barks_init(void);
+void barks_tick(float dt);
+void barks_slash(char *rest, Out *o);
+int barks_filter(UObject *comp, const void *params);   // dialogue.c's play hook: 1 = don't play this line
 int chat_cmd(const char *verb, char *rest, Out *o);
 void chat_local(const char *fmt, ...);  // local-only chat line(s)
 #define CHAT_NOTICE_TYPE L"b4bcoop"      // ClientTeamMessage Type of host notices (shown by chat.c on the receiver)

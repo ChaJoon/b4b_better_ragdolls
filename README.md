@@ -13,13 +13,18 @@ bodies thrown by shots and blasts, and dismemberment. Everything else is b4b-coo
   and its "settled" check freezes bodies still moving at up to ~5 m/s, so most freeze mid-fall. Here the animation is
   cut and the freeze waits until the body has really come to rest.
 - **The killing hit throws the body**, with a strength per weapon type (pistol, SMG, rifle, LMG, shotgun, sniper).
-- **Blasts** (frags, pipe bombs, barrels, propane) throw bodies from the explosion instead of turning nearby ones into
-  blood bags, and take 2-3 limbs (and sometimes the head) off through the game's own dismemberment.
+- **Blasts** (frags, pipe bombs, barrels, propane, and the Volatile Ridden and Broadside card explosions) throw bodies
+  from the explosion instead of turning nearby ones into blood bags, and take 2-3 limbs (and sometimes the head) off
+  through the game's own dismemberment.
 - **Shooting a body that is already down pushes it.**
 - **Ridden that die running keep their speed** and tumble on, instead of dropping on the spot.
 - **Wounds where the shot lands**: shotguns, snipers, LMGs and rifles take off the arm, leg or head they hit, or open
-  the chest or stomach (smaller wounds for LMGs and rifles); pistols and SMGs only take heads. Blast victims get open
-  wounds too.
+  the chest or stomach; pistols and SMGs only take heads; the bow takes nothing. Blast victims get open wounds too.
+  The game's own extra wounds on a killing headshot (the chest and an arm opened with the head) are stopped
+  (experimental: `/ragdoll wounds game on` brings them back).
+- **Survivor barks muted** (on by default, each player's own setting): no "She shoots, she scores!" after headshots,
+  melee kills and shooting explosive items. `/dialogue barks off` brings them back.
+- **`/give <weapon>`** (host, after `/cheats on`): a weapon into a hero's inventory, for testing.
 - Reeker and Exploder pops, and the gameplay of explosions, are left as the game does them.
 
 ## Status
@@ -55,7 +60,10 @@ into online play.
 | `/ragdoll blood on\|off` | paint spared blast victims with blood like the others |
 | `/ragdoll carry [x]` | how much of its running speed a dying Ridden keeps (default 1, off = 0) |
 | `/ragdoll carry keep <s>` | how long a run's speed survives a stagger before the kill (default 1 s) |
-| `/ragdoll wounds on\|off\|living off\|arms\|all\|blast on\|off\|kinds\|small\|heads <K,K>` | wounds by weapon and hit location |
+| `/ragdoll wounds on\|off\|living off\|arms\|all\|blast on\|off\|kinds\|small\|heads\|none <K,K>` | wounds by weapon and hit location (`none`: kinds that take nothing, default the bow) |
+| `/ragdoll wounds game on\|off` | the game's own extra wounds on Commons hit by those weapons (default off; host) |
+| `/dialogue barks on\|off\|mute <Name,Name>\|log` | survivor barks muted (default on: `Headshot,Kill_Bat,Shoot_Explosive`); `log` names the next 40 lines heard |
+| `/give <weapon> [player]`, `/give list [filter]` | a weapon into a hero's inventory (host, cheats on) |
 
 ## Building
 

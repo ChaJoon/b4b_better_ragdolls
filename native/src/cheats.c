@@ -1395,13 +1395,219 @@ static void set_on(int en, Out *o) {
     notice(en ? "host enabled cheats" : "host disabled cheats");
 }
 
+// ---- /give: a weapon into a hero's inventory (fork, build 41: Joon's saferoom test area had no weapons) ----
+// Weapons are item rows of Weapons_DT (row names are GUIDs; the dev build's giveitem found AR02 there by its
+// blueprint AR02_1_BP), and of every other loaded data table with the same row struct (weapons of later updates may
+// have their own). Each row is named by what its fields hold: name and string fields, texts (the shown name: the first
+// text, preferring a field called ...Name / ...Title), object and class fields and soft references (the last part of
+// the path). The code is the letters and digits before the first '_' of a class name: AR02_1_BP_C -> AR02. The row's
+// layout goes into the log once ("cheats: weapon rows ..."): if names come out wrong, that line says why. Given with
+// the inventory's ServerAddItemsOfHandle (the server side of a pickup): the weapon takes its slot, the one there is
+// replaced, not dropped (dev giveitem, 24 Oct). Its ammo is whatever the game gives a new weapon (unchecked).
+typedef struct { UObject *table; FName row; char code[24], shown[64], key[200]; } Weapon;
+#define MAX_WEAPONS 192
+static Weapon weapons[MAX_WEAPONS];
+static int n_weapons;
+static UObject *weapons_world;   // the list is read again in another world (tables can load with a map)
+static int weapons_logged;
+
+static void text_of(const void *ftext, char *buf, size_t n) {   // FText -> ASCII (KismetTextLibrary.Conv_TextToString)
+    Call c;
+    buf[0] = 0;
+    if (!call_prep(&c, class_cdo("KismetTextLibrary"), "Conv_TextToString")) return;
+    void *in = carg(&c, "InText");
+    FString *out = carg(&c, "ReturnValue");
+    if (!in || !out) return;
+    memcpy(in, ftext, 0x18);   // borrowed, as card_display
+    call_go(&c);
+    ascii_of(out, buf, n);
+    if (out->data && !memcmp((void *)ADDR_FMEMORY_FREE, SIG_FREE, sizeof SIG_FREE)) ((void (*)(void *))ADDR_FMEMORY_FREE)(out->data);
+}
+static void weapon_code(const char *cls_name, char *code, size_t n) {   // AR02_1_BP_C -> AR02 (needs a letter and a digit)
+    size_t k = 0;
+    int digit = 0, letter = 0;
+    for (; cls_name[k] && cls_name[k] != '_' && k + 1 < n; k++) {
+        code[k] = cls_name[k];
+        if (isdigit((unsigned char)cls_name[k])) digit = 1; else if (isalpha((unsigned char)cls_name[k])) letter = 1;
+    }
+    code[k] = 0;
+    if (!digit || !letter) code[0] = 0;
+}
+static void key_add(Weapon *w, const char *s) {
+    size_t m = strlen(w->key);
+    if (s && *s && m + strlen(s) + 2 < sizeof w->key) snprintf(w->key + m, sizeof w->key - m, "%s%s", m ? " " : "", s);
+}
+static int weapon_cmp(const void *a, const void *b) {
+    const Weapon *x = a, *y = b;
+    int c = _stricmp(x->code[0] ? x->code : x->shown, y->code[0] ? y->code : y->shown);
+    return c ? c : _stricmp(x->shown, y->shown);
+}
+static void weapon_read(Weapon *w, UObject *rs, const uint8_t *row) {
+    char t[64], pn[64], v[160];
+    int text_pref = 0;
+    for (UStruct *st = rs; st; st = *(UStruct **)((char *)st + 0x48)) {   // US_SUPER
+        for (FField *p = US_CHILDPROPS(st); p; p = FF_NEXT(p)) {
+            ue_name(*(FName *)FF_CLASS(p), t, sizeof t);
+            ue_name(FF_NAME(p), pn, sizeof pn);
+            const uint8_t *a = row + FP_OFFSET(p);
+            v[0] = 0;
+            if (!strcmp(t, "NameProperty")) ue_name(*(const FName *)a, v, sizeof v);
+            else if (!strcmp(t, "StrProperty")) ascii_of((const FString *)a, v, sizeof v);
+            else if (!strcmp(t, "TextProperty")) {
+                text_of(a, v, sizeof v);
+                int pref = strstr(pn, "Name") || strstr(pn, "Title");
+                if (v[0] && (!w->shown[0] || (pref && !text_pref))) { snprintf(w->shown, sizeof w->shown, "%s", v); text_pref = pref; }
+            } else if (!strcmp(t, "ObjectProperty") || !strcmp(t, "ClassProperty")) {
+                UObject *o = *(UObject *const *)a;
+                if (o) ue_obj_name(o, v, sizeof v);
+            } else if ((!strcmp(t, "SoftClassProperty") || !strcmp(t, "SoftObjectProperty")) && FP_ELSIZE(p) == 0x28) {
+                char path[200];   // FSoftObjectPtr: weak pointer, tag, then FSoftObjectPath {FName AssetPathName, ...}
+                FName an = *(const FName *)(a + 0x10);
+                if (an.idx) {
+                    ue_name(an, path, sizeof path);
+                    const char *dot = strrchr(path, '.'), *sl = strrchr(path, '/');
+                    snprintf(v, sizeof v, "%s", dot ? dot + 1 : sl ? sl + 1 : path);
+                }
+            }
+            if (!v[0]) continue;
+            key_add(w, v);
+            size_t L = strlen(v);
+            if (!w->code[0] && L > 2 && !strcmp(v + L - 2, "_C")) weapon_code(v, w->code, sizeof w->code);
+        }
+    }
+}
+static int weapons_load(void) {
+    char b[160], line[2000];
+    UObject *w = ue_world();
+    if (n_weapons && w == weapons_world) return n_weapons;
+    n_weapons = 0;
+    weapons_world = w;
+    UClass *dtc = cls("DataTable");
+    UObject *wdt = NULL;
+    for (int32_t i = 0, n = ue_num_objects(); dtc && i < n && !wdt; i++) {
+        UObject *o = ue_object_at(i);
+        if (o && !(U_FLAGS(o) & LIVE_FLAGS) && ue_is_a(o, dtc) && !strcmp(ue_obj_name(o, b, sizeof b), "Weapons_DT")) wdt = o;
+    }
+    UObject *rs = wdt ? DT_ROWSTRUCT(wdt) : NULL;
+    if (!rs) { LOG("cheats: give: no Weapons_DT loaded"); return 0; }
+    if (!weapons_logged) {
+        weapons_logged = 1;
+        size_t k = (size_t)snprintf(line, sizeof line, "cheats: weapon rows %s (%d bytes):", ue_obj_name(rs, b, sizeof b), US_PROPSSIZE(rs));
+        for (UStruct *st = rs; st && k + 80 < sizeof line; st = *(UStruct **)((char *)st + 0x48))
+            for (FField *p = US_CHILDPROPS(st); p && k + 80 < sizeof line; p = FF_NEXT(p)) {
+                char t[64], pn[64];
+                k += (size_t)snprintf(line + k, sizeof line - k, " %s:%s@0x%x", ue_name(FF_NAME(p), pn, sizeof pn),
+                                      ue_name(*(FName *)FF_CLASS(p), t, sizeof t), FP_OFFSET(p));
+            }
+        LOG("%s", line);
+    }
+    int tables = 0;
+    for (int32_t i = 0, n = ue_num_objects(); dtc && i < n; i++) {
+        UObject *t = ue_object_at(i);
+        if (!t || (U_FLAGS(t) & LIVE_FLAGS) || !ue_is_a(t, dtc) || DT_ROWSTRUCT(t) != rs) continue;
+        tables++;
+        TArray *m = DT_ROWMAP(t);
+        const uint32_t *bits = *(uint32_t *const *)((char *)m + 0x20);
+        if (!bits) bits = (const uint32_t *)((char *)m + 0x10);
+        int nbits = *(int32_t *)((char *)m + 0x28);
+        for (int r = 0; m->data && r < m->num && r < nbits && n_weapons < MAX_WEAPONS; r++) {
+            if (!((bits[r >> 5] >> (r & 31)) & 1)) continue;
+            char *e = (char *)m->data + (size_t)r * 0x18;
+            const uint8_t *row = *(const uint8_t **)(e + 8);
+            if (!row) continue;
+            Weapon *x = &weapons[n_weapons++];
+            memset(x, 0, sizeof *x);
+            x->table = t;
+            x->row = *(FName *)e;
+            weapon_read(x, rs, row);
+            if (!x->shown[0]) snprintf(x->shown, sizeof x->shown, "%s", x->code[0] ? x->code : ue_name(x->row, b, sizeof b));
+            if (n_weapons <= 3) LOG("cheats: weapon row %s of %s: code %s, shown \"%s\", fields: %s", ue_name(x->row, b, sizeof b),
+                                    ue_obj_name(t, line, sizeof line), x->code[0] ? x->code : "-", x->shown, x->key);
+        }
+    }
+    qsort(weapons, n_weapons, sizeof weapons[0], weapon_cmp);
+    LOG("cheats: give: %d weapons in %d table(s)", n_weapons, tables);
+    return n_weapons;
+}
+// by code or shown name: exact (letters/digits, any case), else the one substring match (code, shown name, fields).
+// 1 = *hit, 0 = none, -n = n matches (listed, up to max_list)
+static int weapon_match(const char *want, Weapon **hit, Out *list, int max_list) {
+    char w[96], a[96], b[96], c[220];
+    norm(want ? want : "", w, sizeof w);
+    int sub = 0, shown = 0;
+    Weapon *first = NULL;
+    for (int i = 0; i < n_weapons; i++) {
+        Weapon *x = &weapons[i];
+        norm(x->code, a, sizeof a); norm(x->shown, b, sizeof b); norm(x->key, c, sizeof c);
+        if (w[0] && ((a[0] && !strcmp(a, w)) || !strcmp(b, w))) { *hit = x; return 1; }
+        if (!w[0] || (a[0] && strstr(a, w)) || strstr(b, w) || strstr(c, w)) {
+            if (!first) first = x;
+            sub++;
+            if (list && shown++ < max_list) out_printf(list, "  %-8s %s\n", x->code[0] ? x->code : "-", x->shown);
+        }
+    }
+    if (sub == 1) { *hit = first; return 1; }
+    return -sub;
+}
+static void cmd_give(char *rest, Out *o) {
+    char *a = rest ? strtok(rest, " ") : NULL;
+    if (!a) { out_printf(o, "usage: /give <weapon code or name> [player]  |  /give list [filter]\n"); return; }
+    if (!weapons_load()) { out_printf(o, "/give: no weapon table loaded here (it loads with a mission)\n"); return; }
+    Weapon *h = NULL;
+    if (!_stricmp(a, "list")) {
+        char *f = strtok(NULL, "");
+        int r = weapon_match(f, &h, o, 60);
+        if (r == 1 && h && f) out_printf(o, "  %-8s %s\n", h->code[0] ? h->code : "-", h->shown);
+        else if (r < -60) out_printf(o, "... %d weapons, narrow it down: /give list <filter>\n", -r);
+        else if (!r) out_printf(o, "no weapon matches '%s'\n", f ? f : "");
+        return;
+    }
+    // the name may have spaces; a trailing word naming a player (or "all"/"me") is the target (as /card)
+    char name[128], *who = NULL, *more = strtok(NULL, "");
+    snprintf(name, sizeof name, "%s%s%s", a, more ? " " : "", more ? more : "");
+    char *sp = strrchr(name, ' ');
+    if (sp) {
+        UObject **pa; int n = admin_player_array(&pa), is_player = !_stricmp(sp + 1, "all") || !_stricmp(sp + 1, "me") || sp[1] == '#';
+        char nm[64];
+        for (int i = 0; i < n && !is_player; i++) { admin_display_name(pa[i], nm, sizeof nm); if (!_stricmp(nm, sp + 1)) is_player = 1; }
+        if (is_player) { *sp = 0; who = sp + 1; }
+    }
+    int r = weapon_match(name, &h, NULL, 0);
+    if (r != 1) {
+        if (!r) out_printf(o, "no weapon matches '%s' (/give list [filter])\n", name);
+        else { out_printf(o, "'%s' matches %d weapons:\n", name, -r); weapon_match(name, &h, o, 12); }
+        return;
+    }
+    Targets t;
+    if (!targets(who, &t, o)) return;
+    char rn[96];
+    ue_name(h->row, rn, sizeof rn);
+    int n = 0;
+    for (int i = 0; i < t.n; i++) {
+        UObject *inv = inventory_of(ps_pawn(t.ps[i]));
+        Call c;
+        if (!inv || !call_prep(&c, inv, "ServerAddItemsOfHandle")) continue;
+        RowHandle *ph = carg(&c, "ItemHandle");
+        int32_t *num = carg(&c, "NumItems");
+        if (!ph || !num) continue;
+        ph->table = h->table; ph->row = h->row;   // display string left empty (as /card)
+        *num = 1;
+        LOG("cheats: give %s (%s, row %s) to %p", h->code, h->shown, rn, (void *)inv);
+        call_go(&c);
+        n++;
+    }
+    out_printf(o, "gave %s (%s) to %d hero(es): it takes its slot, the weapon there is replaced\n", h->shown,
+               h->code[0] ? h->code : rn, n);
+    if (n && (t.others || t.all)) notice("host gave %s a %s", t.label, h->shown);
+}
+
 // Chat verbs and who may run them (admin.c checks the permission before cheats_slash runs): /cheats lists them for
 // everyone (on/off: the host's, set_on), the session cheats need the host with cheats on, the own-save ones a session
 // with cheats on (CMD_OWNSAVE: the host, or a client whose host has them on).
 static const struct { const char *name; int perm; } VERBS[] = {{"cheats", CMD_ANYONE}, {"god", CMD_CHEAT},
     {"heal", CMD_CHEAT}, {"revive", CMD_CHEAT}, {"ammo", CMD_CHEAT}, {"copper", CMD_CHEAT}, {"card", CMD_CHEAT},
     {"fly", CMD_CHEAT}, {"noclip", CMD_CHEAT}, {"walk", CMD_CHEAT}, {"tp", CMD_CHEAT}, {"freecam", CMD_CHEAT},
-    {"size", CMD_CHEAT}, {"horde", CMD_CHEAT}, {"director", CMD_CHEAT}, {"spawn", CMD_CHEAT}, {"spawnprop", CMD_CHEAT}, {"killall", CMD_CHEAT},
+    {"size", CMD_CHEAT}, {"horde", CMD_CHEAT}, {"director", CMD_CHEAT}, {"spawn", CMD_CHEAT}, {"spawnprop", CMD_CHEAT}, {"give", CMD_CHEAT}, {"killall", CMD_CHEAT},
     {"freeze", CMD_CHEAT}, {"slomo", CMD_CHEAT}, {"win", CMD_CHEAT}, {"lose", CMD_CHEAT}, {"unlockall", CMD_OWNSAVE},
     {"supply", CMD_OWNSAVE}, {"skulls", CMD_OWNSAVE}, {"burncards", CMD_OWNSAVE}};
 
@@ -1422,7 +1628,7 @@ static void help(Out *o) {
     out_printf(o, "cheats (host only, after /cheats on; [p] = player name, #n, me or all):\n"
                   "/god [p] [on|off]  /heal [p]  /revive [p]  /ammo infinite|off  /copper +N [p]  /card <name>|list [p]\n"
                   "/fly [p]  /noclip  /walk [p]  /tp [p] <p|saferoom|start>  /freecam  /size <x>\n"
-                  "/horde  /director calm|build|peak  /spawn <type> [n]  /spawnprop <name> [#]  /killall  /freeze  /slomo <x>  /win  /lose\n"
+                  "/horde  /director calm|build|peak  /spawn <type> [n]  /spawnprop <name> [#]  /give <weapon>|list [p]  /killall  /freeze  /slomo <x>  /win  /lose\n"
                   "%s"
                   "state: cheats %s", own, on ? "ON" : "off");
     if (on) out_printf(o, ", god %d, ammo %s, speed %.2f%s%s", n_gods, ammo_inf ? "infinite" : "normal", slomo, frozen ? ", frozen" : "", freecam ? ", freecam" : "");
@@ -1457,6 +1663,7 @@ void cheats_slash(const char *verb, char *rest, Out *o) {
     else if (!strcmp(verb, "director")) cmd_director(rest, o);
     else if (!strcmp(verb, "spawn")) cmd_spawn(rest, o);
     else if (!strcmp(verb, "spawnprop")) cmd_spawnprop(rest, o);
+    else if (!strcmp(verb, "give")) cmd_give(rest, o);   // fork, build 41
     else if (!strcmp(verb, "killall")) cmd_killall(o);
     else if (!strcmp(verb, "freeze")) cmd_freeze(o);
     else if (!strcmp(verb, "slomo")) cmd_slomo(rest, o);

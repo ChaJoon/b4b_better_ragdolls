@@ -78,6 +78,7 @@ static void onrep_detour(UObject *comp) {
 // only the play it leads to is skipped (skip_play, play_detour).
 static void play_detour(UObject *comp, const void *params) {
     if (skip_play) return;
+    if (barks_filter(comp, params)) return;   // fork: survivor barks muted on this machine (barks.c)
     orig_play(comp, params);
 }
 static void client_vo_detour(UObject *ctx, void *frame, void *result) {
