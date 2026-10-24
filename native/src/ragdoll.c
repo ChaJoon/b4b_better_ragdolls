@@ -17,6 +17,11 @@
 //   /ragdoll push <kind> <n> one weapon kind's strength in kg cm/s (HG, SMG, AR, LMG, SG, Sni, FragGrenade, default, ...)
 //   /ragdoll shot [x]        shots on a body that is still a ragdoll shove it: the shooter's weapon kind's strength from
 //                            the push table x this (0-10, default 2, off = 0; see "shots on dead bodies")
+//   /ragdoll carry [x]       build 38: a Ridden that dies running keeps its speed: x its running speed (0-2, default 1,
+//                            off = 0; see "momentum carry")
+//   /ragdoll tone [on|off|time <s>|strength <x>|legs <0.1-1>|kinds <K,K>]   build 38 experiment, off by default: bodies
+//                            killed by the listed weapon kinds (default HG,SMG) hold their pose and give out over time
+//                            s (legs first) instead of going limp at once (see "muscle tone")
 //   /ragdoll bloodbag [on|off] off (default): Ridden an explosion would burst stay bodies (ragdolled, pushed)
 //   /ragdoll blood [on|off]  on (default): those bodies get the blood the game paints on the blast victims it keeps
 //   /ragdoll dismember [on|off|limbs <min> [max]|big <0-100>|head <0-100|on|off>|pieces on|off|type <n|auto>|
@@ -183,6 +188,17 @@ typedef struct {
     float mass;                            // build 35: the whole body's kg for the shot shoves (0 = not read yet)
     uint16_t shots;                        // build 35: shoves from shots after death
     uint8_t relcount;                      // build 35: settle-hold releases (a shot can hold a body again)
+    // build 38: momentum carry and muscle tone
+    UObject *mov;                          // its CharacterMovement (at scan time): the running speed while alive
+    int32_t movi, paci;                    // their object indexes (still the same objects?), as ai / lsi
+    float run_v[3];                        // the movement's velocity at the last tick it was alive, cm/s
+    double run_t;                          // when that was read (0 = never)
+    float carry;                           // cm/s of running speed given to the ragdoll (0 = none)
+    char kind[24];                         // the killing hit's kind (a push table key), "" = not known
+    uint8_t tone;                          // muscle tone: 1 holding / giving out, 2 done (limp)
+    uint8_t tonep;                         // tone probe: samples done (bits), 0x80 = not probed
+    double tone_t0, tone_next;             // tone start; next drive update
+    UObject *pac;                          // its PhysicalAnimationComponent (tone)
     FName prof;
     float rel_loc[3], rel_rot[3];
 } Tracked;
@@ -243,6 +259,8 @@ static void scan_step(void) {
         if (ntr == MAX_TRACKED) { n_overflow++; continue; }
         memset(&tr[ntr], 0, sizeof tr[ntr]);
         tr[ntr].a = o; tr[ntr].ai = i; tr[ntr].ls = ls; tr[ntr].lsi = U_INDEX(ls);
+        tr[ntr].mov = ue_get_ptr(o, "CharacterMovement");   // build 38: its running speed is read every tick
+        tr[ntr].movi = tr[ntr].mov ? U_INDEX(tr[ntr].mov) : -1;
         ntr++;
     }
     scan_at = end;
@@ -1614,9 +1632,11 @@ static float entry_key(const uint8_t *e) {   // larger = the killing hit
 }
 
 
+static int tone_on;   // build 38: /ragdoll tone (see "muscle tone"); it needs the killing hit's kind even with no push
+
 static void push_body(Tracked *t, UObject *mesh) {
     char a[160], tn[96], bn[64], hb[64], sn[96], sc[96];
-    if (push_scale <= 0.f) return;
+    if (push_scale <= 0.f && !tone_on) return;
     UObject *hc = call_obj(t->a, "GetHealthComponent");
     if (!hc || dinfo_init(hc) != 1) { n_push_fail++; return; }
     const TArray *arr = (const TArray *)((char *)hc + dinfo.arr_off);
@@ -1638,6 +1658,7 @@ static void push_body(Tracked *t, UObject *mesh) {
         return;
     }
     PushKind *kind = dinfo.type ? kind_of(obj_field(dinfo.type, best), tn, sizeof tn) : (snprintf(tn, sizeof tn, "unknown"), push_kind("default", 0));
+    snprintf(t->kind, sizeof t->kind, "%s", kind->key);   // build 38: muscle tone picks bodies by it
     float strength = kind->n * push_scale;
     if (strength <= 0.f) return;
     const BodyList *bl = bodies_of(mesh);
@@ -2765,14 +2786,16 @@ static void paint_tick(double now) {
 // build 29: how fast blast-pushed bodies really travel, dismembered or not: the mean velocity of all their bodies
 // (flailing limbs cancel out) 0.1 and 0.4 s after death against the push they got, and what could hold them back
 // (a montage, physical-animation motors, physics off). 16 bodies of each kind, counted again at /ragdoll dismember.
+// Build 38: also bodies that died running (momentum carry), 16 of them per /ragdoll carry change, against the speed
+// they were given: whether the engine keeps it, or adds the body's own (animated) speed on top (double speed).
 #define VEL_LOGS 16
-static int vel_logs_d, vel_logs_c;
+static int vel_logs_d, vel_logs_c, vel_logs_r;
 static const double VEL_T[] = {0.1, 0.4};
 static void vel_probe_tick(Tracked *x, double now) {
     for (int i = 0; i < (int)(sizeof VEL_T / sizeof VEL_T[0]); i++) {
         if ((x->velp & (1u << i)) || now - x->died_at < VEL_T[i]) continue;
         x->velp |= 1u << i;
-        int *n = x->dism ? &vel_logs_d : &vel_logs_c;
+        int *n = x->push_dv > 0.f ? (x->dism ? &vel_logs_d : &vel_logs_c) : &vel_logs_r;
         if (!i) { if (*n >= VEL_LOGS) { x->velp = 0x80; return; } (*n)++; }
         if (i == (int)(sizeof VEL_T / sizeof VEL_T[0]) - 1) x->velp |= 0x80;   // the last one: done with this body
         Call k;
@@ -2797,9 +2820,11 @@ static void vel_probe_tick(Tracked *x, double now) {
         int32_t so = pac ? ue_prop_offset(pac, "StrengthMultiplyer") : -1;
         char a[160], pm[24];
         if (so >= 0) snprintf(pm, sizeof pm, "%.2f", *(float *)((char *)pac + so)); else snprintf(pm, sizeof pm, "?");
-        LOG("ragdoll velocity: %s (%s) +%.1fs: bodies move %.0f cm/s on average (%.0f up), fastest %.0f; push %.0f cm/s; "
-            "simulating %d, montage %d, physical animation x%s", oname(x->a, a, sizeof a), x->dism ? "dismembered" : "not dismembered",
-            VEL_T[i], sqrtf(sum[0] * sum[0] + sum[1] * sum[1] + sum[2] * sum[2]), sum[2], top, x->push_dv,
+        LOG("ragdoll velocity: %s (%s) +%.1fs: bodies move %.0f cm/s on average (%.0f up, %.0f along the ground), fastest "
+            "%.0f; push %.0f cm/s, running speed carried %.0f cm/s%s; simulating %d, montage %d, physical animation x%s",
+            oname(x->a, a, sizeof a), x->push_dv > 0.f ? (x->dism ? "dismembered" : "not dismembered") : "died running",
+            VEL_T[i], sqrtf(sum[0] * sum[0] + sum[1] * sum[1] + sum[2] * sum[2]), sum[2], sqrtf(sum[0] * sum[0] + sum[1] * sum[1]),
+            top, x->push_dv, x->carry, x->tone == 1 ? ", muscle tone on" : "",
             call_bool(x->mesh, "IsSimulatingPhysics"), ai ? call_bool(ai, "IsAnyMontagePlaying") : -1, pm);
     }
 }
@@ -2828,6 +2853,397 @@ static int special_death(Tracked *t) {
             cname(t->a, c, sizeof c), m);
     }
     return 1;
+}
+
+// ---- momentum carry (build 38) ----
+// Joon (24 Oct): in L4D2 a common killed mid-run tumbles on; here it dropped on the spot (burning Ridden "just go
+// limp", weak-gun kills "go down"). While a Ridden is alive the tick reads its CharacterMovement's Velocity (a memory
+// read, no call); at the ragdoll the mean velocity of all its bodies is made that running velocity x /ragdoll carry:
+// the difference is added to every body (SetAllPhysicsLinearVelocity, bAddToCurrent: the limbs keep their own swing),
+// then the killing hit's push comes on top. The speed used is the last one read while it was alive (the game may stop
+// the movement at death; the log says what it reads at the ragdoll). Slower than CARRY_MIN = standing: nothing done.
+// Unknown before the run: whether the engine keeps the speed or later adds the animated body's own (the velocity
+// probe's "died running" lines, 16 bodies), and whether SetAllPhysicsLinearVelocity reaches every body of a skeletal
+// mesh in this engine (measured on the first body: if the mean moved by less than half, every body is set one by one).
+#define CARRY_DEFAULT 1.f
+#define CARRY_MIN     30.f    // cm/s: slower is standing (nothing carried)
+#define CARRY_MAX     1500.f  // cm/s at most (a launch, a teleport)
+#define CARRY_STALE   0.25    // s between the last speed read alive and the death: older isn't used
+#define CARRY_LOGS    40
+static float carry_scale = CARRY_DEFAULT;
+static int32_t mov_vel_off = -2;   // MovementComponent.Velocity's offset: -2 not looked up, -1 not there
+static int carry_mode;             // 0 SetAllPhysicsLinearVelocity, 1 every body one by one (the first reached only the root)
+static int n_carried, n_carry_still, n_carry_nomov, n_carry_fail, carry_logs;
+
+static int mov_ok(Tracked *x) { return x->mov && ue_object_usable(x->mov, x->movi); }
+
+static void run_note(Tracked *x, double t) {   // every tick while it is alive
+    if (!mov_ok(x)) return;
+    if (mov_vel_off == -2) {
+        char tt[64], sn[64];
+        FField *f = ue_find_prop(U_CLASS(x->mov), "Velocity");
+        mov_vel_off = f && !strcmp(ue_name(*(FName *)FF_CLASS(f), tt, sizeof tt), "StructProperty") &&
+                      !strcmp(ue_obj_name(FP_SUB(f), sn, sizeof sn), "Vector") ? FP_OFFSET(f) : -1;
+        LOG("ragdoll carry: %s", mov_vel_off >= 0 ? "running speeds from MovementComponent.Velocity"
+                                                  : "no MovementComponent.Velocity (a Vector): no running speed carried");
+    }
+    if (mov_vel_off < 0) return;
+    memcpy(x->run_v, (char *)x->mov + mov_vel_off, sizeof x->run_v);
+    x->run_t = t;
+}
+
+static float len3(const float v[3]) { return sqrtf(v[0] * v[0] + v[1] * v[1] + v[2] * v[2]); }
+
+// the mean velocity of the body's simulated bodies (parts cut off left out), cm/s; how many bodies were read
+static int mean_velocity(Tracked *t, UObject *mesh, float out[3]) {
+    Call k;
+    out[0] = out[1] = out[2] = 0;
+    if (!call_prep(&k, mesh, "GetPhysicsLinearVelocity")) return 0;
+    FName *bn = carg(&k, "BoneName");
+    float *v = carg(&k, "ReturnValue");
+    if (!v) return 0;
+    const BodyList *bl = bodies_of(mesh);
+    int nb = bl && bn ? bl->n : 0, cnt = 0;
+    for (int b = nb ? 0 : -1; b < nb; b++) {   // no list: the root body only
+        if (b >= 0 && b < 32 && ((t->hid >> b) & 1)) continue;
+        if (b >= 0) *bn = bl->bone[b];
+        call_go(&k);
+        for (int c = 0; c < 3; c++) out[c] += v[c];
+        cnt++;
+    }
+    for (int c = 0; c < 3; c++) out[c] /= (float)(cnt ? cnt : 1);
+    return cnt;
+}
+
+// d (cm/s) added to every body's velocity; 0 = done
+static int add_velocity(UObject *mesh, const BodyList *bl, const float d[3]) {
+    Call k;
+    if (carry_mode == 0 && call_prep(&k, mesh, "SetAllPhysicsLinearVelocity")) {
+        float *nv = carg(&k, "NewVel");
+        if (nv) { memcpy(nv, d, 3 * sizeof(float)); SET(&k, "bAddToCurrent", uint8_t, 1); call_go(&k); return 0; }
+    }
+    if (!bl || !call_prep(&k, mesh, "SetPhysicsLinearVelocity")) return -1;
+    float *nv = carg(&k, "NewVel");
+    FName *bn = carg(&k, "BoneName");
+    if (!nv || !bn) return -1;
+    for (int i = 0; i < bl->n; i++) {
+        memcpy(nv, d, 3 * sizeof(float));
+        SET(&k, "bAddToCurrent", uint8_t, 1);
+        *bn = bl->bone[i];
+        call_go(&k);
+    }
+    return 0;
+}
+
+static void carry_body(Tracked *t, UObject *mesh) {
+    char a[160], c[160];
+    if (carry_scale <= 0.f) return;
+    if (!mov_ok(t) || mov_vel_off < 0 || !t->run_t || t->died_at - t->run_t > CARRY_STALE) { n_carry_nomov++; return; }
+    float rs = len3(t->run_v);
+    if (rs < CARRY_MIN) { n_carry_still++; return; }
+    float k = carry_scale;
+    if (rs * k > CARRY_MAX) k = CARRY_MAX / rs;
+    const BodyList *bl = bodies_of(mesh);
+    float want[3], before[3], after[3], d[3];
+    for (int i = 0; i < 3; i++) want[i] = t->run_v[i] * k;
+    if (!mean_velocity(t, mesh, before)) { n_carry_fail++; return; }
+    for (int i = 0; i < 3; i++) d[i] = want[i] - before[i];
+    if (add_velocity(mesh, bl, d)) {
+        if (!n_carry_fail++) LOG("ragdoll carry: no SetAllPhysicsLinearVelocity / SetPhysicsLinearVelocity(NewVel, bAddToCurrent, BoneName): nothing carried");
+        return;
+    }
+    mean_velocity(t, mesh, after);
+    float miss[3] = {want[0] - after[0], want[1] - after[1], want[2] - after[2]};
+    const char *how = "";
+    if (carry_mode == 0 && len3(d) > 50.f && len3(miss) > 0.5f * len3(d)) {   // it moved the root body only, it seems
+        carry_mode = 1;
+        LOG("ragdoll carry: SetAllPhysicsLinearVelocity moved the mean by %.0f of %.0f cm/s (the root body only?): every body "
+            "is set one by one from now on", len3(d) - len3(miss), len3(d));
+        add_velocity(mesh, bl, miss);
+        mean_velocity(t, mesh, after);
+        how = ", every body set one by one";
+    }
+    t->carry = rs * k;
+    n_carried++;
+    if (carry_logs < CARRY_LOGS) {
+        carry_logs++;
+        LOG("ragdoll carry: %s (%s) died running %.0f cm/s (read %.3f s before we saw it dead; its movement reads %.0f cm/s "
+            "now): bodies %.0f -> %.0f cm/s on average (asked %.0f, x%.2f)%s", oname(t->a, a, sizeof a), cname(t->a, c, sizeof c),
+            rs, t->died_at - t->run_t, len3((const float *)((char *)t->mov + mov_vel_off)), len3(before), len3(after), len3(want), k, how);
+    }
+}
+
+// ---- muscle tone (build 38 experiment: /ragdoll tone, off by default) ----
+// Joon (24 Oct): weak-gun kills (HG, SMG) shouldn't go limp at once but hold on and give out, legs first (to the
+// knees, staggering under more shots), as in L4D2, with no animation of B4B's or L4D2's. The game's own
+// PhysicalAnimationComponent (Unreal's; it drove the vanilla "lunge") is used as muscles: for a body killed by one of
+// the tone kinds every joint gets an orientation drive local to its parent body (bIsLocalSimulation: a joint angle,
+// not a string pulling the body to a place in the world) toward the pose the animation holds, at a strength that fades
+// as 1 - (age / its time)^2 (holds, then buckles): the legs (thighs and below) over legs x time, the rest over the whole
+// time. Updated every TONE_STEP (ApplyPhysicalAnimationSettingsBelow); at the end the drive multiplier goes to 0: the
+// ragdoll as before. Shots during it shove the body (build 35) and the drives pull it back (the stagger). The settle
+// hold keeps the game's swap away until the tone is done. Blast victims are thrown, never toned.
+// Unknown before the run, logged ("ragdoll tone probe", 3 bodies per change; "ragdoll tone" lines):
+//   - what pose the drives aim at after the game pauses the animation (~0.25 s after death, build 6 watch): the death
+//     pose kept (what we want: the body sags against it), or the body's own pose (no hold at all: the drives do nothing);
+//   - whether the game detaches the component or zeroes its multiplier again (its death reaction did at ~0.25-0.5 s):
+//     both are put back at every update, and counted;
+//   - the strength: TONE_ORIENT is Unreal's own profile default, a first guess (/ragdoll tone strength <x> live).
+#define TONE_TIME_DEF   1.5f
+#define TONE_STR_DEF    1.f
+#define TONE_LEGS_DEF   0.4f
+#define TONE_KINDS_DEF  "HG,SMG"
+#define TONE_ORIENT     1000.f   // OrientationStrength at x1
+#define TONE_ANGVEL     100.f    // AngularVelocityStrength at x1 (the drive's damping)
+#define TONE_MAXF       1e9f     // MaxAngularForce: no real limit (whether 0 means "none" or "zero" here isn't known)
+#define TONE_STEP       0.1      // s between drive updates
+#define TONE_LOGS       20
+static float tone_time = TONE_TIME_DEF, tone_str = TONE_STR_DEF, tone_legs = TONE_LEGS_DEF;
+static char tone_kinds[64] = TONE_KINDS_DEF;
+static int n_toned, n_tone_done, n_tone_reattach, n_tone_rezero, n_tone_montage, n_tone_wake, n_tone_gone, n_tone_fail, n_tone_nopac,
+           tone_logs, tone_fix_logs, tone_probes;
+static struct {
+    int state;                                // 0 not looked up, 1 ok, -1 missing (logged)
+    FField *p_body, *p_data, *p_self;         // ApplyPhysicalAnimationSettingsBelow(BodyName, PhysicalAnimationData, bIncludeSelf)
+    FField *f_or, *f_av, *f_ma, *f_local;     // FPhysicalAnimationData's fields
+    FField *tt_ret; int32_t tt_trans;         // GetBodyTargetTransform's FTransform and its Translation (NULL: no probe)
+    int32_t mult_off;                         // StrengthMultiplyer, -1 unknown
+    FField *mesh_f;                           // its SkeletalMeshComponent (detached by the game?), NULL unknown
+} pa;
+
+static int pa_init(UObject *pac) {
+    if (pa.state) return pa.state;
+    char t[64], sn[96], fn[64], line[1024];
+    pa.state = -1;
+    UClass *c = U_CLASS(pac);
+    UFunction *f = ue_find_function(c, "ApplyPhysicalAnimationSettingsBelow");
+    pa.p_body = f ? ue_find_prop(f, "BodyName") : NULL;
+    pa.p_data = f ? ue_find_prop(f, "PhysicalAnimationData") : NULL;
+    pa.p_self = f ? ue_find_prop(f, "bIncludeSelf") : NULL;
+    UStruct *st = pa.p_data && !strcmp(ue_name(*(FName *)FF_CLASS(pa.p_data), t, sizeof t), "StructProperty") ? (UStruct *)FP_SUB(pa.p_data) : NULL;
+    if (!pa.p_body || !st || !pa.p_self) {
+        LOG("ragdoll tone: no %s.ApplyPhysicalAnimationSettingsBelow(BodyName, PhysicalAnimationData, bIncludeSelf): muscle tone off",
+            ue_obj_name(c, sn, sizeof sn));
+        return -1;
+    }
+    size_t k = (size_t)snprintf(line, sizeof line, "ragdoll tone: %s (%d bytes):", ue_obj_name(st, sn, sizeof sn), US_PROPSSIZE(st));
+    for (FField *p = US_CHILDPROPS(st); p && k + 64 < sizeof line; p = FF_NEXT(p))
+        k += (size_t)snprintf(line + k, sizeof line - k, " %s:%s@0x%x", ue_name(FF_NAME(p), fn, sizeof fn),
+                              ue_name(*(FName *)FF_CLASS(p), t, sizeof t), FP_OFFSET(p));
+    LOG("%s", line);
+    pa.f_or = ue_find_prop(st, "OrientationStrength");
+    pa.f_av = ue_find_prop(st, "AngularVelocityStrength");
+    pa.f_ma = ue_find_prop(st, "MaxAngularForce");
+    pa.f_local = ue_find_prop(st, "bIsLocalSimulation");
+    if (!pa.f_or || !pa.f_av || !pa.f_local || FBP_SIZE(pa.f_local) != 1 || !FBP_MASK(pa.f_local) ||
+        !ue_find_function(c, "SetStrengthMultiplyer")) {
+        LOG("ragdoll tone: no OrientationStrength / AngularVelocityStrength / a settable bIsLocalSimulation, or no "
+            "SetStrengthMultiplyer: muscle tone off");
+        return -1;
+    }
+    pa.mult_off = ue_prop_offset(pac, "StrengthMultiplyer");
+    pa.mesh_f = ue_find_prop(c, "SkeletalMeshComponent");
+    UFunction *g = ue_find_function(c, "GetBodyTargetTransform");
+    FField *r = g ? ue_find_prop(g, "ReturnValue") : NULL;
+    FField *tl = r && !strcmp(ue_name(*(FName *)FF_CLASS(r), t, sizeof t), "StructProperty") ? ue_find_prop((UStruct *)FP_SUB(r), "Translation") : NULL;
+    if (tl) { pa.tt_ret = r; pa.tt_trans = FP_OFFSET(tl); }
+    LOG("ragdoll tone: drives through %s.ApplyPhysicalAnimationSettingsBelow; its multiplier %s; its mesh %s; target probe %s",
+        ue_obj_name(c, sn, sizeof sn), pa.mult_off >= 0 ? "readable" : "NOT readable",
+        pa.mesh_f ? "readable (attached again if the game detaches it)" : "NOT readable (attached once at the start)",
+        tl ? "with GetBodyTargetTransform" : "none (no GetBodyTargetTransform)");
+    return pa.state = 1;
+}
+
+static int tone_kind(const char *kind) {   // the killing hit's kind is in tone_kinds (any case; "all" = every kind)
+    if (!kind[0]) return 0;
+    size_t kl = strlen(kind);
+    for (const char *p = tone_kinds; *p; ) {
+        while (*p == ',' || *p == ' ') p++;
+        size_t n = 0;
+        while (p[n] && p[n] != ',' && p[n] != ' ') n++;
+        if (n && ((n == 3 && !_strnicmp(p, "all", 3)) || (n == kl && !_strnicmp(p, kind, n)))) return 1;
+        p += n;
+    }
+    return 0;
+}
+
+static int pa_attached(UObject *pac, UObject *mesh) {   // 1 yes, 0 no, -1 can't tell
+    return pa.mesh_f ? *(UObject **)((char *)pac + FP_OFFSET(pa.mesh_f)) == mesh : -1;
+}
+static void pa_attach(UObject *pac, UObject *mesh) {   // SetSkeletalMeshComponent (erases the component's drives)
+    Call k;
+    char t[64];
+    if (!call_prep(&k, pac, "SetSkeletalMeshComponent")) return;
+    UObject **m = carg(&k, "InSkeletalMeshComponent");
+    for (FField *p = m ? NULL : US_CHILDPROPS(k.fn); p && !m; p = FF_NEXT(p))   // else its first object parameter
+        if ((FP_FLAGS(p) & CPF_PARM_) && !strcmp(ue_name(*(FName *)FF_CLASS(p), t, sizeof t), "ObjectProperty")) m = (UObject **)(k.p + FP_OFFSET(p));
+    if (m) { *m = mesh; call_go(&k); }
+}
+static void pa_mult(UObject *pac, float m) {
+    Call k;
+    if (call_prep(&k, pac, "SetStrengthMultiplyer")) { SET(&k, "InStrengthMultiplyer", float, m); call_go(&k); }
+}
+// a drive of strength s (x TONE_ORIENT) on the body of `bone` and every body below it
+static void tone_drive(UObject *pac, FName bone, float s) {
+    Call k;
+    if (!call_prep(&k, pac, "ApplyPhysicalAnimationSettingsBelow")) return;
+    *(FName *)(k.p + FP_OFFSET(pa.p_body)) = bone;
+    uint8_t *d = k.p + FP_OFFSET(pa.p_data);
+    *(float *)(d + FP_OFFSET(pa.f_or)) = TONE_ORIENT * s;
+    *(float *)(d + FP_OFFSET(pa.f_av)) = TONE_ANGVEL * s;
+    if (pa.f_ma) *(float *)(d + FP_OFFSET(pa.f_ma)) = TONE_MAXF;
+    d[FP_OFFSET(pa.f_local) + FBP_BYTEOFF(pa.f_local)] |= FBP_MASK(pa.f_local);
+    k.p[FP_OFFSET(pa.p_self)] = 1;
+    call_go(&k);
+}
+
+// a body's index in the list whose bone name contains `part` (any case), -1 none
+static int body_named(const BodyList *bl, const char *part) {
+    char b[64];
+    const char *keys[2] = {part, NULL};
+    for (int i = 0; bl && i < bl->n; i++) if (name_has(ue_name(bl->bone[i], b, sizeof b), keys)) return i;
+    return -1;
+}
+
+static float tone_fade(float u) { return u >= 1.f ? 0.f : u <= 0.f ? 1.f : 1.f - u * u; }
+
+static void tone_update(Tracked *x, double age) {
+    char a[160];
+    const BodyList *bl = bodies_of(x->mesh);
+    if (!bl) return;
+    float s_all = tone_str * tone_fade((float)(age / tone_time)), s_legs = tone_str * tone_fade((float)(age / (tone_time * tone_legs)));
+    if (pa_attached(x->pac, x->mesh) == 0) {
+        pa_attach(x->pac, x->mesh);
+        n_tone_reattach++;
+        if (tone_fix_logs < 10) { tone_fix_logs++; LOG("ragdoll tone: %s +%.2fs: the physical animation was detached (the game?): attached again", oname(x->a, a, sizeof a), age); }
+    }
+    // the component moves its drive targets in its own tick: switched off (the game's death code?), the targets stay put
+    int act = call_bool(x->pac, "IsActive"), tk = call_bool(x->pac, "IsComponentTickEnabled");
+    if (act == 0 || tk == 0) {
+        Call k;
+        if (act == 0 && call_prep(&k, x->pac, "Activate")) { SET(&k, "bReset", uint8_t, 0); call_go(&k); }
+        if (tk == 0 && call_prep(&k, x->pac, "SetComponentTickEnabled")) { SET(&k, "bEnabled", uint8_t, 1); call_go(&k); }
+        n_tone_wake++;
+        if (tone_fix_logs < 10) { tone_fix_logs++; LOG("ragdoll tone: %s +%.2fs: the physical animation was %s (the game?): switched on again -> active %d, ticking %d",
+                                                       oname(x->a, a, sizeof a), age, act == 0 ? (tk == 0 ? "inactive, not ticking" : "inactive") : "not ticking",
+                                                       call_bool(x->pac, "IsActive"), call_bool(x->pac, "IsComponentTickEnabled")); }
+    }
+    if (age > 0 && pa.mult_off >= 0 && *(float *)((char *)x->pac + pa.mult_off) != 1.f) {
+        n_tone_rezero++;
+        if (tone_fix_logs < 10) { tone_fix_logs++; LOG("ragdoll tone: %s +%.2fs: its drive multiplier was %.2f (the game?): back to 1", oname(x->a, a, sizeof a), age, *(float *)((char *)x->pac + pa.mult_off)); }
+        pa_mult(x->pac, 1.f);
+    }
+    UObject *ai = ue_get_ptr(x->mesh, "AnimScriptInstance");
+    if (ai && age > 0 && call_bool(ai, "IsAnyMontagePlaying") == 1) { anim_off(ai, NULL); n_tone_montage++; }   // it would be the target
+    int root = body_named(bl, "pelvis"), l1 = body_named(bl, "thigh_l"), l2 = body_named(bl, "thigh_r");
+    tone_drive(x->pac, bl->bone[root >= 0 ? root : 0], s_all);
+    if (l1 >= 0) tone_drive(x->pac, bl->bone[l1], s_legs);
+    if (l2 >= 0) tone_drive(x->pac, bl->bone[l2], s_legs);
+}
+
+// the probe: 3 bodies per /ragdoll tone change, at these times after the tone started: where 3 of its bodies are and
+// where the drives want them (GetBodyTargetTransform), and how far each moved since the last sample
+static const double TPROBE_T[] = {0.0, 0.1, 0.25, 0.5, 1.0};
+#define N_TPROBE ((int)(sizeof TPROBE_T / sizeof TPROBE_T[0]))
+static struct { UObject *a; float pb[3][3], pt[3][3]; } tpr[3];
+
+static int target_loc(UObject *pac, FName bone, float out[3]) {
+    Call k;
+    if (!pa.tt_ret || !call_prep(&k, pac, "GetBodyTargetTransform")) return -1;
+    SET(&k, "BodyName", FName, bone);
+    call_go(&k);
+    memcpy(out, k.p + FP_OFFSET(pa.tt_ret) + pa.tt_trans, 3 * sizeof(float));
+    return 0;
+}
+
+static void tone_probe(Tracked *x, double age) {
+    int i = 0;
+    while (i < N_TPROBE && (x->tonep & (1u << i))) i++;
+    if (i >= N_TPROBE) { x->tonep = 0x80; return; }
+    if (age < TPROBE_T[i]) return;
+    x->tonep |= (uint8_t)(1u << i);
+    int s = -1;
+    for (int j = 0; j < 3 && s < 0; j++) if (tpr[j].a == x->a) s = j;
+    for (int j = 0; j < 3 && s < 0; j++) if (!tpr[j].a) { s = j; memset(&tpr[j], 0, sizeof tpr[j]); tpr[j].a = x->a; }
+    if (s < 0) { x->tonep = 0x80; return; }
+    const BodyList *bl = bodies_of(x->mesh);
+    if (!bl) { x->tonep = 0x80; return; }
+    int pick[3] = {body_named(bl, "head"), body_named(bl, "calf_l"), body_named(bl, "hand_r")};
+    if (pick[0] < 0) pick[0] = body_named(bl, "neck");
+    char line[1400], a[160], bn[64], pm[16];
+    FField *pf = ue_find_prop(U_CLASS(x->mesh), "bPauseAnims");
+    UObject *ai = ue_get_ptr(x->mesh, "AnimScriptInstance");
+    if (pa.mult_off >= 0) snprintf(pm, sizeof pm, "%.2f", *(float *)((char *)x->pac + pa.mult_off)); else snprintf(pm, sizeof pm, "?");
+    int att = pa_attached(x->pac, x->mesh);
+    size_t k = (size_t)snprintf(line, sizeof line, "ragdoll tone probe %s +%.2fs: drive multiplier %s, attached %s, active %d, ticking %d, "
+                                "animation paused %d, montage %d, simulating %d;", oname(x->a, a, sizeof a), age, pm,
+                                att < 0 ? "?" : att ? "yes" : "NO", call_bool(x->pac, "IsActive"), call_bool(x->pac, "IsComponentTickEnabled"),
+                                pf ? bool_at(pf, (const uint8_t *)x->mesh) : -1, ai ? call_bool(ai, "IsAnyMontagePlaying") : -1,
+                                call_bool(x->mesh, "IsSimulatingPhysics"));
+    for (int j = 0; j < 3 && k + 200 < sizeof line; j++) {
+        if (pick[j] < 0) continue;
+        FName b = bl->bone[pick[j]];
+        float pb[3], pt[3];
+        if (bone_loc(x->mesh, b, pb)) continue;
+        int ht = !target_loc(x->pac, b, pt);
+        float mb[3] = {pb[0] - tpr[s].pb[j][0], pb[1] - tpr[s].pb[j][1], pb[2] - tpr[s].pb[j][2]};
+        float mt[3] = {pt[0] - tpr[s].pt[j][0], pt[1] - tpr[s].pt[j][1], pt[2] - tpr[s].pt[j][2]};
+        float ap[3] = {pt[0] - pb[0], pt[1] - pb[1], pt[2] - pb[2]};
+        if (ht) k += (size_t)snprintf(line + k, sizeof line - k, " %s: body (%.0f %.0f %.0f), target (%.0f %.0f %.0f), %.0f cm apart, moved %.0f / target %.0f cm;",
+                                      ue_name(b, bn, sizeof bn), pb[0], pb[1], pb[2], pt[0], pt[1], pt[2], len3(ap), i ? len3(mb) : 0.f, i ? len3(mt) : 0.f);
+        else k += (size_t)snprintf(line + k, sizeof line - k, " %s: body (%.0f %.0f %.0f), no target;", ue_name(b, bn, sizeof bn), pb[0], pb[1], pb[2]);
+        memcpy(tpr[s].pb[j], pb, sizeof pb);
+        if (ht) memcpy(tpr[s].pt[j], pt, sizeof pt);
+    }
+    LOG("%s", line);
+}
+
+static void tone_start(Tracked *t, UObject *mesh, UObject *pac) {
+    char a[160], c[160], b[64];
+    if (!tone_on || !tone_kind(t->kind) || t->push_dv > 0.f || t->dism) return;   // blast victims are thrown, not toned
+    if (!pac) { n_tone_nopac++; return; }
+    const BodyList *bl = bodies_of(mesh);
+    if (pa_init(pac) != 1 || !bl) { n_tone_fail++; return; }
+    if (pa_attached(pac, mesh) != 1) pa_attach(pac, mesh);   // not readable: attached once
+    pa_mult(pac, 1.f);   // anim_off put it at 0
+    t->pac = pac;
+    t->paci = U_INDEX(pac);
+    t->tone = 1;
+    t->tone_t0 = now_s();
+    t->tone_next = t->tone_t0 + TONE_STEP;
+    t->tonep = tone_probes < 3 ? 0 : 0x80;
+    if (!t->tonep) tone_probes++;
+    tone_update(t, 0.0);
+    n_toned++;
+    if (tone_logs < TONE_LOGS) {
+        tone_logs++;
+        int l1 = body_named(bl, "thigh_l"), l2 = body_named(bl, "thigh_r"), root = body_named(bl, "pelvis");
+        LOG("ragdoll tone: %s (%s) killed by %s: holds for %.2f s, legs give out by %.2f s, strength x%.2f; drives from %s%s",
+            oname(t->a, a, sizeof a), cname(t->a, c, sizeof c), t->kind, tone_time, tone_time * tone_legs, tone_str,
+            ue_name(bl->bone[root >= 0 ? root : 0], b, sizeof b), l1 >= 0 && l2 >= 0 ? ", legs from thigh_l and thigh_r" : " (NO thigh bodies: the legs fade with the rest)");
+    }
+}
+
+static void tone_tick(Tracked *x, double now) {
+    char a[160];
+    double age = now - x->tone_t0;
+    if (!ue_object_usable(x->pac, x->paci)) {   // the game destroyed the component: nothing to drive (or to switch off)
+        x->tone = 2;
+        n_tone_gone++;
+        if (tone_fix_logs < 10) { tone_fix_logs++; LOG("ragdoll tone: %s +%.2fs: its physical animation component is gone (destroyed by the game?): limp now", oname(x->a, a, sizeof a), age); }
+        return;
+    }
+    if (x->tonep != 0x80) tone_probe(x, age);
+    if (age >= tone_time) {
+        pa_mult(x->pac, 0.f);   // limp, as without the tone
+        x->tone = 2;
+        n_tone_done++;
+        if (tone_logs < TONE_LOGS) { tone_logs++; LOG("ragdoll tone: %s limp at +%.2fs (%d shove(s) from shots during it)", oname(x->a, a, sizeof a), age, x->shots); }
+        return;
+    }
+    if (now < x->tone_next) return;
+    x->tone_next = now + TONE_STEP;
+    tone_update(x, age);
 }
 
 // ---- the ragdoll ----
@@ -2890,7 +3306,9 @@ static int apply(Tracked *t) {
     }
     if (sim != 1) { LOG("ragdoll: %s is not simulating after the calls", oname(t->a, a, sizeof a)); return -1; }
     mstate_note(t);       // build 27: what the game wrote on the body (limbs it took off)
+    carry_body(t, mesh);  // build 38: it keeps its running speed, before the push
     push_body(t, mesh);   // step 2: the killing hit throws the body (blast victims: /ragdoll dismember first)
+    tone_start(t, mesh, pac);   // build 38: weak-gun kills hold their pose and give out (/ragdoll tone)
     return 0;
 }
 
@@ -2925,11 +3343,13 @@ static void undo(Tracked *t) {
         if (call_prep(&k, t->a, "SetActorHiddenInGame")) { SET(&k, "bNewHidden", uint8_t, 0); call_go(&k); }
         if (call_prep(&k, t->a, "SetActorEnableCollision")) { SET(&k, "bNewActorEnableCollision", uint8_t, 1); call_go(&k); }
     }
+    if (t->tone == 1 && t->pac && ue_object_usable(t->pac, t->paci)) pa_mult(t->pac, 0.f);   // build 38: our drives off the living body
     n_revived++;
     LOG("ragdoll: WARNING %s came back alive after its ragdoll (the game reuses Ridden actors): physics undone", oname(t->a, a, sizeof a));
     t->ragdolled = 0; t->done = 0; t->died_at = 0; t->rest = 0; t->released = 0; t->checks = 0; t->spared = 0; t->ended = 0;
     t->dism = 0; t->hid = 0; t->blast_ok = 0; t->painted = 0;
     t->mass = 0; t->shots = 0; t->relcount = 0;
+    t->carry = 0; t->tone = 0; t->tonep = 0; t->kind[0] = 0; t->run_t = 0; t->velp = 0; t->push_dv = 0;
 }
 
 // ---- settle hold: the game swaps a ragdoll for its stand-in only once the body is at rest ----
@@ -3039,7 +3459,8 @@ static void settle_detour(UObject *rc) {   // game thread: timers run inside the
     }
     Tracked *x = NULL;
     for (int i = 0; rc && i < ntr; i++) if (tr[i].rc == rc) { x = &tr[i]; break; }
-    if (x && x->ragdolled && !x->released && x->mesh && settle_hold(x)) return;   // the timer fires again in 0.5 s
+    // the timer fires again in 0.5 s; build 38: never during a muscle tone (the game would freeze the body mid-fall)
+    if (x && x->ragdolled && !x->released && x->mesh && (x->tone == 1 || settle_hold(x))) return;
     orig_settle(rc);
 }
 
@@ -3402,6 +3823,8 @@ static void end_body(Tracked *x, double age) {
 //   ragdoll_kinds=SG:30000,Axe:6000    the push table's kinds that differ from the defaults, or were added
 //   ragdoll_bloodbag, ragdoll_blood, ragdoll_dismember, ragdoll_pieces   1 / 0 (on / off read too)
 //   ragdoll_limbs=2-3, ragdoll_big=75, ragdoll_head=50   as /ragdoll dismember limbs|big|head
+//   ragdoll_carry                      build 38: x the running speed (0-2)
+//   ragdoll_tone, ragdoll_tone_time, ragdoll_tone_strength, ragdoll_tone_legs, ragdoll_tone_kinds=HG,SMG   build 38
 // Not saved: trace, probe, dismember type|impulse (the dismember experiment's test knobs).
 static int start_on;     // ragdoll=1 read: the tick turns the ragdoll on, once
 static int start_done;   // that happened, or the player turned it on or off himself
@@ -3415,6 +3838,18 @@ static int onoff(const char *v, int def) {
     if (!_stricmp(v, "off") || !_stricmp(v, "false")) return 0;
     return atoi(v) != 0;
 }
+// build 38: the weapon kinds whose kills get the muscle tone: letters, digits and _, comma-separated (spaces dropped)
+static void set_tone_kinds(const char *v) {
+    size_t m = 0;
+    for (; *v && m + 1 < sizeof tone_kinds; v++) {
+        char ch = *v;
+        if (isalnum((unsigned char)ch) || ch == '_') tone_kinds[m++] = ch;
+        else if ((ch == ',' || ch == ' ') && m && tone_kinds[m - 1] != ',') tone_kinds[m++] = ',';
+    }
+    while (m && tone_kinds[m - 1] == ',') m--;
+    tone_kinds[m] = 0;
+}
+
 static void set_limbs(int lo, int hi) {   // 1-4 each, in order
     lo = clampi(lo, 1, N_LIMBS);
     hi = clampi(hi, 1, N_LIMBS);
@@ -3486,6 +3921,12 @@ static int setting(const char *k, const char *v) {
     }
     else if (!strcmp(k, "ragdoll_big")) dism_big = v ? clampi(atoi(v), 0, 100) : DISM_BIG_DEF;
     else if (!strcmp(k, "ragdoll_head")) dism_head = v ? clampi(atoi(v), 0, 100) : DISM_HEAD_DEF;
+    else if (!strcmp(k, "ragdoll_carry")) carry_scale = v ? clampf((float)atof(v), 0.f, 2.f) : CARRY_DEFAULT;
+    else if (!strcmp(k, "ragdoll_tone")) tone_on = onoff(v, 0);
+    else if (!strcmp(k, "ragdoll_tone_time")) tone_time = v ? clampf((float)atof(v), 0.3f, 5.f) : TONE_TIME_DEF;
+    else if (!strcmp(k, "ragdoll_tone_strength")) tone_str = v ? clampf((float)atof(v), 0.f, 20.f) : TONE_STR_DEF;
+    else if (!strcmp(k, "ragdoll_tone_legs")) tone_legs = v ? clampf((float)atof(v), 0.1f, 1.f) : TONE_LEGS_DEF;
+    else if (!strcmp(k, "ragdoll_tone_kinds")) set_tone_kinds(v ? v : TONE_KINDS_DEF);
     else return 0;
     return 1;
 }
@@ -3498,6 +3939,8 @@ static void turn_on(float delay) {   // game thread: /ragdoll on, or ragdoll=1 a
     settle_logs = 0;
     push_logs = hit_dumps = left_logs = bag_logs = 0;
     shot_logs = shot_miss_logs = shot_dumps = 0;
+    carry_logs = vel_logs_r = tone_logs = tone_fix_logs = tone_probes = 0;   // build 38
+    memset(tpr, 0, sizeof tpr);
     if (shot_state < 0) shot_state = 0;   // look OnCorpseHit up again
     shot_reset();
     game_tid = GetCurrentThreadId();
@@ -3553,7 +3996,8 @@ void ragdoll_tick(float dt) {
             continue;
         }
         if (x->done) {
-            if (x->ragdolled && x->push_dv > 0.f && !(x->velp & 0x80) && !x->ended) vel_probe_tick(x, t);
+            if (x->ragdolled && (x->push_dv > 0.f || x->carry > 0.f) && !(x->velp & 0x80) && !x->ended) vel_probe_tick(x, t);
+            if (x->ragdolled && x->tone == 1 && !x->ended) tone_tick(x, t);   // build 38
             if (x->ragdolled && x->limbp == 1 && !x->ended) limb_probe_tick(x, t);
             if (x->ragdolled && !x->ended && t - x->died_at >= deadline_s) { end_body(x, t - x->died_at); continue; }
             if (x->ragdolled && !x->released && x->mesh && grav_scale != 1.f && !n_grav_fail) extra_gravity(x);
@@ -3561,7 +4005,7 @@ void ragdoll_tick(float dt) {
             continue;
         }
         if (!x->died_at) {
-            if (call_bool(x->ls, "IsAlive") == 1) continue;
+            if (call_bool(x->ls, "IsAlive") == 1) { run_note(x, t); continue; }   // build 38: its running speed
             x->died_at = t;
             n_deaths++;
             if (tracing) { note_corpse_class(x->a); trace_on_death(x->a); }   // the stand-in class, for spawn stacks
@@ -3600,6 +4044,12 @@ void ragdoll_slash(char *rest, Out *o) {
                       "ours, %d failed, %d dropped\n", shot_scale, shot_state < 0 ? " (NOT AVAILABLE: see log)" : "", n_shoves,
                    n_shot_hits, n_shove_trace, n_shove_near, n_shot_reheld, n_shot_noshooter, n_shot_early, n_shot_frozen,
                    n_shot_blast, n_shot_notours, n_shot_fail, n_shot_dropped);
+        out_printf(o, "/ragdoll carry x%.2f%s: %d died running and kept it, %d standing still, %d with no speed read, %d failed; "
+                      "tone %s (%s, %.2f s, legs %.2f, x%.2f)%s: %d toned, %d done; put back: %d attachments, %d multipliers, %d "
+                      "switched on again, %d montages stopped; %d lost their component; %d failed, %d with no physical animation\n", carry_scale,
+                   mov_vel_off == -1 ? " (NOT AVAILABLE: see log)" : "", n_carried, n_carry_still, n_carry_nomov, n_carry_fail,
+                   tone_on ? "on" : "off", tone_kinds, tone_time, tone_legs, tone_str, pa.state < 0 ? " (NOT AVAILABLE: see log)" : "",
+                   n_toned, n_tone_done, n_tone_reattach, n_tone_rezero, n_tone_wake, n_tone_montage, n_tone_gone, n_tone_fail, n_tone_nopac);
     } else if (!strcmp(verb, "on")) {
         turn_on(arg ? (float)atof(arg) : 0.f);
         start_on = 1;
@@ -3763,6 +4213,47 @@ void ragdoll_slash(char *rest, Out *o) {
                       "cm/s from a pistol, %.0f from a rifle, %.0f from a shotgun%s; so far %d shoves\n", shot_scale, SHOT_DEFAULT,
                    hg ? hg->n * shot_scale / common : 0.f, ar ? ar->n * shot_scale / common : 0.f, sg ? sg->n * shot_scale / common : 0.f,
                    shot_state < 0 ? "; NOT AVAILABLE in this game (see log)" : "", n_shoves);
+    } else if (!strcmp(verb, "carry")) {   // build 38: running speed kept
+        if (arg && (isdigit((unsigned char)arg[0]) || arg[0] == '.')) carry_scale = clampf((float)atof(arg), 0.f, 2.f);
+        else if (arg && !strcmp(arg, "off")) carry_scale = 0.f;
+        else if (arg && !strcmp(arg, "on")) carry_scale = CARRY_DEFAULT;
+        else if (arg) { out_printf(o, "usage: /ragdoll carry [<x> | on | off]\n"); return; }
+        if (arg) { carry_logs = vel_logs_r = 0; LOG("ragdoll carry: x%.2f", carry_scale); save_f("ragdoll_carry", carry_scale, CARRY_DEFAULT); }
+        out_printf(o, "/ragdoll carry: x%.2f (0-2, default %.0f, 0 = off): a Ridden that dies running keeps that speed x this "
+                      "(%.0f cm/s at most); so far %d did%s\n", carry_scale, CARRY_DEFAULT, CARRY_MAX, n_carried,
+                   mov_vel_off == -1 ? "; NOT AVAILABLE in this game (see log)" : "");
+    } else if (!strcmp(verb, "tone")) {   // build 38 experiment: muscle tone
+        char *arg2 = arg ? strtok(NULL, " ") : NULL;
+        if (arg && (!strcmp(arg, "on") || !strcmp(arg, "off"))) {
+            tone_on = !strcmp(arg, "on");
+            save_i("ragdoll_tone", tone_on, 0);
+        } else if (arg && !strcmp(arg, "time") && arg2) {
+            tone_time = clampf((float)atof(arg2), 0.3f, 5.f);
+            save_f("ragdoll_tone_time", tone_time, TONE_TIME_DEF);
+        } else if (arg && !strcmp(arg, "strength") && arg2) {
+            tone_str = clampf((float)atof(arg2), 0.f, 20.f);
+            save_f("ragdoll_tone_strength", tone_str, TONE_STR_DEF);
+        } else if (arg && !strcmp(arg, "legs") && arg2) {
+            tone_legs = clampf((float)atof(arg2), 0.1f, 1.f);
+            save_f("ragdoll_tone_legs", tone_legs, TONE_LEGS_DEF);
+        } else if (arg && !strcmp(arg, "kinds") && arg2) {
+            set_tone_kinds(arg2);
+            save("ragdoll_tone_kinds", strcmp(tone_kinds, TONE_KINDS_DEF) ? tone_kinds : NULL);
+        } else if (arg) {
+            out_printf(o, "usage: /ragdoll tone [on|off|time <s>|strength <x>|legs <0.1-1>|kinds <K,K>]\n");
+            return;
+        }
+        if (arg) {
+            tone_logs = tone_fix_logs = tone_probes = 0;
+            memset(tpr, 0, sizeof tpr);
+            LOG("ragdoll tone: %s, kinds %s, %.2f s, legs give out by %.2f s, strength x%.2f", tone_on ? "on" : "off", tone_kinds,
+                tone_time, tone_time * tone_legs, tone_str);
+        }
+        out_printf(o, "/ragdoll tone: %s (experiment, default off): kills by %s hold their pose and give out over %.2f s (time "
+                      "<s>, 0.3-5), the legs by %.2f s (legs <share of the time>, default %.1f), strength x%.2f (strength <x>, "
+                      "default 1); kinds <K,K> as in /ragdoll push (all = every kind); so far %d toned%s\n",
+                   tone_on ? "on" : "off", tone_kinds[0] ? tone_kinds : "(none)", tone_time, tone_time * tone_legs, TONE_LEGS_DEF,
+                   tone_str, n_toned, pa.state < 0 ? "; NOT AVAILABLE in this game (see log)" : "");
     } else if (!strcmp(verb, "probe")) {
         world_check();
         if (!mode_on && !tracing) for (int k = 0; k < 64; k++) scan_step();   // not scanning in the background: a full pass now
@@ -3774,7 +4265,7 @@ void ragdoll_slash(char *rest, Out *o) {
         if (tracing) trace_stop("restarted");
         if (trace_start(s, o) == 0) out_printf(o, "/ragdoll trace: %.0f s, kill a few Ridden now (log: \"ragdoll trace\" lines)\n", s);
     } else {
-        out_printf(o, "usage: /ragdoll [on [delay]|off|status|mass [x]|gravity [x]|deadline [s]|push [x|on|off|<kind> <n>]|shot [x|on|off]|bloodbag [on|off]|blood [on|off]|dismember [on|off|limbs <min> [max]|big <0-100>|head <0-100|on|off>|pieces on|off|type <n|auto>|impulse <n>]|probe|trace [secs]]\n");
+        out_printf(o, "usage: /ragdoll [on [delay]|off|status|mass [x]|gravity [x]|deadline [s]|push [x|on|off|<kind> <n>]|shot [x|on|off]|carry [x|on|off]|tone [on|off|time <s>|strength <x>|legs <0.1-1>|kinds <K,K>]|bloodbag [on|off]|blood [on|off]|dismember [on|off|limbs <min> [max]|big <0-100>|head <0-100|on|off>|pieces on|off|type <n|auto>|impulse <n>]|probe|trace [secs]]\n");
     }
     if (save_fail) out_printf(o, "/ragdoll: could not write b4bcoop.ini (see log): this change lasts until the game closes\n");
 }
@@ -3791,8 +4282,10 @@ int ragdoll_init(void) {
         m += (size_t)snprintf(kinds + m, sizeof kinds - m, "%s%s %.0f", i ? ", " : "", push_tab[i].key, push_tab[i].n);
     LOG("ragdoll: experimental module loaded (fork build), %s; from b4bcoop.ini and the defaults: delay %.2f, mass x%.2f, "
         "gravity x%.2f, deadline %.0f s, push x%.2f, shots on bodies x%.2f, blood bags %s, blood %s, dismember %s (%d-%d "
-        "limbs, big %d%%, head %d%%, pieces %s); kinds: %s", start_on ? "on at the first world (ragdoll=1)" : "off until /ragdoll on",
+        "limbs, big %d%%, head %d%%, pieces %s), carry x%.2f, tone %s (%s, %.2f s, legs %.2f, x%.2f); kinds: %s",
+        start_on ? "on at the first world (ragdoll=1)" : "off until /ragdoll on",
         delay_s, mass_scale, grav_scale, deadline_s, push_scale, shot_scale, bloodbag_on ? "on" : "off", blood_on ? "on" : "off",
-        dism_on ? "on" : "off", dism_min, dism_max, dism_big, dism_head, dism_pieces ? "on" : "off", kinds);
+        dism_on ? "on" : "off", dism_min, dism_max, dism_big, dism_head, dism_pieces ? "on" : "off", carry_scale,
+        tone_on ? "on" : "off", tone_kinds, tone_time, tone_legs, tone_str, kinds);
     return 0;
 }

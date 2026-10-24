@@ -669,7 +669,7 @@ static const struct { const char *name; int perm; const char *usage; } CMDS[] = 
     {"kick", CMD_HOST, "/kick <name|#>"}, {"ban", CMD_HOST, "/ban <name|#>"}, {"unban", CMD_HOST, "/unban <name|steam:id|#n|all>"},
     {"bans", CMD_HOST, "/bans"}, {"lock", CMD_HOST, "/lock"}, {"unlock", CMD_HOST, "/unlock"}, {"teamsize", CMD_HOST, "/teamsize N"},
     {"restart", CMD_HOST, "/restart"}, {"ready", CMD_HOST, "/ready [vote]"}, {"bots", CMD_HOST, "/bots on|off|default"},
-    {"say", CMD_HOST, "/say <message>"}, {"ragdoll", CMD_ANYONE, "/ragdoll [on [delay]|off|mass [x]|gravity [x]|deadline [s]|push [x|on|off|<kind> <n>]|shot [x|on|off]|bloodbag [on|off]|blood [on|off]|dismember [on|off|limbs <min> [max]|big <0-100>|head <0-100|on|off>|pieces on|off]|probe|trace [secs]]"}, {"handoff", CMD_ANYONE, "/handoff [<name|#>]"},   // host part checked in handoff.c
+    {"say", CMD_HOST, "/say <message>"}, {"ragdoll", CMD_ANYONE, "/ragdoll [on [delay]|off|mass [x]|gravity [x]|deadline [s]|push [x|on|off|<kind> <n>]|shot [x|on|off]|carry [x|on|off]|tone [on|off|time <s>|strength <x>|legs <0.1-1>|kinds <K,K>]|bloodbag [on|off]|blood [on|off]|dismember [on|off|limbs <min> [max]|big <0-100>|head <0-100|on|off>|pieces on|off]|probe|trace [secs]]"}, {"handoff", CMD_ANYONE, "/handoff [<name|#>]"},   // host part checked in handoff.c
     {"model", CMD_ANYONE, "/model list|<name>|reset"}, {"models", CMD_ANYONE, "/models [on|off]"},   // host parts checked in models.c
     {"addons", CMD_ANYONE, "/addons [on|off|info <#>|policy]"}, {"addon", CMD_ANYONE, "/addons [on|off|info <#>|policy]"},
 };
