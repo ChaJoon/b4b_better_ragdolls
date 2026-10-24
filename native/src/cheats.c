@@ -1720,11 +1720,12 @@ static void cheats_panel(void) {
     if (ov_button("Free camera")) ov_run("freecam");
     ov_tooltip("Only your view; F8 comes back.");
     static const char *base_dest[] = {"the end saferoom", "the start saferoom"};
-    const char *dest_items[20]; char dest_spec[20][8]; int nd = 0;
-    for (int i = 0; i < 2; i++) { dest_items[nd] = base_dest[i]; snprintf(dest_spec[nd++], 8, "%s", i ? "start" : "saferoom"); }
+    // 16 bytes: "saferoom" is 9 with its terminator (8 cut it to "saferoo", so the end saferoom never worked here)
+    const char *dest_items[20]; char dest_spec[20][16]; int nd = 0;
+    for (int i = 0; i < 2; i++) { dest_items[nd] = base_dest[i]; snprintf(dest_spec[nd++], sizeof dest_spec[0], "%s", i ? "start" : "saferoom"); }
     for (int i = 0; i < n_tgt && nd < 20; i++) {
         if (!strcmp(tgt_spec[i], "all")) continue;
-        dest_items[nd] = tgt_items[i]; snprintf(dest_spec[nd++], 8, "%s", tgt_spec[i]);
+        dest_items[nd] = tgt_items[i]; snprintf(dest_spec[nd++], sizeof dest_spec[0], "%s", tgt_spec[i]);
     }
     ov_width(12);
     ov_combo("##tpdest", &tp_dest, dest_items, nd);
