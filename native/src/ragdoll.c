@@ -19,6 +19,7 @@
 //                            the push table x this (0-10, default 2, off = 0; see "shots on dead bodies")
 //   /ragdoll carry [x]       build 38: a Ridden that dies running keeps its speed: x its running speed (0-2, default 1,
 //                            off = 0; see "momentum carry")
+//   /ragdoll carry keep <s>  build 39: how long a run's speed survives a stagger before the kill (0-3, default 1)
 //   /ragdoll tone [on|off|time <s>|strength <x>|legs <0.1-1>|kinds <K,K>]   build 38 experiment, off by default: bodies
 //                            killed by the listed weapon kinds (default HG,SMG) hold their pose and give out over time
 //                            s (legs first) instead of going limp at once (see "muscle tone")
@@ -193,6 +194,8 @@ typedef struct {
     int32_t movi, paci;                    // their object indexes (still the same objects?), as ai / lsi
     float run_v[3];                        // the movement's velocity at the last tick it was alive, cm/s
     double run_t;                          // when that was read (0 = never)
+    float mem_v[3];                        // build 39: the fastest recent speed (fades over /ragdoll carry keep)
+    double mem_t;                          // when it was read (0 = never)
     float carry;                           // cm/s of running speed given to the ragdoll (0 = none)
     char kind[24];                         // the killing hit's kind (a push table key), "" = not known
     uint8_t tone;                          // muscle tone: 1 holding / giving out, 2 done (limp)
@@ -2855,27 +2858,39 @@ static int special_death(Tracked *t) {
     return 1;
 }
 
-// ---- momentum carry (build 38) ----
+// ---- momentum carry (build 38; build 39: through staggers, never slowing a body down) ----
 // Joon (24 Oct): in L4D2 a common killed mid-run tumbles on; here it dropped on the spot (burning Ridden "just go
 // limp", weak-gun kills "go down"). While a Ridden is alive the tick reads its CharacterMovement's Velocity (a memory
-// read, no call); at the ragdoll the mean velocity of all its bodies is made that running velocity x /ragdoll carry:
-// the difference is added to every body (SetAllPhysicsLinearVelocity, bAddToCurrent: the limbs keep their own swing),
-// then the killing hit's push comes on top. The speed used is the last one read while it was alive (the game may stop
-// the movement at death; the log says what it reads at the ragdoll). Slower than CARRY_MIN = standing: nothing done.
-// Unknown before the run: whether the engine keeps the speed or later adds the animated body's own (the velocity
-// probe's "died running" lines, 16 bodies), and whether SetAllPhysicsLinearVelocity reaches every body of a skeletal
-// mesh in this engine (measured on the first body: if the mean moved by less than half, every body is set one by one).
-#define CARRY_DEFAULT 1.f
-#define CARRY_MIN     30.f    // cm/s: slower is standing (nothing carried)
-#define CARRY_MAX     1500.f  // cm/s at most (a launch, a teleport)
-#define CARRY_STALE   0.25    // s between the last speed read alive and the death: older isn't used
-#define CARRY_LOGS    40
-static float carry_scale = CARRY_DEFAULT;
+// read, no call); at the ragdoll the bodies' mean velocity along the running direction is raised to that running speed
+// x /ragdoll carry: the difference is added to every body (SetAllPhysicsLinearVelocity, bAddToCurrent: the limbs keep
+// their own swing), then the killing hit's push comes on top. Slower than CARRY_MIN = standing: nothing done.
+// Build 38 run (Joon, 24 Oct, 240 deaths): it works (SetAllPhysicsLinearVelocity reaches every body; bodies keep about
+// 65-70% along the ground at +0.1 s, 35-40% at +0.4 s: the feet drag), but
+//   - SMG kills dropped on the spot: the first bullet staggers the Ridden (the game's stumble), its movement falls to
+//     ~100 cm/s (the stagger animation), and the second bullet, ~0.1 s later, kills it with that speed. Waiting for the
+//     stagger to end, then killing, carried the run (Joon). 23 of the 40 logged deaths were under 200 cm/s.
+//     Build 39: the fastest recent speed is remembered and fades out over /ragdoll carry keep (default 1 s); at death
+//     the larger of the speed now and the remembered one, faded by its age, is used. A body in flight doesn't stop
+//     dead because its legs stopped a moment ago.
+//   - build 38 set the mean to the running velocity, so a body already moving faster was slowed (two armored commons,
+//     157 -> 37 cm/s and 107 -> 91). Build 39 only adds, along the running direction, up to the running speed.
+#define CARRY_DEFAULT  1.f
+#define CARRY_MIN      30.f    // cm/s: slower is standing (nothing carried)
+#define CARRY_MAX      1500.f  // cm/s at most (a launch, a teleport)
+#define CARRY_STALE    0.25    // s between the last speed read alive and the death: older isn't used
+#define CARRY_KEEP_DEF 1.f     // s a remembered speed takes to fade to nothing (build 39)
+#define CARRY_LOGS     40
+static float carry_scale = CARRY_DEFAULT, carry_keep = CARRY_KEEP_DEF;
 static int32_t mov_vel_off = -2;   // MovementComponent.Velocity's offset: -2 not looked up, -1 not there
 static int carry_mode;             // 0 SetAllPhysicsLinearVelocity, 1 every body one by one (the first reached only the root)
-static int n_carried, n_carry_still, n_carry_nomov, n_carry_fail, carry_logs;
+static int n_carried, n_carry_still, n_carry_nomov, n_carry_fail, n_carry_mem, n_carry_faster, carry_logs;
 
 static int mov_ok(Tracked *x) { return x->mov && ue_object_usable(x->mov, x->movi); }
+static float len3(const float v[3]) { return sqrtf(v[0] * v[0] + v[1] * v[1] + v[2] * v[2]); }
+static float dot3(const float a[3], const float b[3]) { return a[0] * b[0] + a[1] * b[1] + a[2] * b[2]; }
+static float carry_fade(double age) {   // a remembered speed's share left after `age` s
+    return carry_keep <= 0.f || age >= carry_keep ? 0.f : age <= 0 ? 1.f : (float)(1.0 - age / carry_keep);
+}
 
 static void run_note(Tracked *x, double t) {   // every tick while it is alive
     if (!mov_ok(x)) return;
@@ -2890,9 +2905,12 @@ static void run_note(Tracked *x, double t) {   // every tick while it is alive
     if (mov_vel_off < 0) return;
     memcpy(x->run_v, (char *)x->mov + mov_vel_off, sizeof x->run_v);
     x->run_t = t;
+    // build 39: the fastest recent speed, faded by its age; a faster one now replaces it
+    if (!x->mem_t || len3(x->run_v) >= len3(x->mem_v) * carry_fade(t - x->mem_t)) {
+        memcpy(x->mem_v, x->run_v, sizeof x->mem_v);
+        x->mem_t = t;
+    }
 }
-
-static float len3(const float v[3]) { return sqrtf(v[0] * v[0] + v[1] * v[1] + v[2] * v[2]); }
 
 // the mean velocity of the body's simulated bodies (parts cut off left out), cm/s; how many bodies were read
 static int mean_velocity(Tracked *t, UObject *mesh, float out[3]) {
@@ -2936,40 +2954,61 @@ static int add_velocity(UObject *mesh, const BodyList *bl, const float d[3]) {
 }
 
 static void carry_body(Tracked *t, UObject *mesh) {
-    char a[160], c[160];
+    char a[160], c[160], from[96];
     if (carry_scale <= 0.f) return;
     if (!mov_ok(t) || mov_vel_off < 0 || !t->run_t || t->died_at - t->run_t > CARRY_STALE) { n_carry_nomov++; return; }
-    float rs = len3(t->run_v);
+    // the speed at death, or the remembered one faded by its age if that is more (a stagger stopped the legs)
+    double mem_age = t->mem_t ? t->died_at - t->mem_t : 1e9;
+    float fade = carry_fade(mem_age), run[3];
+    int mem = t->mem_t && len3(t->mem_v) * fade > len3(t->run_v);
+    for (int i = 0; i < 3; i++) run[i] = mem ? t->mem_v[i] * fade : t->run_v[i];
+    float rs = len3(run);
     if (rs < CARRY_MIN) { n_carry_still++; return; }
+    if (mem) snprintf(from, sizeof from, "%.0f cm/s %.2f s before, x%.2f", len3(t->mem_v), mem_age, fade);
+    else snprintf(from, sizeof from, "the speed at death");
     float k = carry_scale;
     if (rs * k > CARRY_MAX) k = CARRY_MAX / rs;
+    float dir[3] = {run[0] / rs, run[1] / rs, run[2] / rs}, want = rs * k;
     const BodyList *bl = bodies_of(mesh);
-    float want[3], before[3], after[3], d[3];
-    for (int i = 0; i < 3; i++) want[i] = t->run_v[i] * k;
+    float before[3], after[3], d[3];
     if (!mean_velocity(t, mesh, before)) { n_carry_fail++; return; }
-    for (int i = 0; i < 3; i++) d[i] = want[i] - before[i];
+    float par = dot3(before, dir);   // how fast the body already goes that way
+    if (par >= want) {               // faster already (the hit, the stagger): left as it is
+        n_carry_faster++;
+        if (carry_logs < CARRY_LOGS) {
+            carry_logs++;
+            LOG("ragdoll carry: %s (%s) ran %.0f cm/s (%s): its bodies already go %.0f cm/s that way: left as they are",
+                oname(t->a, a, sizeof a), cname(t->a, c, sizeof c), rs, from, par);
+        }
+        return;
+    }
+    for (int i = 0; i < 3; i++) d[i] = dir[i] * (want - par);
     if (add_velocity(mesh, bl, d)) {
         if (!n_carry_fail++) LOG("ragdoll carry: no SetAllPhysicsLinearVelocity / SetPhysicsLinearVelocity(NewVel, bAddToCurrent, BoneName): nothing carried");
         return;
     }
     mean_velocity(t, mesh, after);
-    float miss[3] = {want[0] - after[0], want[1] - after[1], want[2] - after[2]};
     const char *how = "";
-    if (carry_mode == 0 && len3(d) > 50.f && len3(miss) > 0.5f * len3(d)) {   // it moved the root body only, it seems
+    float got = dot3(after, dir) - par;
+    if (carry_mode == 0 && want - par > 50.f && got < 0.5f * (want - par)) {   // it moved the root body only, it seems
         carry_mode = 1;
         LOG("ragdoll carry: SetAllPhysicsLinearVelocity moved the mean by %.0f of %.0f cm/s (the root body only?): every body "
-            "is set one by one from now on", len3(d) - len3(miss), len3(d));
-        add_velocity(mesh, bl, miss);
+            "is set one by one from now on", got, want - par);
+        float rest[3];
+        for (int i = 0; i < 3; i++) rest[i] = dir[i] * (want - par - got);
+        add_velocity(mesh, bl, rest);
         mean_velocity(t, mesh, after);
         how = ", every body set one by one";
     }
-    t->carry = rs * k;
+    t->carry = want;
     n_carried++;
+    if (mem) n_carry_mem++;
     if (carry_logs < CARRY_LOGS) {
         carry_logs++;
-        LOG("ragdoll carry: %s (%s) died running %.0f cm/s (read %.3f s before we saw it dead; its movement reads %.0f cm/s "
-            "now): bodies %.0f -> %.0f cm/s on average (asked %.0f, x%.2f)%s", oname(t->a, a, sizeof a), cname(t->a, c, sizeof c),
-            rs, t->died_at - t->run_t, len3((const float *)((char *)t->mov + mov_vel_off)), len3(before), len3(after), len3(want), k, how);
+        LOG("ragdoll carry: %s (%s) ran %.0f cm/s (%s; at death %.0f, read %.3f s before we saw it dead; its movement reads %.0f "
+            "now): bodies %.0f cm/s that way (%.0f in all) -> %.0f (%.0f in all), asked %.0f (x%.2f)%s", oname(t->a, a, sizeof a),
+            cname(t->a, c, sizeof c), rs, from, len3(t->run_v), t->died_at - t->run_t,
+            len3((const float *)((char *)t->mov + mov_vel_off)), par, len3(before), dot3(after, dir), len3(after), want, k, how);
     }
 }
 
@@ -3349,7 +3388,7 @@ static void undo(Tracked *t) {
     t->ragdolled = 0; t->done = 0; t->died_at = 0; t->rest = 0; t->released = 0; t->checks = 0; t->spared = 0; t->ended = 0;
     t->dism = 0; t->hid = 0; t->blast_ok = 0; t->painted = 0;
     t->mass = 0; t->shots = 0; t->relcount = 0;
-    t->carry = 0; t->tone = 0; t->tonep = 0; t->kind[0] = 0; t->run_t = 0; t->velp = 0; t->push_dv = 0;
+    t->carry = 0; t->tone = 0; t->tonep = 0; t->kind[0] = 0; t->run_t = 0; t->mem_t = 0; t->velp = 0; t->push_dv = 0;
 }
 
 // ---- settle hold: the game swaps a ragdoll for its stand-in only once the body is at rest ----
@@ -3824,6 +3863,7 @@ static void end_body(Tracked *x, double age) {
 //   ragdoll_bloodbag, ragdoll_blood, ragdoll_dismember, ragdoll_pieces   1 / 0 (on / off read too)
 //   ragdoll_limbs=2-3, ragdoll_big=75, ragdoll_head=50   as /ragdoll dismember limbs|big|head
 //   ragdoll_carry                      build 38: x the running speed (0-2)
+//   ragdoll_carry_keep                 build 39: s a remembered running speed takes to fade (0-3)
 //   ragdoll_tone, ragdoll_tone_time, ragdoll_tone_strength, ragdoll_tone_legs, ragdoll_tone_kinds=HG,SMG   build 38
 // Not saved: trace, probe, dismember type|impulse (the dismember experiment's test knobs).
 static int start_on;     // ragdoll=1 read: the tick turns the ragdoll on, once
@@ -3922,6 +3962,7 @@ static int setting(const char *k, const char *v) {
     else if (!strcmp(k, "ragdoll_big")) dism_big = v ? clampi(atoi(v), 0, 100) : DISM_BIG_DEF;
     else if (!strcmp(k, "ragdoll_head")) dism_head = v ? clampi(atoi(v), 0, 100) : DISM_HEAD_DEF;
     else if (!strcmp(k, "ragdoll_carry")) carry_scale = v ? clampf((float)atof(v), 0.f, 2.f) : CARRY_DEFAULT;
+    else if (!strcmp(k, "ragdoll_carry_keep")) carry_keep = v ? clampf((float)atof(v), 0.f, 3.f) : CARRY_KEEP_DEF;
     else if (!strcmp(k, "ragdoll_tone")) tone_on = onoff(v, 0);
     else if (!strcmp(k, "ragdoll_tone_time")) tone_time = v ? clampf((float)atof(v), 0.3f, 5.f) : TONE_TIME_DEF;
     else if (!strcmp(k, "ragdoll_tone_strength")) tone_str = v ? clampf((float)atof(v), 0.f, 20.f) : TONE_STR_DEF;
@@ -4044,10 +4085,12 @@ void ragdoll_slash(char *rest, Out *o) {
                       "ours, %d failed, %d dropped\n", shot_scale, shot_state < 0 ? " (NOT AVAILABLE: see log)" : "", n_shoves,
                    n_shot_hits, n_shove_trace, n_shove_near, n_shot_reheld, n_shot_noshooter, n_shot_early, n_shot_frozen,
                    n_shot_blast, n_shot_notours, n_shot_fail, n_shot_dropped);
-        out_printf(o, "/ragdoll carry x%.2f%s: %d died running and kept it, %d standing still, %d with no speed read, %d failed; "
+        out_printf(o, "/ragdoll carry x%.2f keep %.2f s%s: %d died running and kept it (%d from before a stagger), %d already faster, "
+                      "%d standing still, %d with no speed read, %d failed; "
                       "tone %s (%s, %.2f s, legs %.2f, x%.2f)%s: %d toned, %d done; put back: %d attachments, %d multipliers, %d "
                       "switched on again, %d montages stopped; %d lost their component; %d failed, %d with no physical animation\n", carry_scale,
-                   mov_vel_off == -1 ? " (NOT AVAILABLE: see log)" : "", n_carried, n_carry_still, n_carry_nomov, n_carry_fail,
+                   carry_keep, mov_vel_off == -1 ? " (NOT AVAILABLE: see log)" : "", n_carried, n_carry_mem, n_carry_faster,
+                   n_carry_still, n_carry_nomov, n_carry_fail,
                    tone_on ? "on" : "off", tone_kinds, tone_time, tone_legs, tone_str, pa.state < 0 ? " (NOT AVAILABLE: see log)" : "",
                    n_toned, n_tone_done, n_tone_reattach, n_tone_rezero, n_tone_wake, n_tone_montage, n_tone_gone, n_tone_fail, n_tone_nopac);
     } else if (!strcmp(verb, "on")) {
@@ -4213,14 +4256,21 @@ void ragdoll_slash(char *rest, Out *o) {
                       "cm/s from a pistol, %.0f from a rifle, %.0f from a shotgun%s; so far %d shoves\n", shot_scale, SHOT_DEFAULT,
                    hg ? hg->n * shot_scale / common : 0.f, ar ? ar->n * shot_scale / common : 0.f, sg ? sg->n * shot_scale / common : 0.f,
                    shot_state < 0 ? "; NOT AVAILABLE in this game (see log)" : "", n_shoves);
-    } else if (!strcmp(verb, "carry")) {   // build 38: running speed kept
-        if (arg && (isdigit((unsigned char)arg[0]) || arg[0] == '.')) carry_scale = clampf((float)atof(arg), 0.f, 2.f);
-        else if (arg && !strcmp(arg, "off")) carry_scale = 0.f;
-        else if (arg && !strcmp(arg, "on")) carry_scale = CARRY_DEFAULT;
-        else if (arg) { out_printf(o, "usage: /ragdoll carry [<x> | on | off]\n"); return; }
-        if (arg) { carry_logs = vel_logs_r = 0; LOG("ragdoll carry: x%.2f", carry_scale); save_f("ragdoll_carry", carry_scale, CARRY_DEFAULT); }
+    } else if (!strcmp(verb, "carry")) {   // build 38: running speed kept; build 39: keep <s>
+        char *arg2 = arg ? strtok(NULL, " ") : NULL;
+        if (arg && !strcmp(arg, "keep") && arg2 && (isdigit((unsigned char)arg2[0]) || arg2[0] == '.')) {
+            carry_keep = clampf((float)atof(arg2), 0.f, 3.f);
+            save_f("ragdoll_carry_keep", carry_keep, CARRY_KEEP_DEF);
+        }
+        else if (arg && (isdigit((unsigned char)arg[0]) || arg[0] == '.')) { carry_scale = clampf((float)atof(arg), 0.f, 2.f); save_f("ragdoll_carry", carry_scale, CARRY_DEFAULT); }
+        else if (arg && !strcmp(arg, "off")) { carry_scale = 0.f; save_f("ragdoll_carry", carry_scale, CARRY_DEFAULT); }
+        else if (arg && !strcmp(arg, "on")) { carry_scale = CARRY_DEFAULT; save_f("ragdoll_carry", carry_scale, CARRY_DEFAULT); }
+        else if (arg) { out_printf(o, "usage: /ragdoll carry [<x> | on | off | keep <s>]\n"); return; }
+        if (arg) { carry_logs = vel_logs_r = 0; LOG("ragdoll carry: x%.2f, keep %.2f s", carry_scale, carry_keep); }
         out_printf(o, "/ragdoll carry: x%.2f (0-2, default %.0f, 0 = off): a Ridden that dies running keeps that speed x this "
-                      "(%.0f cm/s at most); so far %d did%s\n", carry_scale, CARRY_DEFAULT, CARRY_MAX, n_carried,
+                      "(%.0f cm/s at most); keep %.2f s (0-3, default %.0f): a stagger before the kill keeps the run's speed, "
+                      "fading to nothing over this time; so far %d did (%d from before a stagger), %d were already faster%s\n",
+                   carry_scale, CARRY_DEFAULT, CARRY_MAX, carry_keep, CARRY_KEEP_DEF, n_carried, n_carry_mem, n_carry_faster,
                    mov_vel_off == -1 ? "; NOT AVAILABLE in this game (see log)" : "");
     } else if (!strcmp(verb, "tone")) {   // build 38 experiment: muscle tone
         char *arg2 = arg ? strtok(NULL, " ") : NULL;
@@ -4265,7 +4315,7 @@ void ragdoll_slash(char *rest, Out *o) {
         if (tracing) trace_stop("restarted");
         if (trace_start(s, o) == 0) out_printf(o, "/ragdoll trace: %.0f s, kill a few Ridden now (log: \"ragdoll trace\" lines)\n", s);
     } else {
-        out_printf(o, "usage: /ragdoll [on [delay]|off|status|mass [x]|gravity [x]|deadline [s]|push [x|on|off|<kind> <n>]|shot [x|on|off]|carry [x|on|off]|tone [on|off|time <s>|strength <x>|legs <0.1-1>|kinds <K,K>]|bloodbag [on|off]|blood [on|off]|dismember [on|off|limbs <min> [max]|big <0-100>|head <0-100|on|off>|pieces on|off|type <n|auto>|impulse <n>]|probe|trace [secs]]\n");
+        out_printf(o, "usage: /ragdoll [on [delay]|off|status|mass [x]|gravity [x]|deadline [s]|push [x|on|off|<kind> <n>]|shot [x|on|off]|carry [x|on|off|keep <s>]|tone [on|off|time <s>|strength <x>|legs <0.1-1>|kinds <K,K>]|bloodbag [on|off]|blood [on|off]|dismember [on|off|limbs <min> [max]|big <0-100>|head <0-100|on|off>|pieces on|off|type <n|auto>|impulse <n>]|probe|trace [secs]]\n");
     }
     if (save_fail) out_printf(o, "/ragdoll: could not write b4bcoop.ini (see log): this change lasts until the game closes\n");
 }
@@ -4282,10 +4332,10 @@ int ragdoll_init(void) {
         m += (size_t)snprintf(kinds + m, sizeof kinds - m, "%s%s %.0f", i ? ", " : "", push_tab[i].key, push_tab[i].n);
     LOG("ragdoll: experimental module loaded (fork build), %s; from b4bcoop.ini and the defaults: delay %.2f, mass x%.2f, "
         "gravity x%.2f, deadline %.0f s, push x%.2f, shots on bodies x%.2f, blood bags %s, blood %s, dismember %s (%d-%d "
-        "limbs, big %d%%, head %d%%, pieces %s), carry x%.2f, tone %s (%s, %.2f s, legs %.2f, x%.2f); kinds: %s",
+        "limbs, big %d%%, head %d%%, pieces %s), carry x%.2f keep %.2f s, tone %s (%s, %.2f s, legs %.2f, x%.2f); kinds: %s",
         start_on ? "on at the first world (ragdoll=1)" : "off until /ragdoll on",
         delay_s, mass_scale, grav_scale, deadline_s, push_scale, shot_scale, bloodbag_on ? "on" : "off", blood_on ? "on" : "off",
-        dism_on ? "on" : "off", dism_min, dism_max, dism_big, dism_head, dism_pieces ? "on" : "off", carry_scale,
+        dism_on ? "on" : "off", dism_min, dism_max, dism_big, dism_head, dism_pieces ? "on" : "off", carry_scale, carry_keep,
         tone_on ? "on" : "off", tone_kinds, tone_time, tone_legs, tone_str, kinds);
     return 0;
 }
