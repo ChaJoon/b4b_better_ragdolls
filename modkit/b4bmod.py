@@ -375,6 +375,9 @@ def cmd_status(a):
         r = run_dotnet_tool("pakx", ["key", "--paks", os.path.join(g, "Gobi", "Content", "Paks"), "--aes", k], capture=True)
         print(f"AES key     {'OK (checked against the paks)' if r.returncode == 0 else 'WRONG: ' + (r.stderr or r.stdout).strip()} (from {src})")
         ok &= r.returncode == 0
+        other = [x for x in r.stdout.splitlines() if x.startswith("other paks: ")]
+        if r.returncode == 0 and other:   # mods in the Paks folder: fine, the kit reads the game's own paks only
+            print(f"mod paks    {other[0][len('other paks: '):]}")
     else:
         print(f"AES key     set (from {src}), not checked yet")
     bl = blender_exe()
@@ -421,12 +424,16 @@ def cmd_config(a):
     return 0
 
 
+GAME_PAK = re.compile(r"^pakchunk[0-9]+[^-]*-WindowsNoEditor\.pak$", re.I)   # the game's own paks (pakx reads only these)
+
+
 def listing():
-    """Every file in the paks (path, pak), cached per game version (pak names and sizes)."""
+    """Every file in the game's own paks (path, pak), cached per game version (their names and sizes). Other paks in
+    the folder (mods) are not read: the index doesn't change when mods are added or removed."""
     p = paks_dir()
     sig = hashlib.sha1("".join(f"{n}:{os.path.getsize(os.path.join(p, n))};" for n in sorted(os.listdir(p))
-                               if n.endswith(".pak")).encode()).hexdigest()[:12]
-    cache = os.path.join(DATA, "listing", f"files-{sig}.tsv")
+                               if GAME_PAK.match(n)).encode()).hexdigest()[:12]
+    cache = os.path.join(DATA, "listing", f"game-{sig}.tsv")   # files-*.tsv (before): indexes that included mods
     if not os.path.exists(cache):
         r = pakx(["list"], capture=True)
         os.makedirs(os.path.dirname(cache), exist_ok=True)

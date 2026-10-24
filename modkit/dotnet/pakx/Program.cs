@@ -7,10 +7,14 @@ using CUE4Parse.UE4.Versions;
 // pakx: offline reader for Back 4 Blood's retail paks (no game running). CUE4Parse (NuGet, GAME_Back4Blood) plus
 // the pak AES key (built into b4bmod.py). Same bytes as the dev agent's `dumpassets`
 // (453/453 in docs/investigations/model-mods-paks.md). Normally run through modkit/b4bmod.py.
+// --paks reads the game's own paks only (pakchunk<N>...-WindowsNoEditor.pak, 61 in this build): other paks people put
+// in that folder (Nexus mods such as deck-size or weapon mods) are not the game, often not in its v9 format, and their
+// `_P` names would override retail files in the listing and in what `extract` gives a mod maker.
 const string Usage = @"pakx key     --paks <Paks dir> --aes <hex>                       check the key against the pak indexes
 pakx list    --paks <Paks dir> --aes <hex> [<regex>]             every file path (size, path), TSV with the pak name
 pakx extract --paks <Paks dir> --aes <hex> --out <dir> <regex>
                                                                  write every matching file to <dir>/Gobi/Content/...
+--paks reads only the game's own paks (pakchunk*-WindowsNoEditor.pak); other paks in that folder (mods) are skipped.
 list/extract also take --pak <file.pak> instead of --paks: one pak on its own (e.g. a mod someone made; B4B v9 or
 v8 footer, the v8 one is read as v9 without changing the file).
 <regex> is matched (case-insensitive) against paths like Gobi/Content/Characters/Heroes/Holly/.../x_SKM.uasset.
@@ -48,6 +52,9 @@ static int Run(string[] args)
         {
             var (ok, n) = CheckKey(paks, key);
             Console.WriteLine($"key OK: it decrypts all {ok} encrypted pak indexes in {paks} (index SHA1 matches)");
+            var other = GamePaks(paks).other;
+            if (other.Count > 0)
+                Console.WriteLine($"other paks: {other.Count} not read (not the game's own; mods): {string.Join(", ", other.Select(Path.GetFileName))}");
             return 0;
         }
         case "list":
@@ -67,10 +74,12 @@ static int Run(string[] args)
             }
             else
             {
-                var dp = new DefaultFileProvider(paks, SearchOption.TopDirectoryOnly, new VersionContainer(EGame.GAME_Back4Blood),
-                                                 StringComparer.OrdinalIgnoreCase);
-                dp.Initialize();
-                pp = dp;
+                // the game's own paks, each registered as DefaultFileProvider registers a pak it finds (RegisterVfs(FileInfo):
+                // a random-access file archive), so the readers are the ones the 453/453 check used; mods are left out
+                var gp = new StreamedFileProvider("pakx", new VersionContainer(EGame.GAME_Back4Blood), StringComparer.OrdinalIgnoreCase);
+                gp.Initialize();
+                foreach (var p in GamePaks(paks).game) gp.RegisterVfs(new FileInfo(p));
+                pp = gp;
             }
             pp.SubmitKey(new CUE4Parse.UE4.Objects.Core.Misc.FGuid(), new CUE4Parse.Encryption.Aes.FAesKey(key));
             int n = 0;
@@ -138,7 +147,7 @@ static (int ok, int total) CheckKey(string paks, byte[] key)
     using var aes = Aes.Create();
     aes.Key = key;
     int ok = 0, seen = 0;
-    foreach (var p in Directory.GetFiles(paks, "*.pak").OrderBy(p => p, StringComparer.Ordinal))
+    foreach (var p in GamePaks(paks).game)
     {
         using var fs = File.OpenRead(p);
         if (fs.Length < 222) continue;
@@ -157,8 +166,18 @@ static (int ok, int total) CheckKey(string paks, byte[] key)
                                     "Back 4 Blood has one key for every copy of the game; see the modkit README, \"The AES key\".");
         ok++;
     }
-    if (seen == 0) throw new PakxException($"no .pak files in {paks} (expected <game>/Gobi/Content/Paks)");
+    if (seen == 0) throw new PakxException($"no pakchunk*-WindowsNoEditor.pak files in {paks} (expected <game>/Gobi/Content/Paks)");
     return (ok, seen);
+}
+
+// The game's own paks in a Paks folder (pakchunk<N>[...]-WindowsNoEditor.pak; the setup script's rule for "a game
+// file"), and every other .pak there (mods), both sorted.
+static (List<string> game, List<string> other) GamePaks(string paks)
+{
+    var name = new Regex(@"^pakchunk[0-9]+[^-]*-WindowsNoEditor\.pak$", RegexOptions.IgnoreCase);
+    var all = Directory.GetFiles(paks, "*.pak").OrderBy(p => p, StringComparer.Ordinal).ToList();
+    var game = all.Where(p => name.IsMatch(Path.GetFileName(p))).ToList();
+    return (game, all.Except(game).ToList());
 }
 
 // The first `body` bytes of `inner`, then `tail`: a read-only view of a pak with another footer.

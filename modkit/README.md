@@ -125,6 +125,9 @@ Add-ons tab, the game's customization screen, or `/model <name>`).
 - `'py' is not recognized` / `'python' is not recognized`: install Python from python.org with "Add python.exe to
   PATH", then open a new command prompt.
 - `wrong AES key`: see [The AES key](#the-aes-key).
+- Mods in the game's `Paks` folder (Nexus paks such as deck-size or weapon mods): fine. The kit reads only the game's
+  own `pakchunk*-WindowsNoEditor.pak` files, so `find` and `extract` give the original files, never another mod's;
+  `b4bmod status` lists the others as `mod paks ... not read`.
 - `Back 4 Blood not found`: `b4bmod config game "<game folder>"`.
 - `building b4bmod failed`: the lines above it are the compiler's; the first build needs internet access for NuGet.
   `b4bmod setup` rebuilds everything.
