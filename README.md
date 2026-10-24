@@ -17,8 +17,9 @@ bodies thrown by shots and blasts, and dismemberment. Everything else is b4b-coo
   blood bags, and take 2-3 limbs (and sometimes the head) off through the game's own dismemberment.
 - **Shooting a body that is already down pushes it.**
 - **Ridden that die running keep their speed** and tumble on, instead of dropping on the spot.
-- Experimental, off by default: **muscle tone**. Bodies killed by weak guns (pistols, SMGs) hold their pose for a
-  moment and give out, legs first, instead of going limp at once.
+- **Wounds where the shot lands**: shotguns, snipers, LMGs and rifles take off the arm, leg or head they hit, or open
+  the chest or stomach (smaller wounds for LMGs and rifles); pistols and SMGs only take heads. Blast victims get open
+  wounds too.
 - Reeker and Exploder pops, and the gameplay of explosions, are left as the game does them.
 
 ## Status
@@ -53,7 +54,8 @@ into online play.
 | `/ragdoll dismember on\|off\|limbs <min> [max]\|head <0-100>` | dismemberment of blast victims |
 | `/ragdoll blood on\|off` | paint spared blast victims with blood like the others |
 | `/ragdoll carry [x]` | how much of its running speed a dying Ridden keeps (default 1, off = 0) |
-| `/ragdoll tone on\|off\|time <s>\|strength <x>\|legs <0.1-1>\|kinds <K,K>` | experiment: weak-gun kills hold, then give out (off by default) |
+| `/ragdoll carry keep <s>` | how long a run's speed survives a stagger before the kill (default 1 s) |
+| `/ragdoll wounds on\|off\|living off\|arms\|all\|blast on\|off\|kinds\|small\|heads <K,K>` | wounds by weapon and hit location |
 
 ## Building
 
