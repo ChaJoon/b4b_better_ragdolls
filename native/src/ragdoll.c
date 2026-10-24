@@ -198,6 +198,10 @@ typedef struct {
     double mem_t;                          // when it was read (0 = never)
     float carry;                           // cm/s of running speed given to the ragdoll (0 = none)
     char kind[24];                         // the killing hit's kind (a push table key), "" = not known
+    UObject *mut;                          // build 41: its MutilationComponent (looked up at its first OnDamage)
+    int32_t muti;                          // its object index
+    double dmg_t;                          // build 41: its last OnDamage event (host), 0 = none seen
+    char dmg_kind[24];                     // that hit's kind
     FName prof;
     float rel_loc[3], rel_rot[3];
 } Tracked;
@@ -308,8 +312,8 @@ static Focus focus[8];
 // first 24 bytes, for a signature check like every other hook here. Frames are labelled when the function is a
 // UFunction's native exec thunk ("exec Actor.K2_DestroyActor": a Blueprint called it) or the Blueprint VM
 // (UObject::ProcessInternal, the Func of every script function), so a Blueprint-driven swap shows up as such.
-enum { ST_SPAWN, ST_UNPOSSESS, ST_ENDPLAY, ST_DESTROYED, ST_CORPSE, ST_N };
-static const char *const ST_TAG[ST_N] = {"spawn", "unpossess", "endplay", "destroyed", "corpse"};
+enum { ST_SPAWN, ST_UNPOSSESS, ST_ENDPLAY, ST_DESTROYED, ST_CORPSE, ST_MUTIL, ST_N };   // ST_MUTIL: build 41
+static const char *const ST_TAG[ST_N] = {"spawn", "unpossess", "endplay", "destroyed", "corpse", "mutilate"};
 #define STACKS_PER_KIND 3
 #define STACK_FRAMES    48
 #define STACK_BYTES     24
@@ -598,7 +602,20 @@ static void fmt_prop(FField *p, const uint8_t *container, char *out, size_t n, i
         for (int i = 0; s->data && i < s->num && s->data[i] && k + 2 < n && k < 80; i++)
             out[k++] = (s->data[i] >= 32 && s->data[i] < 127) ? (char)s->data[i] : '?';
         out[k] = 0;
-    } else if (!strcmp(t, "ArrayProperty")) snprintf(out, n, "%d entries", ((const TArray *)a)->num);
+    } else if (!strcmp(t, "ArrayProperty")) {
+        // build 41: the first entries too when there is depth left (build 40's dumps said "3 entries" and no more)
+        const TArray *arr = (const TArray *)a;
+        FField *in = *(FField **)((char *)p + 0x78);   // FArrayProperty::Inner
+        if (depth <= 0 || !in || !arr->data || arr->num <= 0 || arr->num > 100000) { snprintf(out, n, "%d entries", arr->num); return; }
+        size_t k = (size_t)snprintf(out, n, "%d entries [", arr->num);
+        int32_t es = FP_ELSIZE(in);
+        for (int i = 0; i < arr->num && i < 8 && es > 0 && k + 16 < n; i++) {
+            char ev[1200];
+            fmt_prop(in, (const uint8_t *)arr->data + (size_t)i * (size_t)es - FP_OFFSET(in), ev, sizeof ev, depth - 1);
+            k += (size_t)snprintf(out + k, n - k, "%s%s", i ? ", " : "", ev);
+        }
+        if (k + 6 < n) snprintf(out + k, n - k, "%s]", arr->num > 8 ? ", ..." : "");
+    }
     else if (!strcmp(t, "StructProperty")) {
         UObject *ss = FP_SUB(p);
         ue_obj_name(ss, b, sizeof b);
@@ -613,7 +630,7 @@ static void fmt_prop(FField *p, const uint8_t *container, char *out, size_t n, i
             size_t k = (size_t)snprintf(out, n, "%s{", b);
             for (UStruct *st = (UStruct *)ss; st && k + 8 < n; st = US_SUPER(st))
                 for (FField *f = US_CHILDPROPS(st); f && k + 8 < n; f = FF_NEXT(f)) {
-                    char fn[64], fv[160];
+                    char fn[64], fv[1200];
                     fmt_prop(f, a, fv, sizeof fv, depth - 1);
                     k += (size_t)snprintf(out + k, n - k, "%s=%s ", ue_name(FF_NAME(f), fn, sizeof fn), fv);
                 }
@@ -729,6 +746,7 @@ typedef struct {
     int big, small, heads, heads_off;                            // build 33: cut sizes; head test
     char refused_s[160];
     uint8_t told, painted;                                       // build 33: painted = the blood paint was done
+    uint8_t own;                                                 // build 41: one we worked out (no game announcement)
 } Blast;
 static Blast blasts[8];
 static int blast_at;
@@ -901,6 +919,8 @@ static void log_props(const char *who, const char *what, UObject *o) {
     }
 }
 
+static FName nm_mutsnd;   // build 41: HandleMutilationSounds (the game's own mutilations, discovery)
+static void game_mut_note(UObject *o, UFunction *fn, const uint8_t *params);
 static void pe_detour(UObject *o, UFunction *fn, void *params) {
     if (fn == explode_fn && explode_fn && params && mode_on && blast_loc_f) {   // game thread
         Blast *b = &blasts[blast_at++ % 8];
@@ -911,6 +931,7 @@ static void pe_detour(UObject *o, UFunction *fn, void *params) {
     }
     if (fn == corpse_hit_fn && corpse_hit_fn && params && mode_on) shot_note(o, fn, params);   // build 35
     if (params && mode_on) wound_hook(o, fn, params);                                          // build 40
+    if (params && mode_on && nm_mutsnd.idx && fn && same_name(fn, nm_mutsnd) && !own_call()) game_mut_note(o, fn, params);   // build 41
     if (tracing && o && fn && !own_call()) trace_call(o, fn, params);
     orig_pe(o, fn, params);
 }
@@ -1423,6 +1444,11 @@ static const PushKind PUSH_DEF[] = {   // x the scale (default 4); a Common weig
     // a burning body collapses where it stands, so no push (first guess too; /ragdoll push GasCan <n> to change)
     {"ExplodingBarrel", 60000, 1}, {"Exploder", 60000, 1}, {"GasCan", 0, 0},
     {"Molotov", 0, 0},   // build 40: fire, like GasCan (build 38 log: Molotov_DamageType_C kills got the default 8000)
+    // build 41: the Volatile Ridden corruption card's blast (Challenge_Volatile_Explosion_DamageType_C, build 40 log:
+    // Explosi 40000 from the exploding Ridden, never dismembered) and the Broadside card's (a precision kill makes the
+    // Ridden explode; its damage type not seen yet): as strong as a frag (Joon: "like a frag")
+    {"Volatile", 60000, 1}, {"Broadside", 60000, 1},
+    {"Arrow", 8000, 0},  // build 41: the bow (Arrow01_Hero_DamageType_C), the default's strength; named so it has a kind
     {"Stumble", 0, 0}, {"default", 8000, 0},   // default: melee and any weapon not named here
 };
 #define N_PUSH_DEF ((int)(sizeof PUSH_DEF / sizeof PUSH_DEF[0]))
@@ -1538,12 +1564,8 @@ static PushKind *push_kind(const char *key, int add) {
 }
 
 // the damage type's class name -> the table entry
-static PushKind *kind_of(UObject *dtype, char *name, size_t n) {
-    if (!dtype) { snprintf(name, n, "None"); return push_kind("default", 0); }
-    static UClass *class_cls;
-    if (!class_cls) class_cls = cls("Class");
-    if (class_cls && ue_is_a(dtype, class_cls)) ue_obj_name(dtype, name, n);   // a class (ClassProperty)
-    else cname(dtype, name, n);                                               // its default object
+// a damage type's (or weapon's) class name -> the table entry (build 41: split from kind_of, for the harness)
+static PushKind *kind_by_name(const char *name) {
     char code[24], low[160], kl[24];
     size_t i = 0;
     for (; name[i] && i + 1 < sizeof code && ((name[i] >= 'A' && name[i] <= 'Z') || (name[i] >= 'a' && name[i] <= 'z')); i++) code[i] = name[i];
@@ -1552,12 +1574,18 @@ static PushKind *kind_of(UObject *dtype, char *name, size_t n) {
     if (k) return k;
     for (i = 0; name[i] && i + 1 < sizeof low; i++) low[i] = (char)tolower((unsigned char)name[i]);
     low[i] = 0;
-    for (int j = 0; j < n_push_tab; j++) {   // a key in the name: FragGrenade_DamageType_C
+    // a key in the name: FragGrenade_DamageType_C. The longest key found wins (build 41: Challenge_Volatile_Explosion_
+    // DamageType_C holds both "Explosi" and "Volatile"; before, the first key in the table won)
+    PushKind *best = NULL;
+    size_t best_m = 0;
+    if (!n_push_tab) kinds_reset();
+    for (int j = 0; j < n_push_tab; j++) {
         size_t m = 0;
         for (; push_tab[j].key[m] && m + 1 < sizeof kl; m++) kl[m] = (char)tolower((unsigned char)push_tab[j].key[m]);
         kl[m] = 0;
-        if (m >= 4 && strcmp(kl, "default") && strstr(low, kl)) return &push_tab[j];
+        if (m >= 4 && m > best_m && strcmp(kl, "default") && strstr(low, kl)) { best = &push_tab[j]; best_m = m; }
     }
+    if (best) return best;
     static char unknown[16][96];
     int seen = 0, slot = -1;
     for (int j = 0; j < 16; j++) { if (!strcmp(unknown[j], name)) seen = 1; if (slot < 0 && !unknown[j][0]) slot = j; }
@@ -1567,6 +1595,14 @@ static PushKind *kind_of(UObject *dtype, char *name, size_t n) {
             "/ragdoll push %s <n>)", name, code[0] ? code : name);
     }
     return push_kind("default", 0);
+}
+static PushKind *kind_of(UObject *dtype, char *name, size_t n) {
+    if (!dtype) { snprintf(name, n, "None"); return push_kind("default", 0); }
+    static UClass *class_cls;
+    if (!class_cls) class_cls = cls("Class");
+    if (class_cls && ue_is_a(dtype, class_cls)) ue_obj_name(dtype, name, n);   // a class (ClassProperty)
+    else cname(dtype, name, n);                                               // its default object
+    return kind_by_name(name);
 }
 
 static const BodyList *bodies_of(UObject *mesh);
@@ -1637,6 +1673,75 @@ static float entry_key(const uint8_t *e) {   // larger = the killing hit
 }
 
 
+// build 41: where a blast came from, for its push and for /ragdoll dismember (t->blast_ok). In this order:
+//   1. the hit's source is another Ridden: it blew up (the Volatile Ridden card; an Exploder): its place. Build 40 log:
+//      the volatile blast's victims named the exploding Ridden as the source, and the game announced no explosion
+//      (no Multicast_ExplodeFromSeed), so they were pushed but never dismembered;
+//   2. the nearest explosion the game announced (Multicast_ExplodeFromSeed: frags, pipe bombs, barrels, propane) of the
+//      last second, within 20 m (their source is often the thrower, so the announcement is the better centre);
+//   3. a Ridden that died in the last 0.5 s within 6 m of this one: a card's explosion credited to the hero (Broadside:
+//      a precision kill makes the Ridden explode; not seen in a log yet);
+//   else the place worked out before (the source's place, or under the body): pushed, not dismembered (as build 40).
+// 1 and 3 are recorded as explosions of our own (the same one within 1 m and 0.5 s), so the tally line covers them; the
+// search in 2 skips ours (a volatile chain: each body's own source is the better answer).
+static void blast_take(Tracked *t, const float at[3], double now) {
+    int bi = -1;
+    for (int i = 0; i < 8 && bi < 0; i++) {
+        if (!blasts[i].own || now - blasts[i].t > 0.5) continue;
+        float d2 = 0;
+        for (int c = 0; c < 3; c++) d2 += (at[c] - blasts[i].at[c]) * (at[c] - blasts[i].at[c]);
+        if (d2 < 100.f * 100.f) bi = i;
+    }
+    if (bi < 0) {
+        bi = blast_at++ % 8;
+        memset(&blasts[bi], 0, sizeof blasts[bi]);
+        blasts[bi].t = now;
+        blasts[bi].own = 1;
+        memcpy(blasts[bi].at, at, sizeof blasts[bi].at);
+    }
+    memcpy(t->blast_at, blasts[bi].at, sizeof t->blast_at);
+    t->blast_ok = 1;
+    t->blast_i = (uint8_t)bi;
+}
+static void blast_centre(Tracked *t, const float pt[3], UObject *srca, float org[3], const char **from) {
+    double now = now_s();
+    float at[3];
+    if (srca && srca != t->a && is_ridden_fast(srca) && !actor_loc(srca, at)) {
+        memcpy(org, at, sizeof at);
+        *from = "the Ridden that blew up";
+        blast_take(t, org, now);
+        return;
+    }
+    float bd = 2000.f * 2000.f;
+    int bi = -1;
+    for (int i = 0; i < 8; i++) {
+        if (!blasts[i].t || blasts[i].own || now - blasts[i].t > 1.0) continue;
+        float d2 = 0;
+        for (int c = 0; c < 3; c++) d2 += (pt[c] - blasts[i].at[c]) * (pt[c] - blasts[i].at[c]);
+        if (d2 < bd) { bd = d2; bi = i; }
+    }
+    if (bi >= 0) {
+        memcpy(org, blasts[bi].at, 3 * sizeof(float));
+        *from = "the explosion";
+        memcpy(t->blast_at, org, sizeof t->blast_at); t->blast_ok = 1; t->blast_i = (uint8_t)bi;
+        return;
+    }
+    Tracked *closest = NULL;
+    float nd = 600.f * 600.f, nat[3] = {0, 0, 0};
+    for (int i = 0; i < ntr; i++) {
+        Tracked *x = &tr[i];
+        if (x == t || !x->died_at || now - x->died_at > 0.5 || !ue_object_usable(x->a, x->ai) || actor_loc(x->a, at)) continue;
+        float d2 = 0;
+        for (int c = 0; c < 3; c++) d2 += (pt[c] - at[c]) * (pt[c] - at[c]);
+        if (d2 < nd) { nd = d2; closest = x; memcpy(nat, at, sizeof nat); }
+    }
+    if (closest) {
+        memcpy(org, nat, sizeof nat);
+        *from = "a Ridden that had just died nearby (a card's explosion?)";
+        blast_take(t, org, now);
+    }
+}
+
 static int wounds_on = 1;   // build 40: /ragdoll wounds (see "wounds by weapon"); needs the killing hit even with no push
 
 // the killing hit in a body's RecentDamageInfo: the newest entry that isn't a stumble event (build 40: shared with the
@@ -1705,20 +1810,9 @@ static void push_body(Tracked *t, UObject *mesh) {
             return;
         }
     }
-    if (kind->radial) {   // the blast centre: the nearest explosion of the last second, if any within 20 m
-        double now = now_s();
-        float bd = 2000.f * 2000.f;
-        int bi = -1;
-        for (int i = 0; i < 8; i++) {
-            if (!blasts[i].t || now - blasts[i].t > 1.0) continue;
-            float d2 = 0;
-            for (int c = 0; c < 3; c++) d2 += (pt[c] - blasts[i].at[c]) * (pt[c] - blasts[i].at[c]);
-            if (d2 < bd) { bd = d2; bi = i; }
-        }
-        if (bi >= 0) {
-            memcpy(org, blasts[bi].at, sizeof org); from = "the explosion";
-            memcpy(t->blast_at, org, sizeof org); t->blast_ok = 1; t->blast_i = (uint8_t)bi;
-        }
+    if (kind->radial) {   // the blast centre (build 41: also for explosions the game doesn't announce)
+        UObject *s0 = dinfo.source ? obj_field(dinfo.source, best) : NULL;
+        blast_centre(t, pt, s0 ? (owner_actor(s0) ? owner_actor(s0) : s0) : NULL, org, &from);
     }
     for (int c = 0; c < 3; c++) dr[c] = pt[c] - org[c];
     float len = sqrtf(dr[0] * dr[0] + dr[1] * dr[1] + dr[2] * dr[2]);
@@ -2045,12 +2139,28 @@ static uint8_t *mstate_add(TArray *arr) {
     return e;
 }
 
-// the game's limb code on this machine; while `watch`, its calls and constructions go into the log
+// build 41: the game's own wounds (see "wounds by weapon"): MaxWounds / MaxRuptureWounds and each class's own values
+static int cap_state;                 // 0 not looked up, 1 ok, -1 not in this game (logged)
+static FField *cap_w_f, *cap_r_f;
+static struct { UClass *c; int32_t w, r; } cap_cls[8];
+static int n_cap_cls;
+static int cap_orig(UObject *mut, int32_t *w, int32_t *r);
+
+// the game's limb code on this machine; while `watch`, its calls and constructions go into the log. Build 41: with
+// the component's MaxWounds / MaxRuptureWounds at 0 (the game's own wounds stopped), the game's values for our call
 static int mstate_onrep(UObject *mut, int watch) {
+    int32_t w, r, *pw = NULL, *pr = NULL, sw = 0, sr = 0;
+    if (cap_state == 1 && cap_orig(mut, &w, &r)) {
+        pw = (int32_t *)((uint8_t *)mut + FP_OFFSET(cap_w_f));
+        pr = (int32_t *)((uint8_t *)mut + FP_OFFSET(cap_r_f));
+        sw = *pw; sr = *pr;
+        *pw = w; *pr = r;
+    }
     if (watch) { own_traced = 1; dism_watch = 1; }
     int called = call_void(mut, "OnRep_MutilationState");
     own_traced = 0;
     dism_watch = 0;
+    if (pw) { *pw = sw; *pr = sr; }
     return called;
 }
 
@@ -2491,9 +2601,28 @@ static int head_try(Tracked *t, UObject *mut, TArray *arr, UObject *mesh, int ty
 // living off | arms (arms and open wounds, default) | all (legs too: a living Ridden without shins walks on stumps)).
 // Heads never come off a living Ridden. A part already off is left alone (also a head the game's head-explosion card
 // took). Blast victims (/ragdoll dismember) also get 1 or 2 open wounds, chest and/or stomach (/ragdoll wounds blast).
-// The game's own random wounds still come on top (the headshot's chest rupture): each weapon damage type's settings are
-// logged once ("ragdoll wounds: damage type ...") to find what decides them, and the wound config once.
 // On a host every change replicates (MutilationState), so clients see the same wounds.
+//
+// The game's own wounds (build 41). Build 40 log: on a killing headshot the game itself adds Head BreakOff (|Impulse|
+// 2000) + Chest Rupture (20000) + one upper arm Rupture (20000), at the same point, its SourceActor the hero; an arm kill
+// adds a Chest Rupture to the arm BreakOff; a torso kill a Stomach or Chest Rupture. That is the "head and the body,
+// sometimes an arm" Joon saw for every gun and the bow, and it happens on the host at damage time, before the Ridden
+// is seen dead (its native code: no UFunction to stop it). Never more than 2 ruptures per body in any log, which fits
+// the component's MaxRuptureWounds = 2 being a limit its choice respects. So, host only, /ragdoll wounds game off
+// (default): at every OnDamage event of a weapon kind we handle (the wound kinds, the head-only kinds and the no-wound
+// kinds; the event comes before the mutilation: build 26 trace, a Tallboy's arm 5 ms after its OnDamage), the
+// Ridden's MutilationComponent gets MaxRuptureWounds 0 and MaxWounds 0; any other kind (melee, blasts, the game's own)
+// puts the class's values back, so their gore stays the game's. Our own entries raise both again around our
+// OnRep_MutilationState call, and at the ragdoll (dead: the game makes no more of its own) both go back to the game's
+// values for good (caps_restore_one), so the 0 only ever sits on living Ridden. MaxWounds' meaning is unknown: maybe a cap on the BreakOff the game picks (the head),
+// maybe nothing; with it at 0 a gun's headshot head comes from our own wound (the wound and head-only kinds take it),
+// and the bow's (a no-wound kind) not at all. Whether it worked shows at death: "the game's own wounds: ..." per body
+// killed by a handled kind (entries with a SourceActor; ours have none). Also logged (discovery for a native hook if
+// this isn't enough): the first game-made mutilations (EnemyAudioComponent's HandleMutilationSounds, which the game
+// calls per region from inside its mutilation code) with their time after the Ridden's last OnDamage and 3 call stacks;
+// each weapon damage type's settings (its gameplay tags) and the wound config in full, once.
+// No-wound kinds (/ragdoll wounds none, default Arrow,Bow: Joon wants no dismemberment from the bow): nothing of ours.
+#define WOUND_NONE_DEF   "Arrow,Bow"
 #define WOUND_KINDS_DEF  "SG,Sni,LMG,AR"
 #define WOUND_SMALL_DEF  "LMG,AR"
 #define WOUND_HEADS_DEF  "HG,SMG"
@@ -2505,9 +2634,12 @@ static int head_try(Tracked *t, UObject *mut, TArray *arr, UObject *mesh, int ty
 #define WOUNDQ           64
 static const char *const LIVING_NAME[3] = {"off", "arms", "all"};
 static char wound_kinds[64] = WOUND_KINDS_DEF, wound_small[64] = WOUND_SMALL_DEF, wound_heads[64] = WOUND_HEADS_DEF;
+static char wound_none[64] = WOUND_NONE_DEF;   // build 41
 static int wound_living = WOUND_LIVING_DEF, wound_blast = 1;
+static int wound_game;                          // build 41: 1 = the game's own wounds stay (vanilla), 0 = stopped
 static int n_wound_hits, n_wound_off, n_wound_rupt, n_wound_refused, n_wound_already, n_wound_skip, n_wound_nomap,
            n_wound_pieces, n_blast_rupt, wound_logs, wound_nomap_logs;
+static int n_cap_hits, n_cap_back, n_cap_fail, cap_logs, n_ctl_kills, n_ctl_game, ctl_logs, n_game_mut, game_mut_logs;
 
 static int kind_in(const char *list, const char *kind) {   // the kind is in the list (any case; "all" = every kind)
     if (!kind || !kind[0]) return 0;
@@ -2552,16 +2684,183 @@ static int mstate_has(const TArray *arr, uint8_t region, int type) {   // an ent
     return 0;
 }
 
+// ---- the game's own wounds (build 41, see "wounds by weapon" above) ----
+// the OnDamage event's DamageInfo fields (living hits, below; build 40), shared with cap_hit
+static struct { int state; FField *info, *bone, *type, *stumble, *point, *dir; } dmgi;
+static int kind_handled(const char *key) {   // a kind whose wounds are ours: the wound, head-only and no-wound kinds
+    return key && key[0] && (kind_in(wound_kinds, key) || kind_in(wound_heads, key) || kind_in(wound_none, key));
+}
+static int is_common_class(UObject *a) {    // Common_AICharacterBP_C, CommonArmored_AICharacterBP_C (Joon's reports):
+    char b[96];                             // the specials (a Tallboy's weak-spot arm) keep the game's own
+    return a && U_CLASS(a) && strstr(ue_obj_name(U_CLASS(a), b, sizeof b), "Common") != NULL;
+}
+static int cap_init(UObject *mut) {   // MutilationComponent.MaxWounds / MaxRuptureWounds (ints): 1 ok, -1 not here
+    char t[64], u[64];
+    if (cap_state || !mut) return cap_state;
+    cap_state = -1;
+    FField *w = ue_find_prop(U_CLASS(mut), "MaxWounds"), *r = ue_find_prop(U_CLASS(mut), "MaxRuptureWounds");
+    if (!w || !r || strcmp(ue_name(*(FName *)FF_CLASS(w), t, sizeof t), "IntProperty") ||
+        strcmp(ue_name(*(FName *)FF_CLASS(r), u, sizeof u), "IntProperty")) {
+        LOG("ragdoll wounds: MutilationComponent has no MaxWounds / MaxRuptureWounds ints: the game's own wounds stay");
+        return -1;
+    }
+    cap_w_f = w; cap_r_f = r;
+    cap_state = 1;
+    return 1;
+}
+// the class's own values, read off the first component of that class we touch (before any change of ours)
+static int cap_orig(UObject *mut, int32_t *w, int32_t *r) {
+    char b[96];
+    if (cap_init(mut) != 1) return 0;
+    UClass *c = U_CLASS(mut);
+    for (int i = 0; i < n_cap_cls; i++) if (cap_cls[i].c == c) { *w = cap_cls[i].w; *r = cap_cls[i].r; return 1; }
+    if (n_cap_cls == (int)(sizeof cap_cls / sizeof cap_cls[0])) return 0;
+    *w = *(const int32_t *)((const uint8_t *)mut + FP_OFFSET(cap_w_f));
+    *r = *(const int32_t *)((const uint8_t *)mut + FP_OFFSET(cap_r_f));
+    cap_cls[n_cap_cls].c = c; cap_cls[n_cap_cls].w = *w; cap_cls[n_cap_cls].r = *r;
+    n_cap_cls++;
+    LOG("ragdoll wounds: %s: the game's MaxWounds %d, MaxRuptureWounds %d", ue_obj_name(c, b, sizeof b), *w, *r);
+    return 1;
+}
+static void cap_read(UObject *mut, int32_t *w, int32_t *r) {
+    *w = *r = -1;
+    if (!mut || cap_state != 1) return;
+    *w = *(const int32_t *)((const uint8_t *)mut + FP_OFFSET(cap_w_f));
+    *r = *(const int32_t *)((const uint8_t *)mut + FP_OFFSET(cap_r_f));
+}
+
+// In the ProcessEvent hook (host), at a living Ridden's OnDamage event: the game's own wounds off for a kind we
+// handle, back to the game's values for any other (stumble events, which come with every hit, change nothing).
+// Nothing heavy: a table lookup, two int writes (the component looked up once per Ridden, a ProcessEvent call).
+static void cap_hit(UObject *o, const void *params) {
+    char kn[96], a[160], bn[64];
+    if (GetCurrentThreadId() != game_tid || cap_state < 0 || !is_common_class(o)) return;
+    const uint8_t *di = (const uint8_t *)params + FP_OFFSET(dmgi.info);
+    if (dmgi.stumble && bool_at(dmgi.stumble, di) == 1) return;
+    PushKind *k = kind_of(obj_field(dmgi.type, di), kn, sizeof kn);
+    if (!strcmp(k->key, "Stumble")) return;
+    Tracked *x = any_tracked(o);
+    UObject *mut = x && x->mut && ue_object_usable(x->mut, x->muti) ? x->mut : NULL;
+    if (!mut) {
+        mut = comp_of(o, "MutilationComponent");
+        if (x) { x->mut = mut; x->muti = mut ? U_INDEX(mut) : -1; }
+    }
+    int32_t w, r, w0, r0;
+    if (!mut || !cap_orig(mut, &w, &r)) { n_cap_fail++; return; }
+    int off = !k->radial && kind_handled(k->key);
+    cap_read(mut, &w0, &r0);
+    *(int32_t *)((uint8_t *)mut + FP_OFFSET(cap_w_f)) = off ? 0 : w;
+    *(int32_t *)((uint8_t *)mut + FP_OFFSET(cap_r_f)) = off ? 0 : r;
+    if (off) n_cap_hits++; else n_cap_back++;
+    if (x) { x->dmg_t = now_s(); snprintf(x->dmg_kind, sizeof x->dmg_kind, "%s", k->key); }
+    if (cap_logs < 12 && (w0 != (off ? 0 : w) || r0 != (off ? 0 : r))) {
+        cap_logs++;
+        FName bone = dmgi.bone ? *(const FName *)(di + FP_OFFSET(dmgi.bone)) : (FName){0, 0};
+        LOG("ragdoll wounds: %s hit by %s (%s) on %s: the game's own wounds %s (MaxWounds %d -> %d, MaxRuptureWounds %d -> %d)",
+            oname(o, a, sizeof a), k->key, kn, bone.idx ? ue_name(bone, bn, sizeof bn) : "-", off ? "off" : "back to the game's",
+            w0, off ? 0 : w, r0, off ? 0 : r);
+    }
+}
+
+// /ragdoll wounds game on: every Ridden we changed gets the game's values back (game thread)
+static int caps_restore_all(void) {
+    int n = 0;
+    int32_t w, r;
+    for (int i = 0; cap_state == 1 && i < ntr; i++) {
+        Tracked *x = &tr[i];
+        if (!x->mut || !ue_object_usable(x->mut, x->muti) || !cap_orig(x->mut, &w, &r)) continue;
+        *(int32_t *)((uint8_t *)x->mut + FP_OFFSET(cap_w_f)) = w;
+        *(int32_t *)((uint8_t *)x->mut + FP_OFFSET(cap_r_f)) = r;
+        n++;
+    }
+    return n;
+}
+// at the ragdoll (build 41): the body is dead, so the game makes no more wounds of its own on it (its killing hit's
+// are in MutilationState by the time we see the death: build 40 log, "at death"); the caps only ever need to be 0 on
+// living Ridden. Back to the game's values, so nothing later (the stand-in swap, the game's own code reading them) sees
+// the 0 we set. Our own wounds on the body raise them around their call anyway (mstate_onrep).
+static void caps_restore_one(Tracked *t) {
+    int32_t w, r;
+    if (cap_state != 1 || !is_common_class(t->a)) return;
+    // hit before the scan listed it: cap_hit found the component itself and couldn't keep it on the entry
+    UObject *mut = t->mut && ue_object_usable(t->mut, t->muti) ? t->mut : comp_of(t->a, "MutilationComponent");
+    if (!mut || !cap_orig(mut, &w, &r)) return;
+    *(int32_t *)((uint8_t *)mut + FP_OFFSET(cap_w_f)) = w;
+    *(int32_t *)((uint8_t *)mut + FP_OFFSET(cap_r_f)) = r;
+}
+
+// discovery (host): a mutilation the game made itself (HandleMutilationSounds outside our own calls); 3 call stacks
+static int game_mut_stacks;
+static void stack_log(int kind, const char *what);
+static void natives_build(void);
+static void game_mut_note(UObject *o, UFunction *fn, const uint8_t *params) {
+    char a[160], c[96], pv[200], line[700], pn[64];
+    if (GetCurrentThreadId() != game_tid || admin_is_client()) return;
+    UObject *actor = owner_actor(o);
+    Tracked *x = actor ? any_tracked(actor) : NULL;
+    n_game_mut++;
+    if (game_mut_logs >= 30) return;
+    game_mut_logs++;
+    size_t k = 0;
+    line[0] = 0;
+    for (FField *p = US_CHILDPROPS(fn); p && k + 64 < sizeof line; p = FF_NEXT(p)) {
+        if (!(FP_FLAGS(p) & CPF_PARM_) || (FP_FLAGS(p) & (CPF_OUTPARM_ | CPF_RETURNPARM_))) continue;
+        fmt_prop(p, params, pv, sizeof pv, 1);
+        k += (size_t)snprintf(line + k, sizeof line - k, " %s=%s", ue_name(FF_NAME(p), pn, sizeof pn), pv);
+    }
+    int32_t w = -1, r = -1;
+    if (x && x->mut && ue_object_usable(x->mut, x->muti)) cap_read(x->mut, &w, &r);
+    char when[96];
+    if (x && x->dmg_t) snprintf(when, sizeof when, "%.3f s after its last OnDamage (%s)", now_s() - x->dmg_t, x->dmg_kind);
+    else snprintf(when, sizeof when, "no OnDamage of it seen");
+    LOG("ragdoll wounds: the game's own mutilation on %s (%s):%s; %s, %s; its MaxWounds %d, MaxRuptureWounds %d now",
+        oname(actor, a, sizeof a), cname(actor, c, sizeof c), line, when, x && x->died_at ? "seen dead" : "not seen dead yet", w, r);
+    if (game_mut_stacks < 3) {
+        game_mut_stacks++;
+        natives_build();
+        snprintf(line, sizeof line, "the game's own mutilation on %s", oname(actor, a, sizeof a));
+        stack_log(ST_MUTIL, line);
+    }
+}
+
+// at the ragdoll: what the game itself put on a Common killed by a kind we handle (entries with a SourceActor)
+static void game_wounds_at_death(Tracked *t, const char *kind, const char *bone) {
+    char a[160], rn[48], list[300] = "";
+    if (admin_is_client() || !kind_handled(kind) || !is_common_class(t->a) || mi.state != 1 || !mi.source) return;
+    UObject *mut = t->mut && ue_object_usable(t->mut, t->muti) ? t->mut : comp_of(t->a, "MutilationComponent");
+    if (!mut) return;
+    const TArray *arr = (const TArray *)((const uint8_t *)mut + FP_OFFSET(mi.arr));
+    int n = 0;
+    for (int i = 0; arr->data && i < arr->num && i < 32; i++) {
+        const uint8_t *e = (const uint8_t *)arr->data + (size_t)i * mi.el;
+        if (!*(UObject *const *)(e + FP_OFFSET(mi.source))) continue;   // ours (and the game's copies of ours): none
+        n++;
+        char one[64];
+        snprintf(one, sizeof one, "%s %s", region_name(e[FP_OFFSET(mi.region)], rn, sizeof rn),
+                 e[FP_OFFSET(mi.type)] == (uint8_t)mi.rupture ? "Rupture" : e[FP_OFFSET(mi.type)] == (uint8_t)mi.breakoff ? "BreakOff" : "?");
+        str_add(list, sizeof list, one);
+    }
+    n_ctl_kills++;
+    if (n) n_ctl_game++;
+    int32_t w, r;
+    cap_read(mut, &w, &r);
+    if (ctl_logs < 40) {
+        ctl_logs++;
+        LOG("ragdoll wounds: %s killed by %s on %s: the game's own wounds: %s (MaxWounds %d, MaxRuptureWounds %d%s)",
+            oname(t->a, a, sizeof a), kind, bone, n ? list : "none", w, r, wound_game ? "; /ragdoll wounds game on" : "");
+    }
+}
+
 // discovery: every property of an object (its class chain down to Object), with values; `tag` names it in the log
 static void dump_obj(const char *tag, UObject *o) {
-    char b[128], pn[96], v[700], a[160];
+    char b[128], pn[96], v[8000], a[160];
     if (!o) return;
     LOG("ragdoll wounds: %s %s (%s):", tag, oname(o, a, sizeof a), cname(o, b, sizeof b));
     for (UStruct *s = (UStruct *)U_CLASS(o); s; s = US_SUPER(s)) {
         ue_obj_name(s, b, sizeof b);
         if (!strcmp(b, "Object")) break;
         for (FField *p = US_CHILDPROPS(s); p; p = FF_NEXT(p)) {
-            fmt_prop(p, (const uint8_t *)o, v, sizeof v, 2);
+            fmt_prop(p, (const uint8_t *)o, v, sizeof v, 4);   // build 41: 4 (arrays and their structs; tags)
             LOG("ragdoll wounds:   %s %s.%s = %s", tag, b, ue_name(FF_NAME(p), pn, sizeof pn), v);
         }
     }
@@ -2581,6 +2880,7 @@ static void dtype_probe(UObject *dtype) {   // each damage type once: what could
 static int wound_apply(Tracked *t, UObject *mesh, const char *kind, FName bone, const float from[3], int alive, const char *when) {
     char a[160], c[96], bn[64], region[32], piece_s[64] = "";
     if (!wounds_on || !mesh || !kind || !kind[0]) return 0;
+    if (kind_in(wound_none, kind)) return 0;   // build 41: no wounds at all (the bow)
     int heads_only = kind_in(wound_heads, kind);
     if (!heads_only && !kind_in(wound_kinds, kind)) return 0;
     if (alive && !wound_living) return 0;
@@ -2659,6 +2959,8 @@ static void wound_kill(Tracked *t, UObject *mesh) {
     if (kind->radial) return;   // blasts: /ragdoll dismember
     dtype_probe(dt);
     FName bone = *(const FName *)(best + FP_OFFSET(dinfo.bone));
+    char bn[64];
+    game_wounds_at_death(t, kind->key, ue_name(bone, bn, sizeof bn));   // build 41: did the game add any of its own?
     float from[3];
     const float *sl = dinfo.srcloc ? (const float *)(best + FP_OFFSET(dinfo.srcloc)) : NULL;
     UObject *src = dinfo.source ? obj_field(dinfo.source, best) : NULL;
@@ -2699,7 +3001,6 @@ static UFunction *dmg_fns[32];
 static int n_dmg_fns;
 static UClass *dmg_seen[48];
 static int n_dmg_seen;
-static struct { int state; FField *info, *bone, *type, *stumble, *point, *dir; } dmgi;
 typedef struct { UObject *a, *dtype; FName bone; float from[3]; } WoundHit;
 static WoundHit woundq[WOUNDQ];
 static int n_woundq, n_woundq_drop, n_living_hits;
@@ -2778,10 +3079,15 @@ static void wound_tick(void) {   // game thread, after this tick's deaths are ra
     n_woundq = 0;
 }
 
-static int wound_hook_wanted(void) { return wounds_on && wound_living && n_dmg_fns > 0; }
+// build 41: also for the game's own wounds (cap_hit), with /ragdoll wounds living off
+static int wound_hook_wanted(void) { return wounds_on && (wound_living || !wound_game) && n_dmg_fns > 0; }
 static void wound_hook(UObject *o, UFunction *fn, void *params) {   // in the ProcessEvent hook (any call while on)
-    if (!wounds_on || !wound_living || dmgi.state != 1) return;
-    for (int i = 0; i < n_dmg_fns; i++) if (fn == dmg_fns[i]) { wound_note(o, params); return; }
+    if (!wounds_on || dmgi.state != 1) return;
+    for (int i = 0; i < n_dmg_fns; i++) if (fn == dmg_fns[i]) {
+        if (!wound_game) cap_hit(o, params);   // before the game's own mutilation for this hit
+        if (wound_living) wound_note(o, params);
+        return;
+    }
 }
 
 static void dismember(Tracked *t, UObject *mesh, float dv, Blast *bl) {
@@ -3404,12 +3710,13 @@ static int apply(Tracked *t) {
         log_mesh(mesh, "after");
         LOG("ragdoll after:   montage playing %d", ai ? call_bool(ai, "IsAnyMontagePlaying") : -1);
     }
-    if (sim != 1) { LOG("ragdoll: %s is not simulating after the calls", oname(t->a, a, sizeof a)); return -1; }
+    if (sim != 1) { LOG("ragdoll: %s is not simulating after the calls", oname(t->a, a, sizeof a)); caps_restore_one(t); return -1; }
     mstate_note(t);       // build 27: what the game wrote on the body (limbs it took off)
     t->hid = hidden_bodies(mesh);   // build 40: parts lost while alive stay out of the rest test
     wound_kill(t, mesh);  // build 40: the killing shot opens a wound or takes a part off where it hit, before the push
     carry_body(t, mesh);  // build 38: it keeps its running speed, before the push
     push_body(t, mesh);   // step 2: the killing hit throws the body (blast victims: /ragdoll dismember first)
+    caps_restore_one(t);  // build 41: dead now, the game adds no more wounds of its own: its caps back (see cap_hit)
     return 0;
 }
 
@@ -3976,17 +4283,50 @@ static void save_i(const char *key, int v, int def) {
     snprintf(b, sizeof b, "%d", v);
     save(key, b);
 }
-static void save_kinds(void) {   // the kinds that differ from PUSH_DEF, or aren't in it
-    char b[600];
+// b4bcoop.ini's ragdoll_kinds: the kinds that differ from PUSH_DEF, or aren't in it, as KIND:n pairs (":blast" /
+// ":bullet" when a kind's explosion flag differs from its default, build 41); "" = none
+static void kinds_format(char *b, size_t size) {
     size_t m = 0;
     b[0] = 0;
-    for (int i = 0; i < n_push_tab && m + 40 < sizeof b; i++) {
-        int same = 0;
+    for (int i = 0; i < n_push_tab && m + 48 < size; i++) {
+        int same = 0, def_radial = 0;
         for (int j = 0; j < N_PUSH_DEF; j++)
-            if (!_stricmp(PUSH_DEF[j].key, push_tab[i].key)) { same = PUSH_DEF[j].n == push_tab[i].n; break; }
-        if (!same) m += (size_t)snprintf(b + m, sizeof b - m, "%s%s:%.0f", m ? "," : "", push_tab[i].key, push_tab[i].n);
+            if (!_stricmp(PUSH_DEF[j].key, push_tab[i].key)) {
+                same = PUSH_DEF[j].n == push_tab[i].n && PUSH_DEF[j].radial == push_tab[i].radial;
+                def_radial = PUSH_DEF[j].radial;
+                break;
+            }
+        if (!same) m += (size_t)snprintf(b + m, size - m, "%s%s:%.0f%s", m ? "," : "", push_tab[i].key, push_tab[i].n,
+                                         push_tab[i].radial == def_radial ? "" : push_tab[i].radial ? ":blast" : ":bullet");
     }
-    save("ragdoll_kinds", m ? b : NULL);
+}
+// its reader (no strtok: the chat handler uses it); v NULL = the defaults
+static void kinds_parse(const char *v) {
+    kinds_reset();
+    for (const char *p = v ? v : ""; *p; ) {
+        char key[24];
+        size_t n = 0;
+        while (*p == ' ' || *p == ',') p++;
+        while (*p && *p != ':' && *p != ',' && *p != ' ' && n + 1 < sizeof key) key[n++] = *p++;
+        key[n] = 0;
+        while (*p && *p != ':' && *p != ',') p++;   // spaces before ':', or the rest of a name too long (cut to 23
+                                                    // letters, as /ragdoll push <kind> cuts it)
+        if (*p != ':') continue;
+        float x = (float)atof(++p);
+        const char *e = p;
+        while (*e && *e != ',') e++;
+        int rad = -1;   // build 41: "Key:n:blast" / ":bullet"
+        for (const char *q = p; q < e; q++)
+            if (*q == ':') { rad = !_strnicmp(q + 1, "blast", 5) ? 1 : !_strnicmp(q + 1, "bullet", 6) ? 0 : -1; break; }
+        p = e;
+        PushKind *pk = n ? push_kind(key, 1) : NULL;
+        if (pk) { pk->n = clampf(x, 0.f, 500000.f); if (rad >= 0) pk->radial = (uint8_t)rad; }
+    }
+}
+static void save_kinds(void) {
+    char b[600];
+    kinds_format(b, sizeof b);
+    save("ragdoll_kinds", b[0] ? b : NULL);
 }
 
 // one b4bcoop.ini key into the settings (val NULL = removed: the default); 1 = a key of ours
@@ -3998,23 +4338,7 @@ static int setting(const char *k, const char *v) {
     else if (!strcmp(k, "ragdoll_deadline")) deadline_s = v ? clampf((float)atof(v), 12.f, 120.f) : DEADLINE_DEFAULT;
     else if (!strcmp(k, "ragdoll_push")) push_scale = v ? clampf((float)atof(v), 0.f, 10.f) : PUSH_DEFAULT;
     else if (!strcmp(k, "ragdoll_shot")) shot_scale = v ? clampf((float)atof(v), 0.f, 10.f) : SHOT_DEFAULT;
-    else if (!strcmp(k, "ragdoll_kinds")) {   // KIND:n pairs, comma-separated (no strtok: the chat handler uses it)
-        kinds_reset();
-        for (const char *p = v ? v : ""; *p; ) {
-            char key[24];
-            size_t n = 0;
-            while (*p == ' ' || *p == ',') p++;
-            while (*p && *p != ':' && *p != ',' && *p != ' ' && n + 1 < sizeof key) key[n++] = *p++;
-            key[n] = 0;
-            while (*p && *p != ':' && *p != ',') p++;   // spaces before ':', or the rest of a name too long (cut to 23
-                                                        // letters, as /ragdoll push <kind> cuts it)
-            if (*p != ':') continue;
-            float x = (float)atof(++p);
-            while (*p && *p != ',') p++;
-            PushKind *pk = n ? push_kind(key, 1) : NULL;
-            if (pk) pk->n = clampf(x, 0.f, 500000.f);
-        }
-    }
+    else if (!strcmp(k, "ragdoll_kinds")) kinds_parse(v);   // KIND:n[:blast|:bullet] pairs
     else if (!strcmp(k, "ragdoll_bloodbag")) bloodbag_on = onoff(v, 0);
     else if (!strcmp(k, "ragdoll_blood")) blood_on = onoff(v, 1);
     else if (!strcmp(k, "ragdoll_dismember")) dism_on = onoff(v, DISM_DEFAULT);
@@ -4034,6 +4358,8 @@ static int setting(const char *k, const char *v) {
     else if (!strcmp(k, "ragdoll_wounds_living")) wound_living = !v ? WOUND_LIVING_DEF : !_stricmp(v, "off") ? 0 : !_stricmp(v, "arms") ? 1 :
                                                   !_stricmp(v, "all") ? 2 : clampi(atoi(v), 0, 2);
     else if (!strcmp(k, "ragdoll_wounds_blast")) wound_blast = onoff(v, 1);
+    else if (!strcmp(k, "ragdoll_wounds_game")) wound_game = onoff(v, 0);                                    // build 41
+    else if (!strcmp(k, "ragdoll_wounds_none")) set_kinds(wound_none, sizeof wound_none, v ? v : WOUND_NONE_DEF);   // build 41
     else return 0;
     return 1;
 }
@@ -4048,6 +4374,9 @@ static void turn_on(float delay) {   // game thread: /ragdoll on, or ragdoll=1 a
     shot_logs = shot_miss_logs = shot_dumps = 0;
     carry_logs = vel_logs_r = 0;   // build 38
     wound_logs = wound_nomap_logs = 0;   // build 40
+    cap_logs = ctl_logs = game_mut_logs = 0;   // build 41
+    if (!nm_mutsnd.idx) nm_mutsnd = fname_of(L"HandleMutilationSounds");
+    if (!game_mut_stacks) InterlockedExchange(&stack_budget[ST_MUTIL], 3);
     if (shot_state < 0) shot_state = 0;   // look OnCorpseHit up again
     shot_reset();
     game_tid = GetCurrentThreadId();
@@ -4155,12 +4484,16 @@ void ragdoll_slash(char *rest, Out *o) {
                       "%d standing still, %d with no speed read, %d failed\n", carry_scale,
                    carry_keep, mov_vel_off == -1 ? " (NOT AVAILABLE: see log)" : "", n_carried, n_carry_mem, n_carry_faster,
                    n_carry_still, n_carry_nomov, n_carry_fail);
-        out_printf(o, "/ragdoll wounds %s (%s; small %s; heads only %s; living %s; blasts %s): %d hits looked at, %d parts off, %d open "
+        out_printf(o, "/ragdoll wounds %s (%s; small %s; heads only %s; none %s; living %s; blasts %s): %d hits looked at, %d parts off, %d open "
                       "wounds (+%d on blast victims), %d refused, %d already done, %d left alone on living Ridden, %d with no wound "
-                      "for the bone; %d living hits (%d dropped, %d OnDamage events known%s); our pieces %d\n",
-                   wounds_on ? "on" : "off", wound_kinds, wound_small, wound_heads, LIVING_NAME[wound_living], wound_blast ? "on" : "off",
+                      "for the bone; %d living hits (%d dropped, %d OnDamage events known%s); our pieces %d; the game's own wounds %s: "
+                      "%d hits stopped them, %d gave them back, %d failed; %d Commons killed by those kinds, %d still with the game's "
+                      "own; %d of the game's own mutilations seen\n",
+                   wounds_on ? "on" : "off", wound_kinds, wound_small, wound_heads, wound_none, LIVING_NAME[wound_living], wound_blast ? "on" : "off",
                    n_wound_hits, n_wound_off, n_wound_rupt, n_blast_rupt, n_wound_refused, n_wound_already, n_wound_skip, n_wound_nomap,
-                   n_living_hits, n_woundq_drop, n_dmg_fns, dmgi.state < 0 ? ", NOT AVAILABLE: see log" : "", n_wound_pieces);
+                   n_living_hits, n_woundq_drop, n_dmg_fns, dmgi.state < 0 ? ", NOT AVAILABLE: see log" : "", n_wound_pieces,
+                   wound_game ? "on" : cap_state < 0 ? "off but NOT AVAILABLE" : "off", n_cap_hits, n_cap_back, n_cap_fail, n_ctl_kills,
+                   n_ctl_game, n_game_mut);
     } else if (!strcmp(verb, "on")) {
         turn_on(arg ? (float)atof(arg) : 0.f);
         start_on = 1;
@@ -4291,15 +4624,18 @@ void ragdoll_slash(char *rest, Out *o) {
             push_scale = PUSH_DEFAULT;
             LOG("ragdoll push: on (x%.2f, the default)", push_scale);
             save_f("ragdoll_push", push_scale, PUSH_DEFAULT);
-        } else if (arg && arg2) {   // /ragdoll push <key> <n>: one weapon kind
+        } else if (arg && arg2) {   // /ragdoll push <key> <n> [blast|bullet]: one weapon kind
             float n = (float)atof(arg2);
+            char *arg3 = strtok(NULL, " ");
             PushKind *k = push_kind(arg, 1);
             if (!k) { out_printf(o, "/ragdoll push: table full\n"); return; }
             k->n = n < 0.f ? 0.f : n > 500000.f ? 500000.f : n;
+            if (arg3 && !_stricmp(arg3, "blast")) k->radial = 1;        // build 41: an explosion's kind (pushed from its
+            else if (arg3 && !_stricmp(arg3, "bullet")) k->radial = 0;  // centre, dismembered)
             LOG("ragdoll push: %s = %.0f%s", k->key, k->n, k->radial ? " (explosion)" : "");
             save_kinds();
         } else if (arg) {
-            out_printf(o, "usage: /ragdoll push [<x> | on | off | <weapon kind> <strength>]\n");
+            out_printf(o, "usage: /ragdoll push [<x> | on | off | <weapon kind> <strength> [blast|bullet]]\n");
             return;
         }
         char line[1024];
@@ -4352,20 +4688,30 @@ void ragdoll_slash(char *rest, Out *o) {
             pe_update();
         }
         else if (arg && !strcmp(arg, "blast") && arg2 && (!strcmp(arg2, "on") || !strcmp(arg2, "off"))) { wound_blast = !strcmp(arg2, "on"); save_i("ragdoll_wounds_blast", wound_blast, 1); }
+        else if (arg && !strcmp(arg, "game") && arg2 && (!strcmp(arg2, "on") || !strcmp(arg2, "off"))) {   // build 41
+            wound_game = !strcmp(arg2, "on");
+            save_i("ragdoll_wounds_game", wound_game, 0);
+            if (wound_game) LOG("ragdoll wounds: the game's own wounds back on %d Ridden", caps_restore_all());
+            pe_update();
+        }
+        else if (arg && !strcmp(arg, "none") && arg2) { set_kinds(wound_none, sizeof wound_none, arg2); save("ragdoll_wounds_none", strcmp(wound_none, WOUND_NONE_DEF) ? wound_none : NULL); }
         else if (arg) {
-            out_printf(o, "usage: /ragdoll wounds [on|off|kinds <K,K>|small <K,K>|heads <K,K>|living off|arms|all|blast on|off]\n");
+            out_printf(o, "usage: /ragdoll wounds [on|off|kinds <K,K>|small <K,K>|heads <K,K>|none <K,K>|living off|arms|all|blast on|off|game on|off]\n");
             return;
         }
         if (arg) {
-            wound_logs = wound_nomap_logs = 0;
-            LOG("ragdoll wounds: %s, kinds %s, small %s, heads only %s, living %s, blasts %s", wounds_on ? "on" : "off", wound_kinds,
-                wound_small, wound_heads, LIVING_NAME[wound_living], wound_blast ? "on" : "off");
+            wound_logs = wound_nomap_logs = cap_logs = ctl_logs = 0;
+            LOG("ragdoll wounds: %s, kinds %s, small %s, heads only %s, none %s, living %s, blasts %s, the game's own %s", wounds_on ? "on" : "off",
+                wound_kinds, wound_small, wound_heads, wound_none, LIVING_NAME[wound_living], wound_blast ? "on" : "off",
+                wound_game ? "on" : "off");
         }
         out_printf(o, "/ragdoll wounds: %s (default on): shots by %s take off or open what they hit (head, arm, leg, chest, "
-                      "stomach); small wounds for %s; %s only take heads (a killing headshot); on living Ridden: %s (off | arms: "
-                      "arms and open wounds | all: legs too; never heads); blast victims get 1-2 open wounds: %s. Lists: kinds|small|"
-                      "heads <K,K> (none = empty); so far %d parts off, %d wounds opened\n", wounds_on ? "on" : "off", wound_kinds,
-                   wound_small, wound_heads, LIVING_NAME[wound_living], wound_blast ? "on" : "off", n_wound_off, n_wound_rupt + n_blast_rupt);
+                      "stomach); small wounds for %s; %s only take heads (a killing headshot); %s get none; on living Ridden: %s "
+                      "(off | arms: arms and open wounds | all: legs too; never heads); blast victims get 1-2 open wounds: %s; the "
+                      "game's own wounds on Commons hit by those kinds: %s (game on|off, default off; host). Lists: kinds|small|heads|"
+                      "none <K,K> (none = empty); so far %d parts off, %d wounds opened\n", wounds_on ? "on" : "off", wound_kinds,
+                   wound_small, wound_heads, wound_none, LIVING_NAME[wound_living], wound_blast ? "on" : "off",
+                   wound_game ? "on" : cap_state < 0 ? "off but NOT AVAILABLE (see log)" : "off", n_wound_off, n_wound_rupt + n_blast_rupt);
     } else if (!strcmp(verb, "probe")) {
         world_check();
         if (!mode_on && !tracing) for (int k = 0; k < 64; k++) scan_step();   // not scanning in the background: a full pass now
@@ -4377,7 +4723,7 @@ void ragdoll_slash(char *rest, Out *o) {
         if (tracing) trace_stop("restarted");
         if (trace_start(s, o) == 0) out_printf(o, "/ragdoll trace: %.0f s, kill a few Ridden now (log: \"ragdoll trace\" lines)\n", s);
     } else {
-        out_printf(o, "usage: /ragdoll [on [delay]|off|status|mass [x]|gravity [x]|deadline [s]|push [x|on|off|<kind> <n>]|shot [x|on|off]|carry [x|on|off|keep <s>]|wounds [on|off|kinds <K,K>|small <K,K>|heads <K,K>|living off|arms|all|blast on|off]|bloodbag [on|off]|blood [on|off]|dismember [on|off|limbs <min> [max]|big <0-100>|head <0-100|on|off>|pieces on|off|type <n|auto>|impulse <n>]|probe|trace [secs]]\n");
+        out_printf(o, "usage: /ragdoll [on [delay]|off|status|mass [x]|gravity [x]|deadline [s]|push [x|on|off|<kind> <n> [blast]]|shot [x|on|off]|carry [x|on|off|keep <s>]|wounds [on|off|kinds <K,K>|small <K,K>|heads <K,K>|none <K,K>|living off|arms|all|blast on|off|game on|off]|bloodbag [on|off]|blood [on|off]|dismember [on|off|limbs <min> [max]|big <0-100>|head <0-100|on|off>|pieces on|off|type <n|auto>|impulse <n>]|probe|trace [secs]]\n");
     }
     if (save_fail) out_printf(o, "/ragdoll: could not write b4bcoop.ini (see log): this change lasts until the game closes\n");
 }
@@ -4394,11 +4740,12 @@ int ragdoll_init(void) {
         m += (size_t)snprintf(kinds + m, sizeof kinds - m, "%s%s %.0f", i ? ", " : "", push_tab[i].key, push_tab[i].n);
     LOG("ragdoll: experimental module loaded (fork build), %s; from b4bcoop.ini and the defaults: delay %.2f, mass x%.2f, "
         "gravity x%.2f, deadline %.0f s, push x%.2f, shots on bodies x%.2f, blood bags %s, blood %s, dismember %s (%d-%d "
-        "limbs, big %d%%, head %d%%, pieces %s), carry x%.2f keep %.2f s, wounds %s (%s; small %s; heads only %s; living %s; blasts "
-        "%s); kinds: %s",
+        "limbs, big %d%%, head %d%%, pieces %s), carry x%.2f keep %.2f s, wounds %s (%s; small %s; heads only %s; none %s; living %s; "
+        "blasts %s; the game's own %s); kinds: %s",
         start_on ? "on at the first world (ragdoll=1)" : "off until /ragdoll on",
         delay_s, mass_scale, grav_scale, deadline_s, push_scale, shot_scale, bloodbag_on ? "on" : "off", blood_on ? "on" : "off",
         dism_on ? "on" : "off", dism_min, dism_max, dism_big, dism_head, dism_pieces ? "on" : "off", carry_scale, carry_keep,
-        wounds_on ? "on" : "off", wound_kinds, wound_small, wound_heads, LIVING_NAME[wound_living], wound_blast ? "on" : "off", kinds);
+        wounds_on ? "on" : "off", wound_kinds, wound_small, wound_heads, wound_none, LIVING_NAME[wound_living], wound_blast ? "on" : "off",
+        wound_game ? "on" : "off", kinds);
     return 0;
 }

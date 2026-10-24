@@ -91,6 +91,7 @@ and changing someone else's look stay chat commands (`/model`, below).
 | `/ping` | Your ping to the host | `/ping` |
 | `/flashlight` | Turns your flashlight on or off | `/flashlight`, `/flashlight on` |
 | `/thirdperson` | Over-the-shoulder camera for your own hero | `/thirdperson`, `/thirdperson off`, `/thirdperson distance 150` |
+| `/dialogue barks [on\|off]` | (Fork build.) Survivor barks muted on your machine, on by default: the lines after headshots, melee kills and shooting explosive items (sound and subtitle). `mute <Name,Name>` sets which barks (default `Headshot,Kill_Bat,Shoot_Explosive`; also e.g. `FriendlyFire_Melee`, a survivor's complaint when a teammate hits them); `log` writes the next 40 lines heard into the log with their names | `/dialogue barks off`, `/dialogue barks mute Headshot,Kill_Bat` |
 | `/join steam:<id>` | Joins a friend by their Steam ID | `/join steam:7656119XXXXXXXXXX` |
 | `/leave` | Leaves the host's game, back to your own Fort Hope | `/leave` |
 | `/host` | Starts hosting your Fort Hope (only needed with `host=0`) | `/host` |
@@ -364,6 +365,7 @@ These act on the whole mission (only during a mission).
 | `/director calm\|build\|peak\|fade\|recover` | Forces the AI director's pacing phase: calm (no pressure), build (build-up), peak, peak fade, recover. | `/director peak` |
 | `/spawn <type> [1-10]` | Spawns ridden in front of you. Types: `tallboy crusher bruiser reeker exploder retch stinger stalker hocker hag snitcher breaker ogre common`. | `/spawn crusher 2` |
 | `/spawnprop <name> [#]` | (Fork build.) Spawns a prop on the floor 3 m in front of you, of a class this map has loaded (a gas can, a red barrel...): lists the matching classes with their paths and spawns the first, or match `#`. A full class path from that list works in any map. | `/spawnprop gascan` |
+| `/give <weapon> [p]` | (Fork build.) Puts a weapon into a hero's inventory: its code (`AR02`) or shown name, any case, part of it if only one weapon matches. It takes that weapon's slot: the weapon there is replaced, not dropped. `/give list [filter]` lists them. Weapons load with a mission. | `/give AR02`, `/give list rifle` |
 | `/killall` | Kills every ridden in the map (common ridden, specials, mutations). Never players, bots or allies. | `/killall` |
 | `/freeze` | Freezes the world except the players (ridden and bots stop). Again to resume. | `/freeze` |
 | `/slomo <0.1-5>` | Game speed for everyone (1 = normal). | `/slomo 0.5` |
@@ -642,6 +644,8 @@ Rules:
 | `flashlight_range` | `100` | `25`-`400` | How far your flashlight reaches, percent of the game's (your screen only) |
 | `flashlight_brightness` | `100` | `0`-`500` | Your flashlight's brightness, percent of the game's (your screen only) |
 | `thirdperson` | `0` | `0`, `1` | `1`: start in third person (`/thirdperson`) |
+| `barks_mute` | `1` (fork build) | `0`, `1` | `0`: survivor barks are played again (`/dialogue barks`) |
+| `barks_mute_list` | `Headshot,Kill_Bat,Shoot_Explosive` (fork build) | bark names, comma-separated | Which barks are muted (`/dialogue barks mute`) |
 | `thirdperson_key` | `N` | a letter, a digit, a key code, or `off` | The third-person toggle key |
 | `bot_heal_key` | `H` | a letter, a digit, a key code, or `off` | Ask the bots to heal you (see **Ask the bots to heal you** under Commands for everyone) |
 | `thirdperson_distance` | `180` | `50`-`600` | Third-person camera distance (`/thirdperson distance`) |
