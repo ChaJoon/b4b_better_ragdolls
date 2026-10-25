@@ -457,6 +457,162 @@ static void stack_log(int kind, const char *what) {
     if (n < 4) LOG("ragdoll stack #%ld: the walk stopped early (a frame without unwind data)", id);
 }
 
+// ---- freeze watchdog (build 43) ----
+// Joon's build 42 session froze (25 Oct 08:17:50): the picture stopped, the last sounds looped, the log's last line the
+// engine's "Collecting garbage", nothing of ours around it. A stuck game thread can't log, so a thread of ours watches
+// the tick count (ragdoll_tick runs every engine tick): no tick for FREEZE_S seconds, and again at FREEZE_S2, and the
+// game thread is suspended just long enough to copy its registers and walk its stack, then resumed, then the frames go
+// into the log as "ragdoll freeze #n" lines: static VAs with each function's start and first bytes (as the other
+// stacks), ours as b4bcoop+offset, anything else as its image base + offset (names in a last line). No loader or heap
+// lock is taken while the thread is suspended (it may hold one): the unwind entries come from each image's own .pdata,
+// found from VirtualQuery's AllocationBase, and RtlVirtualUnwind only reads the stack. A loading screen can also stop
+// the tick for that long: then the stack shows the loading, and "ticks again" follows.
+#define FREEZE_S      10
+#define FREEZE_S2     40
+#define FREEZE_FRAMES 64
+static unsigned tick_n;   // ragdoll_tick
+static volatile LONG freeze_id;
+
+static int mem_ok(uintptr_t p, size_t n) {   // committed, readable memory
+    MEMORY_BASIC_INFORMATION mb;
+    if (p < 0x10000 || !VirtualQuery((const void *)p, &mb, sizeof mb) || mb.State != MEM_COMMIT ||
+        (mb.Protect & (PAGE_NOACCESS | PAGE_GUARD))) return 0;
+    return p + n <= (uintptr_t)mb.BaseAddress + mb.RegionSize;
+}
+// the RUNTIME_FUNCTION covering pc in its image's .pdata (indirect entries followed), *img its image base; NULL = none
+// (a leaf, or not an image). No loader lock: VirtualQuery gives the image, the headers give the table.
+static PRUNTIME_FUNCTION pdata_find(uintptr_t pc, uintptr_t *img) {
+    MEMORY_BASIC_INFORMATION mb;
+    if (!VirtualQuery((const void *)pc, &mb, sizeof mb) || mb.Type != MEM_IMAGE || !mb.AllocationBase) return NULL;
+    uintptr_t base = (uintptr_t)mb.AllocationBase;
+    const IMAGE_DOS_HEADER *d = (const IMAGE_DOS_HEADER *)base;
+    if (!mem_ok(base, sizeof *d) || d->e_magic != IMAGE_DOS_SIGNATURE) return NULL;
+    const IMAGE_NT_HEADERS64 *nt = (const IMAGE_NT_HEADERS64 *)(base + (uint32_t)d->e_lfanew);
+    if (!mem_ok((uintptr_t)nt, sizeof *nt) || nt->Signature != IMAGE_NT_SIGNATURE ||
+        nt->OptionalHeader.Magic != IMAGE_NT_OPTIONAL_HDR64_MAGIC ||
+        nt->OptionalHeader.NumberOfRvaAndSizes <= IMAGE_DIRECTORY_ENTRY_EXCEPTION) return NULL;
+    IMAGE_DATA_DIRECTORY dd = nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_EXCEPTION];
+    if (!dd.VirtualAddress || dd.Size < sizeof(RUNTIME_FUNCTION) || !mem_ok(base + dd.VirtualAddress, dd.Size)) return NULL;
+    PRUNTIME_FUNCTION rf = (PRUNTIME_FUNCTION)(base + dd.VirtualAddress);
+    DWORD rva = (DWORD)(pc - base), lo = 0, hi = dd.Size / sizeof *rf;
+    while (lo < hi) {
+        DWORD m = lo + (hi - lo) / 2;
+        if (rva < rf[m].BeginAddress) hi = m;
+        else if (rva >= rf[m].EndAddress) lo = m + 1;
+        else {
+            PRUNTIME_FUNCTION e = &rf[m];
+            for (int g = 0; g < 4 && (e->UnwindData & 1); g++) e = (PRUNTIME_FUNCTION)(base + (e->UnwindData & ~1u));
+            *img = base;
+            return e;
+        }
+    }
+    return NULL;
+}
+static uintptr_t pdata_fn_start(uintptr_t pc) {   // its function's start, chained entries followed (as fn_start)
+    uintptr_t base = 0;
+    PRUNTIME_FUNCTION rf = pdata_find(pc, &base);
+    for (int guard = 0; rf && guard < 8; guard++) {
+        const uint8_t *ui = (const uint8_t *)(base + rf->UnwindData);
+        if (!mem_ok((uintptr_t)ui, 4) || !((ui[0] >> 3) & UNW_FLAG_CHAININFO)) break;
+        rf = (PRUNTIME_FUNCTION)(ui + 4 + 2 * ((ui[2] + 1u) & ~1u));
+    }
+    return rf ? base + rf->BeginAddress : 0;
+}
+static void freeze_stack(DWORD tid, int secs) {
+    uintptr_t pc[FREEZE_FRAMES], img[FREEZE_FRAMES];
+    int n = 0;
+    const char *why = NULL;
+    if (!exe_lo) module_range(GetModuleHandleW(NULL), &exe_lo, &exe_hi);
+    if (!self_lo) {
+        HMODULE self = NULL;
+        if (GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                               (LPCWSTR)(void *)freeze_stack, &self)) module_range(self, &self_lo, &self_hi);
+    }
+    HANDLE h = OpenThread(THREAD_SUSPEND_RESUME | THREAD_GET_CONTEXT | THREAD_QUERY_INFORMATION, FALSE, tid);
+    if (!h) { LOG("ragdoll freeze: no game tick for %d s; the game thread %lu can't be opened (%lu)", secs, tid, GetLastError()); return; }
+    if (SuspendThread(h) == (DWORD)-1) {
+        LOG("ragdoll freeze: no game tick for %d s; the game thread %lu can't be suspended (%lu)", secs, tid, GetLastError());
+        CloseHandle(h);
+        return;
+    }
+    CONTEXT c;   // suspended: copy and walk, nothing that may lock
+    memset(&c, 0, sizeof c);
+    c.ContextFlags = CONTEXT_FULL;
+    if (GetThreadContext(h, &c)) {
+        while (n < FREEZE_FRAMES && c.Rip) {
+            uintptr_t base = 0;
+            pc[n] = (uintptr_t)c.Rip;
+            PRUNTIME_FUNCTION rf = pdata_find((uintptr_t)c.Rip, &base);
+            img[n++] = base;
+            if (rf) {
+                void *hd = NULL;
+                DWORD64 ef = 0;
+                RtlVirtualUnwind(UNW_FLAG_NHANDLER, base, c.Rip, rf, &c, &hd, &ef, NULL);
+            } else {   // a leaf: the return address is at rsp
+                if ((c.Rsp & 7) || !mem_ok((uintptr_t)c.Rsp, 8)) break;
+                c.Rip = *(const DWORD64 *)c.Rsp;
+                c.Rsp += 8;
+            }
+        }
+    } else why = "GetThreadContext failed";
+    ResumeThread(h);
+    CloseHandle(h);
+    LONG id = InterlockedIncrement(&freeze_id);
+    LOG("ragdoll freeze #%ld: no game tick for %d s (last tick %u): the game thread %lu, %d frames%s%s (a loading screen can "
+        "do this too)", id, secs, tick_n, tid, n, why ? ": " : "", why ? why : "");
+    uintptr_t bases[16];
+    int nb = 0;
+    for (int i = 0; i < n; i++) {
+        char hex[STACK_BYTES * 3 + 8], lab[200];
+        uintptr_t p = pc[i];
+        if (p >= exe_lo && p < exe_hi) {
+            uintptr_t f = pdata_fn_start(i ? p - 1 : p);   // a return address may sit past its function's end
+            hex[0] = 0;
+            if (f && mem_ok(f, STACK_BYTES)) {
+                char *q = hex + sprintf(hex, "  bytes");
+                for (int k = 0; k < STACK_BYTES; k++) q += sprintf(q, " %02x", ((const uint8_t *)f)[k]);
+            }
+            if (f) LOG("ragdoll freeze #%ld %2d 0x%llx = fn 0x%llx+0x%llx%s%s", id, i, (unsigned long long)(p - g_base_delta),
+                       (unsigned long long)(f - g_base_delta), (unsigned long long)(p - f), fn_label(f, lab, sizeof lab), hex);
+            else LOG("ragdoll freeze #%ld %2d 0x%llx = fn ? (no unwind entry: leaf)", id, i, (unsigned long long)(p - g_base_delta));
+        } else if (p >= self_lo && p < self_hi) {
+            LOG("ragdoll freeze #%ld %2d b4bcoop+0x%llx", id, i, (unsigned long long)(p - self_lo));
+        } else {
+            LOG("ragdoll freeze #%ld %2d image 0x%llx+0x%llx", id, i, (unsigned long long)img[i],
+                (unsigned long long)(img[i] ? p - img[i] : p));
+            int seen = 0;
+            for (int k = 0; k < nb; k++) if (bases[k] == img[i]) seen = 1;
+            if (img[i] && !seen && nb < 16) bases[nb++] = img[i];
+        }
+    }
+    for (int k = 0; k < nb; k++) {   // names last: GetModuleFileName may wait for the loader lock
+        char mod[MAX_PATH];
+        mod[0] = 0;
+        GetModuleFileNameA((HMODULE)bases[k], mod, sizeof mod);
+        const char *b = strrchr(mod, '\\');
+        LOG("ragdoll freeze #%ld image 0x%llx = %s", id, (unsigned long long)bases[k], mod[0] ? (b ? b + 1 : mod) : "?");
+    }
+}
+static DWORD WINAPI freeze_watch(void *arg) {
+    (void)arg;
+    unsigned last = 0;
+    int still = 0;
+    for (;;) {
+        Sleep(1000);
+        unsigned t = *(volatile unsigned *)&tick_n;
+        DWORD tid = game_tid;
+        if (!t || !tid) continue;   // no tick yet
+        if (t != last) {
+            if (still >= FREEZE_S) LOG("ragdoll freeze: the game thread ticks again after %d s", still);
+            last = t;
+            still = 0;
+            continue;
+        }
+        if (++still == FREEZE_S || still == FREEZE_S2) freeze_stack(tid, still);
+    }
+    return 0;
+}
+
 static int is_corpse_class(UClass *c) { for (int k = 0; k < n_corpse_cls; k++) if (c == corpse_cls[k]) return 1; return 0; }
 
 static void fx_note(UClass *c, UObject *r, UObject *outer);   // build 23, below
@@ -2739,11 +2895,18 @@ static int cap_zero(UObject *o, Tracked *x, int32_t *r0) {
     *(int32_t *)((uint8_t *)mut + FP_OFFSET(cap_r_f)) = 0;
     return 1;
 }
+static int mutil_state;   // the hit-by-hit hooks (below): 0 not tried, 1 hooked, -1 not (logged)
 static int caps_wanted(void) { return mode_on && wounds_on && !wound_game && cap_state >= 0 && !admin_is_client(); }
+// Build 43: the cap that stays on a living Common (scan, OnDamage) only without the hit-by-hit hooks. Joon's build 42
+// session froze (25 Oct 08:17:50, the game thread stuck as a garbage collection began, Ridden fighting over a bile jar
+// and taking Blighted acid hits: kinds build 42 left with that cap at 0 except inside the game's pick). Not proven to
+// be the cause, but with the hooks working (build 42 log: every bow pick skipped) the cap is only needed inside the
+// game's wound pick, so with the hooks the rest of the game never sees anything but its own value.
+static int caps_fallback(void) { return caps_wanted() && mutil_state != 1; }
 static void cap_living(Tracked *x) {   // the scan, a living Ridden just listed (game thread)
     char a[160];
     int32_t r0;
-    if (GetCurrentThreadId() != game_tid || !caps_wanted() || !is_common_class(x->a)) return;
+    if (GetCurrentThreadId() != game_tid || !caps_fallback() || !is_common_class(x->a)) return;
     if (cap_zero(x->a, x, &r0) != 1) return;
     n_cap_scan++;
     if (cap_logs < 4) {
@@ -2755,7 +2918,7 @@ static void cap_living(Tracked *x) {   // the scan, a living Ridden just listed 
 // its next hits (this hit's own mutilation is already done). Nothing heavy: a lookup, an int write.
 static void cap_hit(UObject *o, const void *params) {
     char kn[96], a[160], bn[64];
-    if (GetCurrentThreadId() != game_tid || !caps_wanted() || !is_common_class(o)) return;
+    if (GetCurrentThreadId() != game_tid || !caps_fallback() || !is_common_class(o)) return;
     const uint8_t *di = (const uint8_t *)params + FP_OFFSET(dmgi.info);
     if (dmgi.stumble && bool_at(dmgi.stumble, di) == 1) return;
     PushKind *k = kind_of(obj_field(dmgi.type, di), kn, sizeof kn);
@@ -2779,7 +2942,7 @@ static int caps_living_all(void) {
         Tracked *x = &tr[i];
         int32_t r0;
         if (x->died_at || x->done || !ue_object_usable(x->a, x->ai) || !is_common_class(x->a)) continue;
-        if (caps_wanted() && cap_zero(x->a, x, &r0) == 1) n++;
+        if (caps_fallback() && cap_zero(x->a, x, &r0) == 1) n++;
     }
     return n;
 }
@@ -2795,11 +2958,13 @@ static int caps_living_all(void) {
 //   - at 0x14172b4b0 the hit's damage type is noted for the length of the call (a stack: a hit can cause hits);
 //   - at 0x141a24a30, by that hit's kind: a no-wound kind (/ragdoll wounds none, default the bow): the pick is skipped,
 //     no wound of the game's at all for that hit, the head pop included (MaxWounds 0 didn't stop it, build 41); a kind
-//     whose wounds are ours (the wound and head-only kinds): MaxRuptureWounds 0 (the scan's cap), so only the game's
+//     whose wounds are ours (the wound and head-only kinds): MaxRuptureWounds 0 for this pick, so only the game's
 //     BreakOffs (the head on a killing headshot, a limb where the shot lands); any other kind (melee, blasts, fire):
-//     the game's own values for this pick, then 0 again; a hit whose damage type can't be read: the cap stays.
+//     the game's own values; a hit whose damage type can't be read: 0 for this pick. Build 43: after the pick the
+//     value it had goes back (the game's own: with the hooks in, nothing else sets it).
 // The damage type is read through the OnDamage event's DamageInfo struct (dmgi), checked to be the same 0xC0 bytes.
-// Without the hooks (signature mismatch) the scan's cap alone stays: every kind without the game's open wounds.
+// Without the hooks (signature mismatch) the scan's cap stays instead (caps_fallback): every kind without the game's
+// open wounds.
 #define ADDR_HIT_APPLY  VA(0x14172b4b0ull)
 #define ADDR_MUT_PICK   VA(0x141a24a30ull)
 static const uint8_t SIG_HIT_APPLY[] = {0x40,0x53,0x41,0x56,0x41,0x57,0x48,0x81,0xec,0x40,0x01,0x00,0x00,0x83,0xba,0xb4,
@@ -2810,7 +2975,6 @@ typedef void (*HitApplyFn)(UObject *comp, const void *dinfo, void *r8, void *r9)
 typedef void (*MutPickFn)(UObject *mut, void *rdx, void *r8, void *r9);
 static HitApplyFn orig_hit_apply;
 static MutPickFn orig_mut_pick;
-static int mutil_state;               // 0 not tried, 1 hooked, -1 not (logged)
 static int dinfo_ok;                  // 0 not checked, 1 the DamageInfo struct is the 0xC0 bytes, -1 not (logged)
 #define HIT_STACK 8
 static UObject *hit_dtype[HIT_STACK];
@@ -2855,7 +3019,7 @@ static void mut_pick_detour(UObject *mut, void *rdx, void *r8, void *r9) {
     if (!dt) snprintf(kn, sizeof kn, "-");
     int32_t w, r;
     if (!cap_orig(mut, &w, &r)) { orig_mut_pick(mut, rdx, r8, r9); return; }
-    int32_t *pr = (int32_t *)((uint8_t *)mut + FP_OFFSET(cap_r_f));
+    int32_t *pr = (int32_t *)((uint8_t *)mut + FP_OFFSET(cap_r_f)), was = *pr;   // build 43: put back after the pick
     const char *what;
     int rule = pick_rule(k);
     if (rule == PICK_SKIP) {
@@ -2865,13 +3029,15 @@ static void mut_pick_detour(UObject *mut, void *rdx, void *r8, void *r9) {
         n_pick_game++;
         *pr = r;
         orig_mut_pick(mut, rdx, r8, r9);
-        *pr = 0;
+        *pr = was;
         what = "the game's own (its open wounds for this hit)";
     } else {
         if (k) n_pick_ours++; else n_pick_unknown++;
         *pr = 0;
         orig_mut_pick(mut, rdx, r8, r9);
-        what = k ? "no open wounds (MaxRuptureWounds 0): the game's head or limb only" : "damage type not read: no open wounds";
+        *pr = was;
+        what = k ? "no open wounds (MaxRuptureWounds 0 for this pick): the game's head or limb only" :
+                   "damage type not read: no open wounds";
     }
     if (pick_logs < 16) {
         pick_logs++;
@@ -2897,7 +3063,7 @@ static void mutil_arm(void) {   // game thread, at /ragdoll on; the hooks stay (
     }
     mutil_state = 1;
     LOG("ragdoll wounds: hooked the game's hit and wound pick: no-wound kinds (%s) get none of the game's wounds, ours no "
-        "open wounds, the rest the game's own", wound_none);
+        "open wounds (only during the pick), the rest the game's own", wound_none);
 }
 
 // /ragdoll wounds game on: every Ridden we changed gets the game's values back (game thread)
@@ -3858,7 +4024,6 @@ static int apply(Tracked *t) {
     return 0;
 }
 
-static unsigned tick_n;
 static int any_ragdolled(void) { for (int i = 0; i < ntr; i++) if (tr[i].ragdolled) return 1; return 0; }
 
 // The game brought a body we ragdolled back to life (actor reuse): put it back the way it was. The mesh was detached
@@ -4881,6 +5046,8 @@ static void ini_pair(const char *k, const char *v, void *ctx) { (void)ctx; if (!
 
 int ragdoll_init(void) {
     kinds_reset();
+    HANDLE wd = CreateThread(NULL, 0, freeze_watch, NULL, 0, NULL);   // build 43: logs the game thread's stack if it stops
+    if (wd) CloseHandle(wd); else LOG("ragdoll freeze: the watchdog thread could not start (%lu)", GetLastError());
     cmds_ini_each(ini_pair, NULL);   // b4bcoop.ini (build 36)
     char kinds[600];
     size_t m = 0;

@@ -37,6 +37,9 @@ bodies thrown by shots and blasts, and dismemberment. Everything else is b4b-coo
 - Performance lightly tested: no stutters in hordes on a fairly strong PC. Not tried on weak machines.
 - The ragdolls run on each PC that has this build. Two parts come from the host and reach every player: refused blood
   bags and lost limbs.
+- One freeze seen in testing (25 Oct 2026, build 42, cause not found). If the game ever stops for 10 s, the log
+  (`Gobi\Binaries\Win64\b4bcoop-*.log`) records where the game's main thread is stuck (`ragdoll freeze` lines):
+  please send it.
 
 ## Install
 
