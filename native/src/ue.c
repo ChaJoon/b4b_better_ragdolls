@@ -173,3 +173,39 @@ int ue_num_clients(UObject *world) {
 const char *ue_world_package(UObject *world, char *buf, size_t len) {
     return ue_obj_name(U_OUTER(world), buf, len);
 }
+
+// ---- enums (fork: ragdoll's helpers, shared with cheats.c's /give, build 42) ----
+// Layout as tools/sdkdump.py (which dumped all 1442 enums) and docs/NOTES.md: FByteProperty::Enum and
+// FEnumProperty::UnderlyingProp at +0x78, FEnumProperty::Enum at +0x80; UEnum::Names (TArray<TPair<FName, int64>>,
+// 16-byte entries) at +0x48, stock 0x40 + 8 for this engine's bigger UObject. (Ragdoll build 27 read +0x40, CppType's
+// length fields, as the array and crashed the game at the first body.)
+UObject *ue_prop_enum(FField *p) {
+    char t[64], b[96];
+    if (!p) return NULL;
+    ue_name(*(FName *)FF_CLASS(p), t, sizeof t);
+    UObject *e = !strcmp(t, "EnumProperty") ? *(UObject **)((char *)p + 0x80) :
+                 !strcmp(t, "ByteProperty") ? *(UObject **)((char *)p + 0x78) : NULL;
+    if (!e || U_INDEX(e) < 0 || U_INDEX(e) >= ue_num_objects() || ue_object_at(U_INDEX(e)) != e || !U_CLASS(e)) return NULL;
+    ue_obj_name(U_CLASS(e), b, sizeof b);
+    return !strcmp(b, "Enum") || !strcmp(b, "UserDefinedEnum") ? e : NULL;
+}
+const TArray *ue_enum_names(UObject *e) {
+    const TArray *names = e ? (const TArray *)((const char *)e + 0x48) : NULL;
+    return names && names->data && names->num > 0 && names->num <= 256 && names->max >= names->num ? names : NULL;
+}
+const char *ue_enum_entry(const TArray *names, int i, char *b, size_t n, int64_t *v) {
+    const uint8_t *pr = (const uint8_t *)names->data + (size_t)i * 16;
+    ue_name(*(const FName *)pr, b, n);
+    if (v) *v = *(const int64_t *)(pr + 8);
+    const char *sh = strstr(b, "::");
+    return sh ? sh + 2 : b;
+}
+const char *ue_enum_value_name(FField *p, int64_t v, char *b, size_t n) {
+    const TArray *names = ue_enum_names(ue_prop_enum(p));
+    for (int i = 0; names && i < names->num; i++) {
+        int64_t x;
+        const char *s = ue_enum_entry(names, i, b, n, &x);
+        if (x == v) { if (s != b) memmove(b, s, strlen(s) + 1); return b; }
+    }
+    return NULL;
+}

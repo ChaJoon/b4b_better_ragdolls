@@ -1395,21 +1395,31 @@ static void set_on(int en, Out *o) {
     notice(en ? "host enabled cheats" : "host disabled cheats");
 }
 
-// ---- /give: a weapon into a hero's inventory (fork, build 41: Joon's saferoom test area had no weapons) ----
-// Weapons are item rows of Weapons_DT (row names are GUIDs; the dev build's giveitem found AR02 there by its
-// blueprint AR02_1_BP), and of every other loaded data table with the same row struct (weapons of later updates may
-// have their own). Each row is named by what its fields hold: name and string fields, texts (the shown name: the first
-// text, preferring a field called ...Name / ...Title), object and class fields and soft references (the last part of
-// the path). The code is the letters and digits before the first '_' of a class name: AR02_1_BP_C -> AR02. The row's
-// layout goes into the log once ("cheats: weapon rows ..."): if names come out wrong, that line says why. Given with
-// the inventory's ServerAddItemsOfHandle (the server side of a pickup): the weapon takes its slot, the one there is
-// replaced, not dropped (dev giveitem, 24 Oct). Its ammo is whatever the game gives a new weapon (unchecked).
-typedef struct { UObject *table; FName row; char code[24], shown[64], key[200]; } Weapon;
-#define MAX_WEAPONS 192
-static Weapon weapons[MAX_WEAPONS];
-static int n_weapons;
-static UObject *weapons_world;   // the list is read again in another world (tables can load with a map)
-static int weapons_logged;
+// ---- /give: an item into a hero's inventory (fork, builds 41-42: Joon's saferoom test area had no weapons) ----
+// Items are rows of struct ItemRow (build 41 log: Slug, Type, EquipSlot, Quality, ItemClass, DisplayName, ...) in
+// Weapons_DT and every other loaded table with that struct (14 in a mission: accessories, attachments, ...). Build 41
+// named a row after the first class among its fields and stopped at 192 rows: every M4 tier and the legendary
+// Pestilence came out "AR01", /give AR01 gave the same row again and again, and the bow, in a later table, was never read
+// (Joon, 25 Oct). Build 42 reads the fields by name: the code is the start of the ItemClass's name (AR01_1_BP_C ->
+// AR01), rows with the same shown name and code are one item and its tiers (Quality), and every row of every table is
+// read. Weapons come first (Type named "Weapon"; if no row has that, EquipSlot Primary/Secondary/Melee) and are what
+// /give list shows; /give list all shows every item. Each item has a number (#n), the same in both lists.
+// /give <name|code|#n> [tier] [player]: the item's best tier unless one is named. Layout, enum names and counts go into
+// the log once ("cheats: give: ..."). Given with the inventory's ServerAddItemsOfHandle (the server side of a pickup):
+// the item takes its slot, the one there is replaced, not dropped (dev giveitem, 24 Oct). Its ammo is whatever the game
+// gives a new weapon (unchecked).
+#define MAX_GIVE_ROWS  3072
+#define MAX_GIVE_ITEMS 1536
+typedef struct { UObject *table; FName row; int64_t q; } GRow;   // one row: one tier of an item
+typedef struct { char code[24], shown[64], slot[24], key[160]; int first, n, weapon; } GItem;   // its rows [first, first+n)
+typedef struct { GRow r; char code[24], shown[64], slot[24], type[24], key[160], sort[64]; int weapon; } GRead;
+static GRow g_rows[MAX_GIVE_ROWS];
+static GItem g_items[MAX_GIVE_ITEMS];
+static GRead g_read[MAX_GIVE_ROWS];   // scratch while reading
+static int n_grows, n_gitems, n_gweapons, g_dropped;
+static UObject *give_world;           // the list is read again in another world (tables load with a map)
+static int give_logged;
+static FField *gf_type, *gf_slot, *gf_q, *gf_cls, *gf_name, *gf_slug;
 
 static void text_of(const void *ftext, char *buf, size_t n) {   // FText -> ASCII (KismetTextLibrary.Conv_TextToString)
     Call c;
@@ -1423,65 +1433,69 @@ static void text_of(const void *ftext, char *buf, size_t n) {   // FText -> ASCI
     ascii_of(out, buf, n);
     if (out->data && !memcmp((void *)ADDR_FMEMORY_FREE, SIG_FREE, sizeof SIG_FREE)) ((void (*)(void *))ADDR_FMEMORY_FREE)(out->data);
 }
-static void weapon_code(const char *cls_name, char *code, size_t n) {   // AR02_1_BP_C -> AR02 (needs a letter and a digit)
+// AR01_1_BP_C -> AR01, Molotov_1_Item_BP_C -> Molotov: letters and digits before the first '_' (at least 2)
+static void give_code_of(const char *cls_name, char *code, size_t n) {
     size_t k = 0;
-    int digit = 0, letter = 0;
     for (; cls_name[k] && cls_name[k] != '_' && k + 1 < n; k++) {
+        if (!isalnum((unsigned char)cls_name[k])) { k = 0; break; }
         code[k] = cls_name[k];
-        if (isdigit((unsigned char)cls_name[k])) digit = 1; else if (isalpha((unsigned char)cls_name[k])) letter = 1;
     }
-    code[k] = 0;
-    if (!digit || !letter) code[0] = 0;
+    code[k < 2 ? 0 : k] = 0;
 }
-static void key_add(Weapon *w, const char *s) {
-    size_t m = strlen(w->key);
-    if (s && *s && m + strlen(s) + 2 < sizeof w->key) snprintf(w->key + m, sizeof w->key - m, "%s%s", m ? " " : "", s);
+static void key_add(char *key, size_t n, const char *s) {
+    size_t m = strlen(key);
+    if (s && *s && m + strlen(s) + 2 < n) snprintf(key + m, n - m, "%s%s", m ? " " : "", s);
 }
-static int weapon_cmp(const void *a, const void *b) {
-    const Weapon *x = a, *y = b;
-    int c = _stricmp(x->code[0] ? x->code : x->shown, y->code[0] ? y->code : y->shown);
-    return c ? c : _stricmp(x->shown, y->shown);
+static int64_t enum_at(FField *p, const uint8_t *row) {   // an enum field's value (1, 2, 4 or 8 bytes)
+    const uint8_t *a = row + FP_OFFSET(p);
+    int sz = FP_ELSIZE(p);
+    return sz == 1 ? a[0] : sz == 2 ? *(const uint16_t *)a : sz == 4 ? *(const int32_t *)a : *(const int64_t *)a;
 }
-static void weapon_read(Weapon *w, UObject *rs, const uint8_t *row) {
-    char t[64], pn[64], v[160];
-    int text_pref = 0;
-    for (UStruct *st = rs; st; st = *(UStruct **)((char *)st + 0x48)) {   // US_SUPER
-        for (FField *p = US_CHILDPROPS(st); p; p = FF_NEXT(p)) {
-            ue_name(*(FName *)FF_CLASS(p), t, sizeof t);
-            ue_name(FF_NAME(p), pn, sizeof pn);
-            const uint8_t *a = row + FP_OFFSET(p);
-            v[0] = 0;
-            if (!strcmp(t, "NameProperty")) ue_name(*(const FName *)a, v, sizeof v);
-            else if (!strcmp(t, "StrProperty")) ascii_of((const FString *)a, v, sizeof v);
-            else if (!strcmp(t, "TextProperty")) {
-                text_of(a, v, sizeof v);
-                int pref = strstr(pn, "Name") || strstr(pn, "Title");
-                if (v[0] && (!w->shown[0] || (pref && !text_pref))) { snprintf(w->shown, sizeof w->shown, "%s", v); text_pref = pref; }
-            } else if (!strcmp(t, "ObjectProperty") || !strcmp(t, "ClassProperty")) {
-                UObject *o = *(UObject *const *)a;
-                if (o) ue_obj_name(o, v, sizeof v);
-            } else if ((!strcmp(t, "SoftClassProperty") || !strcmp(t, "SoftObjectProperty")) && FP_ELSIZE(p) == 0x28) {
-                char path[200];   // FSoftObjectPtr: weak pointer, tag, then FSoftObjectPath {FName AssetPathName, ...}
-                FName an = *(const FName *)(a + 0x10);
-                if (an.idx) {
-                    ue_name(an, path, sizeof path);
-                    const char *dot = strrchr(path, '.'), *sl = strrchr(path, '/');
-                    snprintf(v, sizeof v, "%s", dot ? dot + 1 : sl ? sl + 1 : path);
-                }
-            }
-            if (!v[0]) continue;
-            key_add(w, v);
-            size_t L = strlen(v);
-            if (!w->code[0] && L > 2 && !strcmp(v + L - 2, "_C")) weapon_code(v, w->code, sizeof w->code);
-        }
-    }
+static const char *enum_txt(FField *p, const uint8_t *row, char *b, size_t n) {   // "Weapon", or the number, "" = no field
+    if (!p) { b[0] = 0; return b; }
+    int64_t v = enum_at(p, row);
+    if (!ue_enum_value_name(p, v, b, n)) snprintf(b, n, "%lld", (long long)v);
+    return b;
 }
-static int weapons_load(void) {
+static const char *tier_name(int64_t q, char *b, size_t n) {   // "epic"
+    if (!gf_q || !ue_enum_value_name(gf_q, q, b, n)) snprintf(b, n, "%lld", (long long)q);
+    for (char *p = b; *p; p++) *p = (char)tolower((unsigned char)*p);
+    return b;
+}
+static void soft_class_name(const uint8_t *a, char *v, size_t n) {   // FSoftObjectPtr: weak ptr, tag, FSoftObjectPath
+    char path[200];
+    FName an = *(const FName *)(a + 0x10);
+    v[0] = 0;
+    if (!an.idx) return;
+    ue_name(an, path, sizeof path);
+    const char *dot = strrchr(path, '.'), *sl = strrchr(path, '/');
+    snprintf(v, n, "%s", dot ? dot + 1 : sl ? sl + 1 : path);
+}
+static int is_weapon_type(const char *t) {   // Type "Weapon" (not a weapon attachment or skin)
+    char l[32];
+    norm(t, l, sizeof l);
+    return !strcmp(l, "weapon");
+}
+static int is_weapon_slot(const char *s) {
+    char l[32];
+    norm(s, l, sizeof l);
+    return strstr(l, "primary") || strstr(l, "secondary") || strstr(l, "melee");
+}
+static int gread_cmp(const void *a, const void *b) {   // weapons first, then by slot, name, code, tier
+    const GRead *x = a, *y = b;
+    if (x->weapon != y->weapon) return y->weapon - x->weapon;
+    int c = _stricmp(x->slot, y->slot);
+    if (!c) c = strcmp(x->sort, y->sort);
+    if (!c) c = _stricmp(x->code, y->code);
+    if (!c) c = x->r.q < y->r.q ? -1 : x->r.q > y->r.q;
+    return c;
+}
+static int give_load(void) {
     char b[160], line[2000];
     UObject *w = ue_world();
-    if (n_weapons && w == weapons_world) return n_weapons;
-    n_weapons = 0;
-    weapons_world = w;
+    if (n_gitems && w == give_world) return n_gitems;
+    n_gitems = n_grows = n_gweapons = g_dropped = 0;
+    give_world = w;
     UClass *dtc = cls("DataTable");
     UObject *wdt = NULL;
     for (int32_t i = 0, n = ue_num_objects(); dtc && i < n && !wdt; i++) {
@@ -1490,18 +1504,11 @@ static int weapons_load(void) {
     }
     UObject *rs = wdt ? DT_ROWSTRUCT(wdt) : NULL;
     if (!rs) { LOG("cheats: give: no Weapons_DT loaded"); return 0; }
-    if (!weapons_logged) {
-        weapons_logged = 1;
-        size_t k = (size_t)snprintf(line, sizeof line, "cheats: weapon rows %s (%d bytes):", ue_obj_name(rs, b, sizeof b), US_PROPSSIZE(rs));
-        for (UStruct *st = rs; st && k + 80 < sizeof line; st = *(UStruct **)((char *)st + 0x48))
-            for (FField *p = US_CHILDPROPS(st); p && k + 80 < sizeof line; p = FF_NEXT(p)) {
-                char t[64], pn[64];
-                k += (size_t)snprintf(line + k, sizeof line - k, " %s:%s@0x%x", ue_name(FF_NAME(p), pn, sizeof pn),
-                                      ue_name(*(FName *)FF_CLASS(p), t, sizeof t), FP_OFFSET(p));
-            }
-        LOG("%s", line);
-    }
-    int tables = 0;
+    gf_type = ue_find_prop(rs, "Type"); gf_slot = ue_find_prop(rs, "EquipSlot"); gf_q = ue_find_prop(rs, "Quality");
+    gf_cls = ue_find_prop(rs, "ItemClass"); gf_name = ue_find_prop(rs, "DisplayName"); gf_slug = ue_find_prop(rs, "Slug");
+    if (gf_cls && FP_ELSIZE(gf_cls) != 0x28) gf_cls = NULL;   // FSoftObjectPtr as build 41 read it
+    // read every row of every table with that struct
+    int tables = 0, nr = 0, by_type = 0, by_slot = 0;
     for (int32_t i = 0, n = ue_num_objects(); dtc && i < n; i++) {
         UObject *t = ue_object_at(i);
         if (!t || (U_FLAGS(t) & LIVE_FLAGS) || !ue_is_a(t, dtc) || DT_ROWSTRUCT(t) != rs) continue;
@@ -1510,59 +1517,169 @@ static int weapons_load(void) {
         const uint32_t *bits = *(uint32_t *const *)((char *)m + 0x20);
         if (!bits) bits = (const uint32_t *)((char *)m + 0x10);
         int nbits = *(int32_t *)((char *)m + 0x28);
-        for (int r = 0; m->data && r < m->num && r < nbits && n_weapons < MAX_WEAPONS; r++) {
+        for (int r = 0; m->data && r < m->num && r < nbits; r++) {
             if (!((bits[r >> 5] >> (r & 31)) & 1)) continue;
             char *e = (char *)m->data + (size_t)r * 0x18;
             const uint8_t *row = *(const uint8_t **)(e + 8);
             if (!row) continue;
-            Weapon *x = &weapons[n_weapons++];
+            if (nr == MAX_GIVE_ROWS) { g_dropped++; continue; }
+            GRead *x = &g_read[nr++];
             memset(x, 0, sizeof *x);
-            x->table = t;
-            x->row = *(FName *)e;
-            weapon_read(x, rs, row);
-            if (!x->shown[0]) snprintf(x->shown, sizeof x->shown, "%s", x->code[0] ? x->code : ue_name(x->row, b, sizeof b));
-            if (n_weapons <= 3) LOG("cheats: weapon row %s of %s: code %s, shown \"%s\", fields: %s", ue_name(x->row, b, sizeof b),
-                                    ue_obj_name(t, line, sizeof line), x->code[0] ? x->code : "-", x->shown, x->key);
+            x->r.table = t; x->r.row = *(FName *)e;
+            x->r.q = gf_q ? enum_at(gf_q, row) : 0;
+            char cn[96] = "";
+            if (gf_cls) soft_class_name(row + FP_OFFSET(gf_cls), cn, sizeof cn);
+            give_code_of(cn, x->code, sizeof x->code);
+            if (gf_name) text_of(row + FP_OFFSET(gf_name), x->shown, sizeof x->shown);
+            if (!x->shown[0]) snprintf(x->shown, sizeof x->shown, "%s", x->code[0] ? x->code : cn[0] ? cn : ue_name(x->r.row, b, sizeof b));
+            enum_txt(gf_type, row, x->type, sizeof x->type);
+            enum_txt(gf_slot, row, x->slot, sizeof x->slot);
+            norm(x->shown, x->sort, sizeof x->sort);
+            key_add(x->key, sizeof x->key, x->code); key_add(x->key, sizeof x->key, cn);
+            if (gf_slug) key_add(x->key, sizeof x->key, ue_name(*(const FName *)(row + FP_OFFSET(gf_slug)), b, sizeof b));
+            key_add(x->key, sizeof x->key, x->type); key_add(x->key, sizeof x->key, x->slot);
+            if (is_weapon_type(x->type)) by_type++;
+            if (is_weapon_slot(x->slot)) by_slot++;
         }
     }
-    qsort(weapons, n_weapons, sizeof weapons[0], weapon_cmp);
-    LOG("cheats: give: %d weapons in %d table(s)", n_weapons, tables);
-    return n_weapons;
+    for (int i = 0; i < nr; i++)   // which rows are weapons: by Type if any row says Weapon, else by slot, else all
+        g_read[i].weapon = by_type ? is_weapon_type(g_read[i].type) : by_slot ? is_weapon_slot(g_read[i].slot) : 1;
+    qsort(g_read, (size_t)nr, sizeof g_read[0], gread_cmp);
+    // items: runs of rows with the same shown name and code (tiers in Quality order)
+    for (int i = 0; i < nr; i++) {
+        GRead *x = &g_read[i];
+        GItem *it = n_gitems ? &g_items[n_gitems - 1] : NULL;
+        if (!it || it->weapon != x->weapon || strcmp(g_read[i - 1].sort, x->sort) || _stricmp(it->code, x->code) ||
+            _stricmp(it->slot, x->slot)) {
+            if (n_gitems == MAX_GIVE_ITEMS) { g_dropped++; continue; }
+            it = &g_items[n_gitems++];
+            memset(it, 0, sizeof *it);
+            snprintf(it->code, sizeof it->code, "%s", x->code);
+            snprintf(it->shown, sizeof it->shown, "%s", x->shown);
+            snprintf(it->slot, sizeof it->slot, "%s", x->slot);
+            snprintf(it->key, sizeof it->key, "%s", x->key);
+            it->first = n_grows;
+            it->weapon = x->weapon;
+            if (x->weapon) n_gweapons++;
+        }
+        g_rows[n_grows++] = x->r;   // nr <= MAX_GIVE_ROWS: always room
+        it->n++;
+    }
+    if (!give_logged) {   // once per game start: the layout and what the enums are called
+        give_logged = 1;
+        size_t k = (size_t)snprintf(line, sizeof line, "cheats: give: item rows %s (%d bytes):", ue_obj_name(rs, b, sizeof b), US_PROPSSIZE(rs));
+        for (UStruct *st = rs; st && k + 80 < sizeof line; st = *(UStruct **)((char *)st + 0x48))
+            for (FField *p = US_CHILDPROPS(st); p && k + 80 < sizeof line; p = FF_NEXT(p)) {
+                char t[64], pn[64];
+                k += (size_t)snprintf(line + k, sizeof line - k, " %s:%s@0x%x", ue_name(FF_NAME(p), pn, sizeof pn),
+                                      ue_name(*(FName *)FF_CLASS(p), t, sizeof t), FP_OFFSET(p));
+            }
+        LOG("%s", line);
+        FField *ef[3] = {gf_type, gf_slot, gf_q};
+        const char *en[3] = {"Type", "EquipSlot", "Quality"};
+        for (int f = 0; f < 3; f++) {
+            const TArray *names = ue_enum_names(ue_prop_enum(ef[f]));
+            k = (size_t)snprintf(line, sizeof line, "cheats: give: %s %s:", en[f], ef[f] ? "values" : "MISSING");
+            for (int i = 0; names && i < names->num && k + 64 < sizeof line; i++) {
+                int64_t v;
+                const char *s = ue_enum_entry(names, i, b, sizeof b, &v);
+                k += (size_t)snprintf(line + k, sizeof line - k, " %s=%lld", s, (long long)v);
+            }
+            LOG("%s", line);
+        }
+    }
+    LOG("cheats: give: %d rows in %d table(s): %d items, %d of them weapons (by %s)%s", n_grows, tables, n_gitems,
+        n_gweapons, by_type ? "Type" : by_slot ? "EquipSlot" : "nothing: all", g_dropped ? "; SOME LEFT OUT (list full)" : "");
+    for (int i = 0, shown = 0; i < n_gitems && shown < 3; i++) {
+        if (!g_items[i].weapon) continue;
+        shown++;
+        LOG("cheats: give: #%d %s \"%s\" (%s), %d tier(s), key: %s", i + 1, g_items[i].code[0] ? g_items[i].code : "-",
+            g_items[i].shown, g_items[i].slot, g_items[i].n, g_items[i].key);
+    }
+    return n_gitems;
 }
-// by code or shown name: exact (letters/digits, any case), else the one substring match (code, shown name, fields).
-// 1 = *hit, 0 = none, -n = n matches (listed, up to max_list)
-static int weapon_match(const char *want, Weapon **hit, Out *list, int max_list) {
-    char w[96], a[96], b[96], c[220];
-    norm(want ? want : "", w, sizeof w);
-    int sub = 0, shown = 0;
-    Weapon *first = NULL;
-    for (int i = 0; i < n_weapons; i++) {
-        Weapon *x = &weapons[i];
-        norm(x->code, a, sizeof a); norm(x->shown, b, sizeof b); norm(x->key, c, sizeof c);
-        if (w[0] && ((a[0] && !strcmp(a, w)) || !strcmp(b, w))) { *hit = x; return 1; }
-        if (!w[0] || (a[0] && strstr(a, w)) || strstr(b, w) || strstr(c, w)) {
-            if (!first) first = x;
-            sub++;
-            if (list && shown++ < max_list) out_printf(list, "  %-8s %s\n", x->code[0] ? x->code : "-", x->shown);
-        }
+static void item_tiers(const GItem *it, char *out, size_t n) {   // "common uncommon rare epic"
+    char b[64];
+    size_t k = 0;
+    out[0] = 0;
+    for (int j = 0; j < it->n && k + 2 < n; j++)
+        k += (size_t)snprintf(out + k, n - k, "%s%s", j ? " " : "", tier_name(g_rows[it->first + j].q, b, sizeof b));
+}
+static void item_line(Out *o, int i) {
+    char tiers[200];
+    item_tiers(&g_items[i], tiers, sizeof tiers);
+    out_printf(o, "  #%-4d %-8s %s: %s\n", i + 1, g_items[i].code[0] ? g_items[i].code : "-", g_items[i].shown, tiers);
+}
+// the items `spec` names: #n; else an exact shown name, an exact code, a part of one (code, name, class, slug); among
+// the weapons first, then every item. Returns how many (the first `max` in hits)
+static int give_find(const char *spec, int *hits, int max) {
+    if (spec[0] == '#' && isdigit((unsigned char)spec[1])) {
+        int i = atoi(spec + 1);
+        if (i < 1 || i > n_gitems) return 0;
+        hits[0] = i - 1;
+        return 1;
     }
-    if (sub == 1) { *hit = first; return 1; }
-    return -sub;
+    char w[96], a[96], c[200];
+    norm(spec, w, sizeof w);
+    if (!w[0]) return 0;
+    for (int pass = 0; pass < 2; pass++)
+        for (int mode = 0; mode < 3; mode++) {
+            int n = 0;
+            for (int i = 0; i < n_gitems; i++) {
+                GItem *x = &g_items[i];
+                if (!pass && !x->weapon) continue;
+                int hit;
+                if (mode == 0) { norm(x->shown, a, sizeof a); hit = !strcmp(a, w); }
+                else if (mode == 1) { norm(x->code, a, sizeof a); hit = a[0] && !strcmp(a, w); }
+                else {
+                    norm(x->code, a, sizeof a); norm(x->key, c, sizeof c);
+                    char s[96];
+                    norm(x->shown, s, sizeof s);
+                    hit = (a[0] && strstr(a, w)) || strstr(s, w) || strstr(c, w);
+                }
+                if (hit) { if (n < max) hits[n] = i; n++; }
+            }
+            if (n) return n;
+        }
+    return 0;
+}
+// a word naming a Quality tier ("epic", "leg"): its value, -1 if none
+static int64_t tier_of_word(const char *word) {
+    char w[32], b[96], s[96];
+    norm(word, w, sizeof w);
+    const TArray *names = gf_q ? ue_enum_names(ue_prop_enum(gf_q)) : NULL;
+    size_t wl = strlen(w);
+    for (int i = 0; names && wl && i < names->num; i++) {
+        int64_t v;
+        norm(ue_enum_entry(names, i, b, sizeof b, &v), s, sizeof s);
+        if (!strcmp(s, w) || (wl >= 3 && !strncmp(s, w, wl))) return v;
+    }
+    return -1;
 }
 static void cmd_give(char *rest, Out *o) {
     char *a = rest ? strtok(rest, " ") : NULL;
-    if (!a) { out_printf(o, "usage: /give <weapon code or name> [player]  |  /give list [filter]\n"); return; }
-    if (!weapons_load()) { out_printf(o, "/give: no weapon table loaded here (it loads with a mission)\n"); return; }
-    Weapon *h = NULL;
+    if (!a) { out_printf(o, "usage: /give <name|code|#n> [tier] [player]  |  /give list [all] [filter]\n"); return; }
+    if (!give_load()) { out_printf(o, "/give: no weapon table loaded here (it loads with a mission)\n"); return; }
     if (!_stricmp(a, "list")) {
         char *f = strtok(NULL, "");
-        int r = weapon_match(f, &h, o, 60);
-        if (r == 1 && h && f) out_printf(o, "  %-8s %s\n", h->code[0] ? h->code : "-", h->shown);
-        else if (r < -60) out_printf(o, "... %d weapons, narrow it down: /give list <filter>\n", -r);
-        else if (!r) out_printf(o, "no weapon matches '%s'\n", f ? f : "");
+        int all = 0;
+        if (f && !_strnicmp(f, "all", 3) && (!f[3] || f[3] == ' ')) { all = 1; f = f[3] ? f + 4 : NULL; }
+        char w[96], s[96], c[200], k[96];
+        norm(f ? f : "", w, sizeof w);
+        int n = 0;
+        for (int i = 0; i < n_gitems; i++) {
+            GItem *x = &g_items[i];
+            if (!all && !x->weapon) continue;
+            norm(x->shown, s, sizeof s); norm(x->key, c, sizeof c); norm(x->code, k, sizeof k);
+            if (w[0] && !strstr(s, w) && !strstr(c, w) && !strstr(k, w)) continue;
+            if (n++ < 60) item_line(o, i);
+        }
+        if (!n) out_printf(o, "no %s matches '%s'%s\n", all ? "item" : "weapon", f ? f : "", all ? "" : " (/give list all <filter>: every item)");
+        else if (n > 60) out_printf(o, "... %d more: /give list %s<part of a name>\n", n - 60, all ? "all " : "");
+        else out_printf(o, "/give <name|code|#n> [tier] [player]%s\n", all ? "" : "  (/give list all: every item)");
         return;
     }
-    // the name may have spaces; a trailing word naming a player (or "all"/"me") is the target (as /card)
+    // [player] last (a name from /players, #n, me, all; as /card), then [tier], the rest names the item
     char name[128], *who = NULL, *more = strtok(NULL, "");
     snprintf(name, sizeof name, "%s%s%s", a, more ? " " : "", more ? more : "");
     char *sp = strrchr(name, ' ');
@@ -1572,16 +1689,36 @@ static void cmd_give(char *rest, Out *o) {
         for (int i = 0; i < n && !is_player; i++) { admin_display_name(pa[i], nm, sizeof nm); if (!_stricmp(nm, sp + 1)) is_player = 1; }
         if (is_player) { *sp = 0; who = sp + 1; }
     }
-    int r = weapon_match(name, &h, NULL, 0);
+    int64_t tier = -1;
+    sp = strrchr(name, ' ');
+    if (sp && (tier = tier_of_word(sp + 1)) >= 0) *sp = 0;
+    int hits[12];
+    int r = give_find(name, hits, 12);
     if (r != 1) {
-        if (!r) out_printf(o, "no weapon matches '%s' (/give list [filter])\n", name);
-        else { out_printf(o, "'%s' matches %d weapons:\n", name, -r); weapon_match(name, &h, o, 12); }
+        if (!r) out_printf(o, "no item matches '%s' (/give list [all] [filter])\n", name);
+        else {
+            out_printf(o, "'%s' matches %d items, pick one by name or #n:\n", name, r);
+            for (int i = 0; i < r && i < 12; i++) item_line(o, hits[i]);
+        }
         return;
+    }
+    GItem *h = &g_items[hits[0]];
+    const GRow *row = &g_rows[h->first + h->n - 1];   // the best tier
+    char tb[64], tiers[200];
+    if (tier >= 0) {
+        row = NULL;
+        for (int j = 0; j < h->n; j++) if (g_rows[h->first + j].q == tier) row = &g_rows[h->first + j];
+        if (!row) {
+            item_tiers(h, tiers, sizeof tiers);
+            out_printf(o, "%s has no %s tier (it has: %s)\n", h->shown, tier_name(tier, tb, sizeof tb), tiers);
+            return;
+        }
     }
     Targets t;
     if (!targets(who, &t, o)) return;
     char rn[96];
-    ue_name(h->row, rn, sizeof rn);
+    ue_name(row->row, rn, sizeof rn);
+    tier_name(row->q, tb, sizeof tb);
     int n = 0;
     for (int i = 0; i < t.n; i++) {
         UObject *inv = inventory_of(ps_pawn(t.ps[i]));
@@ -1590,14 +1727,16 @@ static void cmd_give(char *rest, Out *o) {
         RowHandle *ph = carg(&c, "ItemHandle");
         int32_t *num = carg(&c, "NumItems");
         if (!ph || !num) continue;
-        ph->table = h->table; ph->row = h->row;   // display string left empty (as /card)
+        ph->table = row->table; ph->row = row->row;   // display string left empty (as /card)
         *num = 1;
-        LOG("cheats: give %s (%s, row %s) to %p", h->code, h->shown, rn, (void *)inv);
+        LOG("cheats: give %s %s (%s, row %s of %s) to %p", h->code[0] ? h->code : "-", h->shown, tb, rn,
+            ue_obj_name(row->table, tiers, sizeof tiers), (void *)inv);
         call_go(&c);
         n++;
     }
-    out_printf(o, "gave %s (%s) to %d hero(es): it takes its slot, the weapon there is replaced\n", h->shown,
-               h->code[0] ? h->code : rn, n);
+    item_tiers(h, tiers, sizeof tiers);
+    out_printf(o, "gave %s (%s, %s) to %d hero(es): it takes its slot, the one there is replaced. Tiers: %s\n", h->shown,
+               h->code[0] ? h->code : rn, tb, n, tiers);
     if (n && (t.others || t.all)) notice("host gave %s a %s", t.label, h->shown);
 }
 
@@ -1628,7 +1767,7 @@ static void help(Out *o) {
     out_printf(o, "cheats (host only, after /cheats on; [p] = player name, #n, me or all):\n"
                   "/god [p] [on|off]  /heal [p]  /revive [p]  /ammo infinite|off  /copper +N [p]  /card <name>|list [p]\n"
                   "/fly [p]  /noclip  /walk [p]  /tp [p] <p|saferoom|start>  /freecam  /size <x>\n"
-                  "/horde  /director calm|build|peak  /spawn <type> [n]  /spawnprop <name> [#]  /give <weapon>|list [p]  /killall  /freeze  /slomo <x>  /win  /lose\n"
+                  "/horde  /director calm|build|peak  /spawn <type> [n]  /spawnprop <name> [#]  /give <weapon> [tier] [p]|list [all]  /killall  /freeze  /slomo <x>  /win  /lose\n"
                   "%s"
                   "state: cheats %s", own, on ? "ON" : "off");
     if (on) out_printf(o, ", god %d, ammo %s, speed %.2f%s%s", n_gods, ammo_inf ? "infinite" : "normal", slomo, frozen ? ", frozen" : "", freecam ? ", freecam" : "");
