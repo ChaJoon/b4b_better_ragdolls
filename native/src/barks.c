@@ -1,12 +1,17 @@
-// Fork (ChaJoon/b4b_better_ragdolls, build 41): survivor barks muted on this machine.
+// Fork (ChaJoon/b4b_better_ragdolls, builds 41-42): survivor barks muted on this machine.
 //
 // Joon (24 Oct) hates the survivors' combat barks ("She shoots, she scores!"): the lines after headshots, melee kills,
-// shoves and shooting explosive items. The game's bark events are Wwise events named Dx_B_<Voice>_<Bark>_<NN>; his
-// asset index (b4bmod find, 24 Oct) has these bark names for those moments: Headshot (175 events), Kill_Bat (melee
-// kills, 49) and Shoot_Explosive (25). No bark named "Shove" exists: the shove's line is still to be found (its name
-// shows in the "barks:" lines below). Not muted by default: FriendlyFire_Melee (64: what a survivor says when a
-// teammate's melee or shove hits them, not the shover's line), Kill_Count_L1..L4 (kill streaks), Ping_Melee /
-// Ping_CultistMelee / Ping_Attachment_Melee (pings of melee items). Any of them: /dialogue barks mute <list>.
+// shoves and shooting explosive items; 25 Oct also picking up copper. The game's bark events are Wwise events named
+// Dx_B_<Voice>_<Bark>_<NN>; his asset index (b4bmod find, 25 Oct: 539 bark names) and the build 41 log give these
+// names: Headshot (175 events), Kill_Bat (melee kills, 49), Shoot_Explosive (25), Bash (184: the line after every
+// shove and melee hit; build 41 log, Fist_ and BaseballBat_DamageType hits, 5 ms before it), PickUp_Copper (47) and
+// Trigger_Bleed (Tala's alone, 3 lines in TU15's AKB_Dx_Tala_TU15 bank: "Keep bleeding!" after her bow kills, Joon;
+// the bow's bleed; no bark in either list is named for bow kills).
+// Not muted by default: Exert_Big (the grunt often just before a Bash; also climbing and the like), Got_Item (other
+// pickups), FriendlyFire_Melee / FriendlyFire_Arrow (a survivor hit by a teammate's melee or arrow), Kill_Count_L1..L4
+// (kill streaks), Good_Shot (a teammate's praise), Ping_* (pings). Any of them: /dialogue barks mute <list>.
+// Build 42: only survivors' lines (heroes and bots: a HeroDialogueComponent) are muted; enemies and NPCs have lines of
+// similar names (the cultists' A_Bash / B_Bash) that the list must not reach.
 //
 // Where: every dialogue line a GobiDialogueComponent plays goes through its virtual "play line" (vtable +0x410,
 // 0x141620240, which also shows the subtitle; dialogue.c hooks it for the cutscene radio lines and asks barks_filter
@@ -33,7 +38,7 @@
 #include "log.h"
 #include "cmds.h"
 
-#define BARKS_DEF        "Headshot,Kill_Bat,Shoot_Explosive"
+#define BARKS_DEF        "Headshot,Kill_Bat,Shoot_Explosive,Bash,PickUp_Copper,Trigger_Bleed"
 #define ADDR_PLAY_LINE   VA(0x141620240ull)   // UGobiDialogueComponent play line (vtable +0x410), as dialogue.c
 #define PLAY_SLOT        (0x410 / 8)
 #define LINE_LOGS        40
@@ -168,6 +173,14 @@ int barks_list_match(const char *list, const char *const *names, int n, char *hi
     return 0;
 }
 
+// a survivor's (hero's or bot's) dialogue component: the only lines the list mutes (build 42)
+static int survivor_comp(UObject *comp) {
+    static UClass *hdc;
+    static int looked;
+    if (!looked) { looked = 1; hdc = ue_find_class("HeroDialogueComponent"); }
+    return comp && hdc && ue_is_a(comp, hdc);
+}
+
 // dialogue.c's play hook (and ours below) asks first: 1 = don't play this line
 int barks_filter(UObject *comp, const void *params) {
     char a[160], b[160], hit[64] = "";
@@ -177,7 +190,8 @@ int barks_filter(UObject *comp, const void *params) {
     scan_block((const uint8_t *)params, 0x80, 1, &c);
     const char *names[MAX_CAND];
     for (int i = 0; i < c.n; i++) names[i] = c.s[i];
-    int mute = mute_on && barks_list_match(mute_list, names, c.n, hit, sizeof hit);
+    int survivor = survivor_comp(comp);
+    int mute = mute_on && survivor && barks_list_match(mute_list, names, c.n, hit, sizeof hit);
     n_lines++;
     if (mute) n_muted++;
     if (line_logs < LINE_LOGS) {
@@ -189,7 +203,7 @@ int barks_filter(UObject *comp, const void *params) {
         UObject *spk = comp ? U_OUTER(comp) : NULL;
         LOG("barks: %s (%s) line: %s -> %s%s", spk ? ue_obj_name(spk, a, sizeof a) : "-",
             comp && U_CLASS(comp) ? ue_obj_name(U_CLASS(comp), b, sizeof b) : "-", c.n ? found : "(nothing that names it)",
-            mute ? "MUTED: " : "played", mute ? hit : "");
+            mute ? "MUTED: " : "played", mute ? hit : survivor ? "" : " (not a survivor)");
         if (raw_logs < RAW_LOGS) {
             raw_logs++;
             char hex[0x80 * 3 + 8];
@@ -299,7 +313,7 @@ void barks_slash(char *rest, Out *o) {
     } else if (arg) { out_printf(o, "usage: /dialogue barks [on|off|mute <Name,Name>|log]\n"); return; }
     if (arg && !_stricmp(arg, "mute") && !arg2) { out_printf(o, "usage: /dialogue barks mute <Name,Name> (e.g. %s)\n", BARKS_DEF); return; }
     if (arg) LOG("barks: mute %s, list %s", mute_on ? "on" : "off", mute_list);
-    out_printf(o, "/dialogue barks: %s (default on; this machine): survivor lines named %s are not played (sound and "
+    out_printf(o, "/dialogue barks: %s (default on; this machine): survivors' lines named %s are not played (sound and "
                   "subtitle); %u lines seen, %u muted%s\n", mute_on ? "muted" : "NOT muted", mute_list[0] ? mute_list : "(none)",
                n_lines, n_muted, hero_checked < 0 ? "; heroes' own play line NOT hooked (see log)" : "");
     if (fail) out_printf(o, "/dialogue: could not write b4bcoop.ini (see log): this change lasts until the game closes\n");

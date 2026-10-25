@@ -19,12 +19,15 @@ bodies thrown by shots and blasts, and dismemberment. Everything else is b4b-coo
 - **Shooting a body that is already down pushes it.**
 - **Ridden that die running keep their speed** and tumble on, instead of dropping on the spot.
 - **Wounds where the shot lands**: shotguns, snipers, LMGs and rifles take off the arm, leg or head they hit, or open
-  the chest or stomach; pistols and SMGs only take heads; the bow takes nothing. Blast victims get open wounds too.
-  The game's own extra wounds on a killing headshot (the chest and an arm opened with the head) are stopped
-  (experimental: `/ragdoll wounds game on` brings them back).
+  the chest or stomach; pistols and SMGs only take heads; the bow takes nothing (not even the game's own head pop).
+  Blast victims get open wounds too. The game's own extra open wounds on a gun kill (the chest and an arm opened with
+  the head) are stopped on Commons; melee, blasts and fire keep the game's own (`/ragdoll wounds game on` brings back
+  all of the game's own wounds).
 - **Survivor barks muted** (on by default, each player's own setting): no "She shoots, she scores!" after headshots,
-  melee kills and shooting explosive items. `/dialogue barks off` brings them back.
-- **`/give <weapon>`** (host, after `/cheats on`): a weapon into a hero's inventory, for testing.
+  melee kills, shoves, shooting explosive items, picking up copper and Tala's bleed quips ("Keep bleeding!").
+  `/dialogue barks off` brings them back.
+- **`/give <weapon> [tier]`** (host, after `/cheats on`): a weapon into a hero's inventory, for testing; `/give list`
+  numbers every weapon with its tiers.
 - Reeker and Exploder pops, and the gameplay of explosions, are left as the game does them.
 
 ## Status
@@ -61,9 +64,9 @@ into online play.
 | `/ragdoll carry [x]` | how much of its running speed a dying Ridden keeps (default 1, off = 0) |
 | `/ragdoll carry keep <s>` | how long a run's speed survives a stagger before the kill (default 1 s) |
 | `/ragdoll wounds on\|off\|living off\|arms\|all\|blast on\|off\|kinds\|small\|heads\|none <K,K>` | wounds by weapon and hit location (`none`: kinds that take nothing, default the bow) |
-| `/ragdoll wounds game on\|off` | the game's own extra wounds on Commons hit by those weapons (default off; host) |
-| `/dialogue barks on\|off\|mute <Name,Name>\|log` | survivor barks muted (default on: `Headshot,Kill_Bat,Shoot_Explosive`); `log` names the next 40 lines heard |
-| `/give <weapon> [player]`, `/give list [filter]` | a weapon into a hero's inventory (host, cheats on) |
+| `/ragdoll wounds game on\|off` | the game's own wounds on Commons: `off` (default; host) stops its open wounds from those weapons and every wound from the bow |
+| `/dialogue barks on\|off\|mute <Name,Name>\|log` | survivors' barks muted (default on: `Headshot,Kill_Bat,Shoot_Explosive,Bash,PickUp_Copper,Trigger_Bleed`); `log` names the next 40 lines heard |
+| `/give <name\|code\|#n> [tier] [player]`, `/give list [all] [filter]` | a weapon (or any item) into a hero's inventory, its best tier unless one is named (host, cheats on) |
 
 ## Building
 

@@ -249,6 +249,7 @@ static int is_corpse(UObject *o) { for (int k = 0; k < n_corpse_cls; k++) if (ue
 
 static int tracked_has(UObject *a) { for (int i = 0; i < ntr; i++) if (tr[i].a == a) return 1; return 0; }
 static void dmg_learn(UObject *actor);                                // build 40: wounds on living Ridden (below)
+static void cap_living(Tracked *x);                                   // build 42: the game's own open wounds off (below)
 static void wound_hook(UObject *o, UFunction *fn, void *params);
 static int wound_hook_wanted(void);
 
@@ -269,6 +270,7 @@ static void scan_step(void) {
         tr[ntr].movi = tr[ntr].mov ? U_INDEX(tr[ntr].mov) : -1;
         ntr++;
         dmg_learn(o);   // build 40: its class's OnDamage event (living hits)
+        cap_living(&tr[ntr - 1]);   // build 42: before its first hit
     }
     scan_at = end;
 }
@@ -1990,56 +1992,34 @@ enum { LIMB_LARM, LIMB_RARM, LIMB_LLEG, LIMB_RLEG, N_LIMBS };
 static int8_t region_limb[256];      // EMutilationRegion value -> limb, -1 none (Head, Torso, Legs ...): from the names
 static uint8_t region_big[256];      // build 33: 1 = the limb's big cut (an "Upper" region: elbow / knee, build 32 log)
 
-// the names of an enum property's values, so the log says what Type 2 means. Layout as tools/sdkdump.py (which dumped
-// all 1442 enums) and docs/NOTES.md: FByteProperty::Enum and FEnumProperty::UnderlyingProp at +0x78, FEnumProperty::Enum
-// at +0x80; UEnum::Names (TArray<TPair<FName, int64>>, 16-byte entries) at +0x48, stock 0x40 + 8 for this engine's
-// bigger UObject. (Build 27 read +0x40, CppType's length fields, as the array and crashed the game at the first body.)
-static UObject *prop_enum(FField *p) {   // the property's UEnum, NULL if it isn't one we can check
-    char t[64], b[96];
-    ue_name(*(FName *)FF_CLASS(p), t, sizeof t);
-    UObject *e = !strcmp(t, "EnumProperty") ? *(UObject **)((char *)p + 0x80) : !strcmp(t, "ByteProperty") ? FP_SUB(p) : NULL;
-    if (!e || U_INDEX(e) < 0 || U_INDEX(e) >= ue_num_objects() || ue_object_at(U_INDEX(e)) != e) return NULL;
-    cname(e, b, sizeof b);
-    return !strcmp(b, "Enum") || !strcmp(b, "UserDefinedEnum") ? e : NULL;
-}
-static const TArray *enum_list(UObject *e) {   // its Names, NULL if the size looks wrong
-    const TArray *names = e ? (const TArray *)((const char *)e + 0x48) : NULL;
-    return names && names->data && names->num > 0 && names->num <= 256 && names->max >= names->num ? names : NULL;
-}
-static const char *enum_entry(const TArray *names, int i, char *b, size_t n, int64_t *v) {   // name after "Enum::"
-    const uint8_t *pr = (const uint8_t *)names->data + (size_t)i * 16;
-    ue_name(*(const FName *)pr, b, n);
-    if (v) *v = *(const int64_t *)(pr + 8);
-    const char *sh = strstr(b, "::");
-    return sh ? sh + 2 : b;
-}
+// the names of an enum property's values, so the log says what Type 2 means (ue.c: ue_prop_enum and friends, the layout)
 static void enum_names(FField *p, char *out, size_t n) {
     char b[96];
-    UObject *e = prop_enum(p);
-    const TArray *names = enum_list(e);
+    UObject *e = ue_prop_enum(p);
+    const TArray *names = ue_enum_names(e);
     if (!names) { snprintf(out, n, "?"); return; }
     size_t k = (size_t)snprintf(out, n, "%s:", ue_obj_name(e, b, sizeof b));
     for (int i = 0; i < names->num && i < 40 && k + 8 < n; i++) {
         int64_t v;
-        const char *s = enum_entry(names, i, b, sizeof b, &v);
+        const char *s = ue_enum_entry(names, i, b, sizeof b, &v);
         k += (size_t)snprintf(out + k, n - k, " %s=%lld", s, (long long)v);
     }
 }
 static int enum_value(FField *p, const char *name) {   // the value named `name` (after "Enum::"), -1 if none
     char b[96];
-    const TArray *names = enum_list(prop_enum(p));
+    const TArray *names = ue_enum_names(ue_prop_enum(p));
     for (int i = 0; names && i < names->num; i++) {
         int64_t v;
-        if (!strcmp(enum_entry(names, i, b, sizeof b, &v), name)) return (int)v;
+        if (!strcmp(ue_enum_entry(names, i, b, sizeof b, &v), name)) return (int)v;
     }
     return -1;
 }
 static const char *region_name(int r, char *out, size_t n) {   // "LeftLowerArm", or the number
     char b[96];
-    const TArray *names = mi.region ? enum_list(prop_enum(mi.region)) : NULL;
+    const TArray *names = mi.region ? ue_enum_names(ue_prop_enum(mi.region)) : NULL;
     for (int i = 0; names && i < names->num; i++) {
         int64_t v;
-        const char *s = enum_entry(names, i, b, sizeof b, &v);
+        const char *s = ue_enum_entry(names, i, b, sizeof b, &v);
         if (v == r) { snprintf(out, n, "%s", s); return out; }
     }
     snprintf(out, n, "%d", r);
@@ -2078,12 +2058,12 @@ static void mi_init(UClass *mc) {   // MutilationComponent's class
     LOG("ragdoll dismember: Region %s", en);
     // limbs by name: Left/Right + Arm/Hand or Leg/Foot (Legs, Head, Torso... are none)
     static const char *const LIMB_NAME[N_LIMBS] = {"left arm", "right arm", "left leg", "right leg"};
-    const TArray *names = enum_list(prop_enum(mi.region));
+    const TArray *names = ue_enum_names(ue_prop_enum(mi.region));
     size_t q = 0;
     lm[0] = 0;
     for (int i = 0; names && i < names->num; i++) {
         int64_t v;
-        const char *s = enum_entry(names, i, b, sizeof b, &v);
+        const char *s = ue_enum_entry(names, i, b, sizeof b, &v);
         int left = !strncmp(s, "Left", 4), right = !strncmp(s, "Right", 5);
         int arm = strstr(s, "Arm") || strstr(s, "Hand"), leg = strstr(s, "Leg") || strstr(s, "Foot");
         if (v < 0 || v > 255 || !(left || right) || !(arm || leg)) continue;
@@ -2621,7 +2601,11 @@ static int head_try(Tracked *t, UObject *mut, TArray *arr, UObject *mesh, int ty
 // this isn't enough): the first game-made mutilations (EnemyAudioComponent's HandleMutilationSounds, which the game
 // calls per region from inside its mutilation code) with their time after the Ridden's last OnDamage and 3 call stacks;
 // each weapon damage type's settings (its gameplay tags) and the wound config in full, once.
-// No-wound kinds (/ragdoll wounds none, default Arrow,Bow: Joon wants no dismemberment from the bow): nothing of ours.
+// Build 41's cap at the OnDamage event came too late (the game picks a hit's wounds just before that hit's OnDamage
+// event) and MaxWounds 0 didn't stop the head pop; build 42 caps open wounds from the scan and decides hit by hit in the
+// game's own wound pick (see "the game's own wounds, hit by hit" below).
+// No-wound kinds (/ragdoll wounds none, default Arrow,Bow: Joon wants no dismemberment from the bow): nothing of ours,
+// and (build 42) none of the game's either.
 #define WOUND_NONE_DEF   "Arrow,Bow"
 #define WOUND_KINDS_DEF  "SG,Sni,LMG,AR"
 #define WOUND_SMALL_DEF  "LMG,AR"
@@ -2639,7 +2623,7 @@ static int wound_living = WOUND_LIVING_DEF, wound_blast = 1;
 static int wound_game;                          // build 41: 1 = the game's own wounds stay (vanilla), 0 = stopped
 static int n_wound_hits, n_wound_off, n_wound_rupt, n_wound_refused, n_wound_already, n_wound_skip, n_wound_nomap,
            n_wound_pieces, n_blast_rupt, wound_logs, wound_nomap_logs;
-static int n_cap_hits, n_cap_back, n_cap_fail, cap_logs, n_ctl_kills, n_ctl_game, ctl_logs, n_game_mut, game_mut_logs;
+static int n_cap_scan, n_cap_hits, n_cap_fail, cap_logs, n_ctl_kills, n_ctl_game, ctl_logs, n_game_mut, game_mut_logs;
 
 static int kind_in(const char *list, const char *kind) {   // the kind is in the list (any case; "all" = every kind)
     if (!kind || !kind[0]) return 0;
@@ -2729,37 +2713,191 @@ static void cap_read(UObject *mut, int32_t *w, int32_t *r) {
     *r = *(const int32_t *)((const uint8_t *)mut + FP_OFFSET(cap_r_f));
 }
 
-// In the ProcessEvent hook (host), at a living Ridden's OnDamage event: the game's own wounds off for a kind we
-// handle, back to the game's values for any other (stumble events, which come with every hit, change nothing).
-// Nothing heavy: a table lookup, two int writes (the component looked up once per Ridden, a ProcessEvent call).
-static void cap_hit(UObject *o, const void *params) {
-    char kn[96], a[160], bn[64];
-    if (GetCurrentThreadId() != game_tid || cap_state < 0 || !is_common_class(o)) return;
-    const uint8_t *di = (const uint8_t *)params + FP_OFFSET(dmgi.info);
-    if (dmgi.stumble && bool_at(dmgi.stumble, di) == 1) return;
-    PushKind *k = kind_of(obj_field(dmgi.type, di), kn, sizeof kn);
-    if (!strcmp(k->key, "Stumble")) return;
-    Tracked *x = any_tracked(o);
+// Build 42: the cap goes on before the first hit. Build 41 set it at a Common's OnDamage event, but the build 41 log
+// shows the game's mutilation for a hit running just before that hit's OnDamage event, in the same frame: 28 of the
+// game's 30 mutilations were on a Common's first hit, cap not set yet; the 2 on Commons hit before (cap already 0) were
+// the Head BreakOff alone, no Chest / UpperArm Rupture. So: a living Common's MaxRuptureWounds is 0 from the scan that
+// first lists it (cap_living: alive, so before any hit but the very first frame's), and the OnDamage event (cap_hit) only
+// catches one hit before the scan reached it. MaxWounds stays the game's: at 0 it didn't stop the game's head pop
+// (those 2 Commons) and nothing says what it caps, so build 42 leaves it alone. Every kind of hit now gets the game's
+// BreakOffs (the head, an arm or leg where the shot lands) but none of its open wounds; ours come from wound_apply.
+static UObject *cap_comp(Tracked *x, UObject *o) {   // the Common's MutilationComponent (kept on its entry)
     UObject *mut = x && x->mut && ue_object_usable(x->mut, x->muti) ? x->mut : NULL;
     if (!mut) {
         mut = comp_of(o, "MutilationComponent");
         if (x) { x->mut = mut; x->muti = mut ? U_INDEX(mut) : -1; }
     }
-    int32_t w, r, w0, r0;
-    if (!mut || !cap_orig(mut, &w, &r)) { n_cap_fail++; return; }
-    int off = !k->radial && kind_handled(k->key);
-    cap_read(mut, &w0, &r0);
-    *(int32_t *)((uint8_t *)mut + FP_OFFSET(cap_w_f)) = off ? 0 : w;
-    *(int32_t *)((uint8_t *)mut + FP_OFFSET(cap_r_f)) = off ? 0 : r;
-    if (off) n_cap_hits++; else n_cap_back++;
+    return mut;
+}
+// MaxRuptureWounds to 0 on a living Common: 1 changed (*r0 = before), 0 already 0, -1 can't
+static int cap_zero(UObject *o, Tracked *x, int32_t *r0) {
+    int32_t w, r, w0;
+    UObject *mut = cap_comp(x, o);
+    if (!mut || !cap_orig(mut, &w, &r)) { n_cap_fail++; return -1; }
+    cap_read(mut, &w0, r0);
+    if (!*r0) return 0;
+    *(int32_t *)((uint8_t *)mut + FP_OFFSET(cap_r_f)) = 0;
+    return 1;
+}
+static int caps_wanted(void) { return mode_on && wounds_on && !wound_game && cap_state >= 0 && !admin_is_client(); }
+static void cap_living(Tracked *x) {   // the scan, a living Ridden just listed (game thread)
+    char a[160];
+    int32_t r0;
+    if (GetCurrentThreadId() != game_tid || !caps_wanted() || !is_common_class(x->a)) return;
+    if (cap_zero(x->a, x, &r0) != 1) return;
+    n_cap_scan++;
+    if (cap_logs < 4) {
+        cap_logs++;
+        LOG("ragdoll wounds: %s listed alive: the game's own open wounds off (MaxRuptureWounds %d -> 0)", oname(x->a, a, sizeof a), r0);
+    }
+}
+// In the ProcessEvent hook (host), at a living Common's OnDamage event: one the scan hadn't listed yet gets the cap for
+// its next hits (this hit's own mutilation is already done). Nothing heavy: a lookup, an int write.
+static void cap_hit(UObject *o, const void *params) {
+    char kn[96], a[160], bn[64];
+    if (GetCurrentThreadId() != game_tid || !caps_wanted() || !is_common_class(o)) return;
+    const uint8_t *di = (const uint8_t *)params + FP_OFFSET(dmgi.info);
+    if (dmgi.stumble && bool_at(dmgi.stumble, di) == 1) return;
+    PushKind *k = kind_of(obj_field(dmgi.type, di), kn, sizeof kn);
+    if (!strcmp(k->key, "Stumble")) return;
+    Tracked *x = any_tracked(o);
     if (x) { x->dmg_t = now_s(); snprintf(x->dmg_kind, sizeof x->dmg_kind, "%s", k->key); }
-    if (cap_logs < 12 && (w0 != (off ? 0 : w) || r0 != (off ? 0 : r))) {
+    int32_t r0;
+    if (cap_zero(o, x, &r0) != 1) return;
+    n_cap_hits++;
+    if (cap_logs < 12) {
         cap_logs++;
         FName bone = dmgi.bone ? *(const FName *)(di + FP_OFFSET(dmgi.bone)) : (FName){0, 0};
-        LOG("ragdoll wounds: %s hit by %s (%s) on %s: the game's own wounds %s (MaxWounds %d -> %d, MaxRuptureWounds %d -> %d)",
-            oname(o, a, sizeof a), k->key, kn, bone.idx ? ue_name(bone, bn, sizeof bn) : "-", off ? "off" : "back to the game's",
-            w0, off ? 0 : w, r0, off ? 0 : r);
+        LOG("ragdoll wounds: %s hit by %s (%s) on %s before the scan listed it: the game's own open wounds off from its next "
+            "hit (MaxRuptureWounds %d -> 0)", oname(o, a, sizeof a), k->key, kn, bone.idx ? ue_name(bone, bn, sizeof bn) : "-", r0);
     }
+}
+// /ragdoll wounds on, game off: every living Common already listed gets the cap (game thread)
+static int caps_living_all(void) {
+    int n = 0;
+    for (int i = 0; i < ntr; i++) {
+        Tracked *x = &tr[i];
+        int32_t r0;
+        if (x->died_at || x->done || !ue_object_usable(x->a, x->ai) || !is_common_class(x->a)) continue;
+        if (caps_wanted() && cap_zero(x->a, x, &r0) == 1) n++;
+    }
+    return n;
+}
+
+// ---- the game's own wounds, hit by hit (build 42, from Joon's code dump of 25 Oct) ----
+// The dump (b4b-codedump: 0x14172b4b0 two calls deep and the mutilation code 0x141a20000-0x141a30000, exe checked
+// against the build): the game applies a hit in 0x14172b4b0 (rcx = the hit character's damage component, rdx = the
+// FDamageInfo, 0xC0 bytes: its default constructor 0x1413e1c50 zeroes 0xC0 and puts the damage type at +0x18; copied
+// whole and broadcast to two delegates first), then calls 0x141a24a30 with the character's MutilationComponent as its
+// only argument (void; its one caller ignores rax): the game's wound pick for that hit (its rule list and tag queries,
+// then BreakOff 0x141a23290 / Rupture 0x141a25720, the 3 call stacks of the build 41 log). Our own wounds never go
+// through it (they write MutilationState and call OnRep_MutilationState). So, host, game thread, Commons only:
+//   - at 0x14172b4b0 the hit's damage type is noted for the length of the call (a stack: a hit can cause hits);
+//   - at 0x141a24a30, by that hit's kind: a no-wound kind (/ragdoll wounds none, default the bow): the pick is skipped,
+//     no wound of the game's at all for that hit, the head pop included (MaxWounds 0 didn't stop it, build 41); a kind
+//     whose wounds are ours (the wound and head-only kinds): MaxRuptureWounds 0 (the scan's cap), so only the game's
+//     BreakOffs (the head on a killing headshot, a limb where the shot lands); any other kind (melee, blasts, fire):
+//     the game's own values for this pick, then 0 again; a hit whose damage type can't be read: the cap stays.
+// The damage type is read through the OnDamage event's DamageInfo struct (dmgi), checked to be the same 0xC0 bytes.
+// Without the hooks (signature mismatch) the scan's cap alone stays: every kind without the game's open wounds.
+#define ADDR_HIT_APPLY  VA(0x14172b4b0ull)
+#define ADDR_MUT_PICK   VA(0x141a24a30ull)
+static const uint8_t SIG_HIT_APPLY[] = {0x40,0x53,0x41,0x56,0x41,0x57,0x48,0x81,0xec,0x40,0x01,0x00,0x00,0x83,0xba,0xb4,
+                                        0x00,0x00,0x00,0xff,0x4c,0x8b,0xfa,0x4c};
+static const uint8_t SIG_MUT_PICK[] = {0x48,0x89,0x4c,0x24,0x08,0x55,0x53,0x48,0x8d,0xac,0x24,0x18,0xff,0xff,0xff,0x48,
+                                       0x81,0xec,0xe8,0x01,0x00,0x00,0x48,0x83};
+typedef void (*HitApplyFn)(UObject *comp, const void *dinfo, void *r8, void *r9);
+typedef void (*MutPickFn)(UObject *mut, void *rdx, void *r8, void *r9);
+static HitApplyFn orig_hit_apply;
+static MutPickFn orig_mut_pick;
+static int mutil_state;               // 0 not tried, 1 hooked, -1 not (logged)
+static int dinfo_ok;                  // 0 not checked, 1 the DamageInfo struct is the 0xC0 bytes, -1 not (logged)
+#define HIT_STACK 8
+static UObject *hit_dtype[HIT_STACK];
+static int hit_depth;
+static int n_pick_skip, n_pick_ours, n_pick_game, n_pick_unknown, pick_logs;
+
+// what the game's wound pick does for a hit of kind k (NULL: its damage type wasn't read)
+enum { PICK_OURS, PICK_SKIP, PICK_GAME };
+static int pick_rule(const PushKind *k) {
+    if (!k) return PICK_OURS;                                       // unread: the cap stays
+    if (!k->radial && kind_in(wound_none, k->key)) return PICK_SKIP; // the bow: none of the game's wounds
+    if (k->radial || !kind_handled(k->key)) return PICK_GAME;        // melee, blasts, fire: the game's own
+    return PICK_OURS;                                                // our wound kinds: its BreakOffs, no open wounds
+}
+static UObject *live_obj(UObject *o) {   // o, if it is an object in the object array
+    int32_t i = o ? U_INDEX(o) : -1;
+    return i >= 0 && i < ue_num_objects() && ue_object_at(i) == o ? o : NULL;
+}
+static void hit_apply_detour(UObject *comp, const void *di, void *r8, void *r9) {
+    UObject *dt = NULL;
+    if (di && dmgi.state == 1 && GetCurrentThreadId() == game_tid) {
+        if (!dinfo_ok) {
+            UStruct *st = (UStruct *)FP_SUB(dmgi.info);
+            int sz = st ? US_PROPSSIZE(st) : -1;
+            dinfo_ok = sz == 0xC0 && dmgi.type && FP_OFFSET(dmgi.type) == 0x18 ? 1 : -1;   // as the code: 0xC0, +0x18
+            LOG("ragdoll wounds: the game's hits: DamageInfo %d bytes, its DamageType at +0x%x: %s", sz,
+                dmgi.type ? FP_OFFSET(dmgi.type) : -1, dinfo_ok == 1 ? "read at each hit" : "NOT the code's layout (0xC0 bytes, +0x18): not read");
+        }
+        if (dinfo_ok == 1) dt = live_obj(obj_field(dmgi.type, (const uint8_t *)di));
+    }
+    if (hit_depth < HIT_STACK) hit_dtype[hit_depth] = dt;
+    hit_depth++;
+    orig_hit_apply(comp, di, r8, r9);
+    hit_depth--;
+}
+static void mut_pick_detour(UObject *mut, void *rdx, void *r8, void *r9) {
+    char kn[96], a[160];
+    UObject *owner = mut && GetCurrentThreadId() == game_tid && caps_wanted() ? U_OUTER(mut) : NULL;
+    if (!owner || !live_obj(owner) || !is_common_class(owner) || cap_init(mut) != 1) { orig_mut_pick(mut, rdx, r8, r9); return; }
+    UObject *dt = hit_depth > 0 && hit_depth <= HIT_STACK ? hit_dtype[hit_depth - 1] : NULL;
+    PushKind *k = dt ? kind_of(dt, kn, sizeof kn) : NULL;
+    if (!dt) snprintf(kn, sizeof kn, "-");
+    int32_t w, r;
+    if (!cap_orig(mut, &w, &r)) { orig_mut_pick(mut, rdx, r8, r9); return; }
+    int32_t *pr = (int32_t *)((uint8_t *)mut + FP_OFFSET(cap_r_f));
+    const char *what;
+    int rule = pick_rule(k);
+    if (rule == PICK_SKIP) {
+        n_pick_skip++;
+        what = "skipped: no wound of the game's (a no-wound kind)";
+    } else if (rule == PICK_GAME) {
+        n_pick_game++;
+        *pr = r;
+        orig_mut_pick(mut, rdx, r8, r9);
+        *pr = 0;
+        what = "the game's own (its open wounds for this hit)";
+    } else {
+        if (k) n_pick_ours++; else n_pick_unknown++;
+        *pr = 0;
+        orig_mut_pick(mut, rdx, r8, r9);
+        what = k ? "no open wounds (MaxRuptureWounds 0): the game's head or limb only" : "damage type not read: no open wounds";
+    }
+    if (pick_logs < 16) {
+        pick_logs++;
+        LOG("ragdoll wounds: the game's wound pick for %s hit by %s (%s): %s", oname(owner, a, sizeof a), k ? k->key : "?", kn, what);
+    }
+}
+static void mutil_arm(void) {   // game thread, at /ragdoll on; the hooks stay (they act only while caps_wanted())
+    if (mutil_state) return;
+    if (memcmp((void *)ADDR_HIT_APPLY, SIG_HIT_APPLY, sizeof SIG_HIT_APPLY) ||
+        memcmp((void *)ADDR_MUT_PICK, SIG_MUT_PICK, sizeof SIG_MUT_PICK)) {
+        mutil_state = -1;
+        LOG("ragdoll wounds: signature mismatch at the game's hit / wound pick: per-hit control off (the scan's cap stays)");
+        return;
+    }
+    if (MH_CreateHook((void *)ADDR_HIT_APPLY, (void *)hit_apply_detour, (void **)&orig_hit_apply) != MH_OK ||
+        MH_CreateHook((void *)ADDR_MUT_PICK, (void *)mut_pick_detour, (void **)&orig_mut_pick) != MH_OK ||
+        MH_EnableHook((void *)ADDR_HIT_APPLY) != MH_OK || MH_EnableHook((void *)ADDR_MUT_PICK) != MH_OK) {
+        MH_DisableHook((void *)ADDR_HIT_APPLY);
+        MH_DisableHook((void *)ADDR_MUT_PICK);
+        mutil_state = -1;
+        LOG("ragdoll wounds: the game's hit / wound pick could not be hooked: per-hit control off (the scan's cap stays)");
+        return;
+    }
+    mutil_state = 1;
+    LOG("ragdoll wounds: hooked the game's hit and wound pick: no-wound kinds (%s) get none of the game's wounds, ours no "
+        "open wounds, the rest the game's own", wound_none);
 }
 
 // /ragdoll wounds game on: every Ridden we changed gets the game's values back (game thread)
@@ -4374,7 +4512,7 @@ static void turn_on(float delay) {   // game thread: /ragdoll on, or ragdoll=1 a
     shot_logs = shot_miss_logs = shot_dumps = 0;
     carry_logs = vel_logs_r = 0;   // build 38
     wound_logs = wound_nomap_logs = 0;   // build 40
-    cap_logs = ctl_logs = game_mut_logs = 0;   // build 41
+    cap_logs = ctl_logs = game_mut_logs = pick_logs = 0;   // build 41, 42
     if (!nm_mutsnd.idx) nm_mutsnd = fname_of(L"HandleMutilationSounds");
     if (!game_mut_stacks) InterlockedExchange(&stack_budget[ST_MUTIL], 3);
     if (shot_state < 0) shot_state = 0;   // look OnCorpseHit up again
@@ -4382,6 +4520,7 @@ static void turn_on(float delay) {   // game thread: /ragdoll on, or ragdoll=1 a
     game_tid = GetCurrentThreadId();
     settle_arm();
     bag_arm();
+    mutil_arm();   // build 42: the game's own wounds, hit by hit
     pe_update();
     LOG("ragdoll: on, delay %.2f s", delay_s);
 }
@@ -4389,7 +4528,7 @@ static void turn_off(void) {
     mode_on = 0;
     start_done = 1;
     pe_update();
-    LOG("ragdoll: off");
+    LOG("ragdoll: off (the game's own wounds back on %d Ridden)", caps_restore_all());
 }
 
 // b4bcoop.ini edited while the game runs (cmds.c's reload poll, game thread): 1 = our key, applied
@@ -4486,13 +4625,16 @@ void ragdoll_slash(char *rest, Out *o) {
                    n_carry_still, n_carry_nomov, n_carry_fail);
         out_printf(o, "/ragdoll wounds %s (%s; small %s; heads only %s; none %s; living %s; blasts %s): %d hits looked at, %d parts off, %d open "
                       "wounds (+%d on blast victims), %d refused, %d already done, %d left alone on living Ridden, %d with no wound "
-                      "for the bone; %d living hits (%d dropped, %d OnDamage events known%s); our pieces %d; the game's own wounds %s: "
-                      "%d hits stopped them, %d gave them back, %d failed; %d Commons killed by those kinds, %d still with the game's "
-                      "own; %d of the game's own mutilations seen\n",
+                      "for the bone; %d living hits (%d dropped, %d OnDamage events known%s); our pieces %d; the game's own open wounds %s: "
+                      "%d Commons capped before their first hit, %d at a hit, %d failed; the game's wound pick%s: %d skipped (no-wound kinds), "
+                      "%d without open wounds, %d the game's own (other kinds), %d with the damage type unread; %d Commons killed by "
+                      "those kinds, %d still with the game's own; %d of the game's own mutilations seen\n",
                    wounds_on ? "on" : "off", wound_kinds, wound_small, wound_heads, wound_none, LIVING_NAME[wound_living], wound_blast ? "on" : "off",
                    n_wound_hits, n_wound_off, n_wound_rupt, n_blast_rupt, n_wound_refused, n_wound_already, n_wound_skip, n_wound_nomap,
                    n_living_hits, n_woundq_drop, n_dmg_fns, dmgi.state < 0 ? ", NOT AVAILABLE: see log" : "", n_wound_pieces,
-                   wound_game ? "on" : cap_state < 0 ? "off but NOT AVAILABLE" : "off", n_cap_hits, n_cap_back, n_cap_fail, n_ctl_kills,
+                   wound_game ? "on" : cap_state < 0 ? "off but NOT AVAILABLE" : "off", n_cap_scan, n_cap_hits, n_cap_fail,
+                   mutil_state == 1 ? "" : mutil_state ? " NOT HOOKED (see log)" : " not hooked yet", n_pick_skip, n_pick_ours,
+                   n_pick_game, n_pick_unknown, n_ctl_kills,
                    n_ctl_game, n_game_mut);
     } else if (!strcmp(verb, "on")) {
         turn_on(arg ? (float)atof(arg) : 0.f);
@@ -4678,7 +4820,13 @@ void ragdoll_slash(char *rest, Out *o) {
                    mov_vel_off == -1 ? "; NOT AVAILABLE in this game (see log)" : "");
     } else if (!strcmp(verb, "wounds")) {   // build 40: wounds by weapon
         char *arg2 = arg ? strtok(NULL, " ") : NULL;
-        if (arg && (!strcmp(arg, "on") || !strcmp(arg, "off"))) { wounds_on = !strcmp(arg, "on"); save_i("ragdoll_wounds", wounds_on, 1); pe_update(); }
+        if (arg && (!strcmp(arg, "on") || !strcmp(arg, "off"))) {
+            wounds_on = !strcmp(arg, "on");
+            save_i("ragdoll_wounds", wounds_on, 1);
+            if (!wounds_on) LOG("ragdoll wounds: off: the game's own wounds back on %d Ridden", caps_restore_all());
+            else LOG("ragdoll wounds: on: the game's own open wounds off on %d living Commons", caps_living_all());
+            pe_update();
+        }
         else if (arg && !strcmp(arg, "kinds") && arg2) { set_kinds(wound_kinds, sizeof wound_kinds, arg2); save("ragdoll_wounds_kinds", strcmp(wound_kinds, WOUND_KINDS_DEF) ? wound_kinds : NULL); }
         else if (arg && !strcmp(arg, "small") && arg2) { set_kinds(wound_small, sizeof wound_small, arg2); save("ragdoll_wounds_small", strcmp(wound_small, WOUND_SMALL_DEF) ? wound_small : NULL); }
         else if (arg && !strcmp(arg, "heads") && arg2) { set_kinds(wound_heads, sizeof wound_heads, arg2); save("ragdoll_wounds_heads", strcmp(wound_heads, WOUND_HEADS_DEF) ? wound_heads : NULL); }
@@ -4692,6 +4840,7 @@ void ragdoll_slash(char *rest, Out *o) {
             wound_game = !strcmp(arg2, "on");
             save_i("ragdoll_wounds_game", wound_game, 0);
             if (wound_game) LOG("ragdoll wounds: the game's own wounds back on %d Ridden", caps_restore_all());
+            else LOG("ragdoll wounds: the game's own open wounds off on %d living Commons", caps_living_all());
             pe_update();
         }
         else if (arg && !strcmp(arg, "none") && arg2) { set_kinds(wound_none, sizeof wound_none, arg2); save("ragdoll_wounds_none", strcmp(wound_none, WOUND_NONE_DEF) ? wound_none : NULL); }
@@ -4708,7 +4857,7 @@ void ragdoll_slash(char *rest, Out *o) {
         out_printf(o, "/ragdoll wounds: %s (default on): shots by %s take off or open what they hit (head, arm, leg, chest, "
                       "stomach); small wounds for %s; %s only take heads (a killing headshot); %s get none; on living Ridden: %s "
                       "(off | arms: arms and open wounds | all: legs too; never heads); blast victims get 1-2 open wounds: %s; the "
-                      "game's own wounds on Commons hit by those kinds: %s (game on|off, default off; host). Lists: kinds|small|heads|"
+                      "game's own open wounds on Commons: %s (game on|off, default off; host; its head pop and limbs stay). Lists: kinds|small|heads|"
                       "none <K,K> (none = empty); so far %d parts off, %d wounds opened\n", wounds_on ? "on" : "off", wound_kinds,
                    wound_small, wound_heads, wound_none, LIVING_NAME[wound_living], wound_blast ? "on" : "off",
                    wound_game ? "on" : cap_state < 0 ? "off but NOT AVAILABLE (see log)" : "off", n_wound_off, n_wound_rupt + n_blast_rupt);

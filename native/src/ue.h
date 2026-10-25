@@ -75,3 +75,9 @@ UObject *ue_local_pc(void);
 int ue_is_listen_server(UObject *world);   // has a NetDriver and no ServerConnection
 int ue_num_clients(UObject *world);
 const char *ue_world_package(UObject *world, char *buf, size_t len);  // e.g. /Game/Maps/.../MAP_X
+// enums (fork): an EnumProperty's / ByteProperty's UEnum (NULL if none or not checkable), its Names (NULL if the size
+// looks wrong), entry i ("Epic", after "EItemQuality::"; *v its value), the name of value v (NULL if none)
+UObject *ue_prop_enum(FField *p);
+const TArray *ue_enum_names(UObject *e);
+const char *ue_enum_entry(const TArray *names, int i, char *buf, size_t len, int64_t *v);
+const char *ue_enum_value_name(FField *p, int64_t v, char *buf, size_t len);
