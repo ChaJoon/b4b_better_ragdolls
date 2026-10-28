@@ -12,6 +12,8 @@
 //   /ragdoll off
 //   /ragdoll mass [x]        every body's mass x the scale (0.1-10, default 1), for bodies that die from now on
 //                            (build 45: on top of a Common's 133 kg for every Common-family body: see common_weight)
+//   /ragdoll armored [x]     build 47: armored Ridden weigh x a Common (0.25-4, default 1.25: 166 kg), for bodies that
+//                            die from now on; every push on them (guns, blasts, shots on bodies) is 1/x a Common's
 //   /ragdoll gravity [x]     gravity on our ragdolls x the scale (0-5, default 1.3), at once, bodies in flight included
 //   /ragdoll deadline [s]    every ragdoll still there s seconds after death is removed (12-120, default 15)
 //   /ragdoll push [x]        the killing hit throws the body (step 2): overall strength x (0-10, default 4, off = 0);
@@ -179,6 +181,7 @@ typedef struct {
     float last_v;                          // fastest body at the last settle check, cm/s
     uint8_t spared;                        // times the corpse budget's delete was skipped for it
     uint8_t mass_set;                      // apply() changed its mass scale (undone if the actor comes back)
+    float mass_want, mass_kg;              // build 47: that scale (0 = none) and the whole body's kg it gave (mass_again)
     uint8_t bag;                           // an explosion's destroy (the blood bag) was refused for it
     uint8_t ended;                         // removed by the deadline (hidden, physics off, destroy asked)
     uint8_t blast_ok;                      // build 27: pushed by a recorded explosion, from blast_at
@@ -235,6 +238,9 @@ static int n_pa_kg;
 // while the settle hold holds the body; the game swaps it for its frozen stand-in within ~1 s of the release.
 #define GRAV_DEFAULT 1.3f   // Joon's pick with the push on (build 17, 16 Oct); 2.5 before the push existed
 static float mass_scale = 1.f, grav_scale = GRAV_DEFAULT;
+// Build 47 (Joon, 28 Oct): armored Ridden should be heavier than the others and fly less; he picked x1.25 (166 kg).
+#define ARMORED_DEFAULT 1.25f
+static float armored_scale = ARMORED_DEFAULT;
 static float world_gz;   // the world's gravity, cm/s^2, read once per map; 0 = not read yet
 static int n_grav_fail;
 
@@ -1569,8 +1575,9 @@ static int mass_logs;   // bodies logged with their mass before/after, per /ragd
 // GetBoneMass (18 pushes) against 133.0 kg for Common_AICharacterBP_C (3P_Common_PA, 1516 pushes): the same impulse moved
 // it 2.1 times as fast. Its mass scale is set so the whole body weighs 133 kg (x 2.11), which corrects everything that
 // moves it by impulse at once: the killing push, the shoves from shots on bodies, other bodies running into it.
-// Explosions (a velocity change) and the momentum carry (a speed) never depended on weight. By physics asset, measured
-// once per map at scale 1; within 5% of 133 kg nothing changes. /ragdoll mass still multiplies on top.
+// The momentum carry (a speed) never depended on weight; explosions do (their velocity change is strength / the body's
+// kg). By physics asset, measured once per map at scale 1; within 5% of 133 kg nothing changes. /ragdoll mass still
+// multiplies on top, and build 47's /ragdoll armored (x1.25 by default) on armored Ridden.
 #define COMMON_KG 133.f
 static float common_weight(Tracked *t, UObject *mesh) {   // the mass scale that gives a Common's weight, 1 = none
     char a[160], b[160];
@@ -1590,7 +1597,7 @@ static float common_weight(Tracked *t, UObject *mesh) {   // the mass scale that
     if (call_prep(&k, mesh, "GetBoneMass")) {
         FName *bn = carg(&k, "BoneName");
         float *rv = carg(&k, "ReturnValue");
-        SET(&k, "bScaleMass", uint8_t, 1);
+        SET(&k, "bScaleMass", uint8_t, 0);   // build 47: the scale is in the body's mass already (see body_mass)
         char line[1400], nb[48];
         size_t q = 0;
         line[0] = 0;
@@ -1620,6 +1627,44 @@ static void set_mass_scale(Tracked *t, UObject *mesh, float s) {
         mass_logs++;
         LOG("ragdoll tune: %s mass x%.2f: %.1f kg -> %.1f kg", oname(t->a, a, sizeof a), s, before, mesh_mass(mesh));
     }
+}
+
+static int is_armored(UObject *a) {   // CommonArmored_AICharacterBP_C
+    char b[96];
+    return a && U_CLASS(a) && strstr(ue_obj_name(U_CLASS(a), b, sizeof b), "Armored") != NULL;
+}
+
+// Build 47: the mass scale can be lost after apply() set it. Build 46's log: 9 of 14 armored gun kills were pushed at
+// 63.1 kg (the asset's own weight) right after "mass x2.11: 63.1 kg -> 133.0 kg", and their bodies moved about twice
+// as fast as Commons' with the same gun; the other 5 moved like Commons. Between the two come the killing shot's
+// wound (wound_kill: the game's limb code, which may rebuild the bodies at scale 1, as the "ours again" block after it
+// already assumes for the animation and simulation) and the momentum carry. So the whole body is weighed again where
+// it matters (before the push, after the limb code, after dismember), and a lost scale is set again. Returns the kg
+// to use (-1 unknown). A body that weighs less for another reason (a part's body gone) keeps its new weight: setting
+// the scale again changes nothing then.
+static int n_mass_lost, mass_again_logs;
+#define MASS_AGAIN_LOGS 16
+static float mass_again(Tracked *t, UObject *mesh, const char *where) {
+    char a[160];
+    const BodyList *bl = bodies_of(mesh);
+    float kg = body_mass(mesh, bl);
+    if (t->mass_want <= 0.f || t->mass_kg <= 0.f || kg <= 0.f) return kg;
+    if (fabsf(kg / t->mass_kg - 1.f) < 0.05f) return kg;
+    Call k;
+    if (!call_prep(&k, mesh, "SetAllMassScale")) return kg;
+    SET(&k, "InMassScale", float, t->mass_want);
+    call_go(&k);
+    float now = body_mass(mesh, bl);
+    int lost = now > 0.f && fabsf(now / kg - 1.f) >= 0.05f;
+    if (lost) n_mass_lost++;
+    if (mass_again_logs < MASS_AGAIN_LOGS) {
+        mass_again_logs++;
+        LOG("ragdoll tune: %s %s: %.1f kg, should be %.1f: %s -> %.1f kg", oname(t->a, a, sizeof a), where, kg, t->mass_kg,
+            lost ? "the mass scale was lost, set again" : "not the scale (a part's body gone?), kept", now);
+    }
+    if (now > 0.f) t->mass_kg = now;
+    t->mass = 0;   // the shot shoves read it again
+    return now > 0.f ? now : kg;
 }
 
 // The world's gravity (AWorldSettings.WorldGravityZ, the value in use: the project default unless the map sets its
@@ -1854,13 +1899,15 @@ static int has_body(const BodyList *bl, FName b) {
     return 0;
 }
 
-// the whole body's mass in kg (every body, mass scale included), -1 unknown
+// the whole body's mass in kg (every body, mass scale included), -1 unknown. Build 47: bScaleMass 0. The body's mass
+// (GetBodyMass) already has the scale in it, and bScaleMass 1 multiplies by it once more: build 46's log read 280.3 kg
+// for an armored body that GetMass had just put at 133.0 (63.1 x 2.11 x 2.11), so its blast push was half a Common's.
 static float body_mass(UObject *mesh, const BodyList *bl) {
     Call k;
     if (bl && call_prep(&k, mesh, "GetBoneMass")) {
         FName *bn = carg(&k, "BoneName");
         float *r = carg(&k, "ReturnValue"), sum = 0;
-        SET(&k, "bScaleMass", uint8_t, 1);
+        SET(&k, "bScaleMass", uint8_t, 0);
         if (bn && r) {
             for (int i = 0; i < bl->n; i++) { *bn = bl->bone[i]; *r = 0; call_go(&k); sum += *r; }
             if (sum > 0) return sum;
@@ -2063,7 +2110,7 @@ static void push_body(Tracked *t, UObject *mesh) {
         if (push_logs < PUSH_LOGS) { push_logs++; LOG("ragdoll push: %s: killing hit (%s) comes from the body's own place: not pushed", oname(t->a, a, sizeof a), tn); }
         return;
     }
-    float mass = body_mass(mesh, bl);
+    float mass = mass_again(t, mesh, "before the push");   // build 47: was body_mass (a lost scale went unseen)
     int log_it = push_logs < PUSH_LOGS;
     UObject *src = dinfo.source ? obj_field(dinfo.source, best) : NULL;
     if (kind->radial) {
@@ -3322,6 +3369,9 @@ static int wound_apply(Tracked *t, UObject *mesh, const char *kind, FName bone, 
     if (off && t->ragdolled) {   // the limb code may have changed the body's physics: ours again (as dismember)
         anim_off(ue_get_ptr(mesh, "AnimScriptInstance"), comp_of(t->a, "PhysicalAnimationComponent"));
         sim_on(mesh);
+        char wh[80];   // build 47: its weight too
+        snprintf(wh, sizeof wh, "after the limb code (wound, %s)", when);
+        mass_again(t, mesh, wh);
         call_void(mesh, "WakeAllRigidBodies");
         t->hid = hidden_bodies(mesh);
     }
@@ -3573,6 +3623,7 @@ static void dismember(Tracked *t, UObject *mesh, float dv, Blast *bl) {
     // whatever the limb code did to the body's physics: our settings again, before the push
     anim_off(ue_get_ptr(mesh, "AnimScriptInstance"), comp_of(t->a, "PhysicalAnimationComponent"));
     sim_on(mesh);
+    mass_again(t, mesh, "after the limb code (dismember)");   // build 47: its weight too (for later shoves)
     call_void(mesh, "WakeAllRigidBodies");
     t->hid = hidden_bodies(mesh);
     // a piece for every limb the game threw none for (it throws one per explosion at most)
@@ -4097,7 +4148,12 @@ static int apply(Tracked *t) {
     if (call_prep(&k, mesh, "SetCollisionProfileName")) { SET(&k, "InCollisionProfileName", FName, ragdoll_profile); call_go(&k); }
     sim_on(mesh);
     float ms = mass_scale * common_weight(t, mesh);   // build 45: armored Ridden weigh a Common's 133 kg
-    if (ms != 1.f) set_mass_scale(t, mesh, ms);
+    if (is_common_class(t->a) && is_armored(t->a)) ms *= armored_scale;   // build 47: and x1.25 of it by default
+    t->mass_want = 0.f; t->mass_kg = 0.f;
+    if (ms != 1.f) {
+        set_mass_scale(t, mesh, ms);
+        if (t->mass_set) { t->mass_want = ms; t->mass_kg = body_mass(mesh, bodies_of(mesh)); }   // for mass_again
+    }
     call_void(mesh, "WakeAllRigidBodies");
 
     int sim = call_bool(mesh, "IsSimulatingPhysics");
@@ -4150,7 +4206,7 @@ static void undo(Tracked *t) {
     LOG("ragdoll: WARNING %s came back alive after its ragdoll (the game reuses Ridden actors): physics undone", oname(t->a, a, sizeof a));
     t->ragdolled = 0; t->done = 0; t->died_at = 0; t->rest = 0; t->released = 0; t->checks = 0; t->spared = 0; t->ended = 0;
     t->dism = 0; t->hid = 0; t->blast_ok = 0; t->painted = 0;
-    t->mass = 0; t->shots = 0; t->relcount = 0; t->swapped = 0;
+    t->mass = 0; t->shots = 0; t->relcount = 0; t->swapped = 0; t->mass_want = 0; t->mass_kg = 0;
     t->carry = 0; t->kind[0] = 0; t->run_t = 0; t->mem_t = 0; t->velp = 0; t->push_dv = 0; t->gun_dv = 0;
 }
 
@@ -4789,6 +4845,7 @@ static void end_body(Tracked *x, double age) {
 // (ragdoll_live, from cmds.c's reload poll). Keys:
 //   ragdoll=1                          /ragdoll on: on at every start (the tick turns it on once a world exists)
 //   ragdoll_delay, ragdoll_mass, ragdoll_gravity, ragdoll_deadline, ragdoll_push, ragdoll_shot   numbers
+//   ragdoll_armored                    build 47: armored Ridden's weight x a Common's (0.25-4)
 //   ragdoll_kinds=SG:30000,Axe:6000    the push table's kinds that differ from the defaults, or were added
 //   ragdoll_bloodbag, ragdoll_blood, ragdoll_dismember, ragdoll_pieces   1 / 0 (on / off read too)
 //   ragdoll_limbs=2-3, ragdoll_big=75, ragdoll_head=50   as /ragdoll dismember limbs|big|head
@@ -4893,6 +4950,7 @@ static int setting(const char *k, const char *v) {
     if (!strcmp(k, "ragdoll")) start_on = onoff(v, 0);
     else if (!strcmp(k, "ragdoll_delay")) delay_s = v ? clampf((float)atof(v), 0.f, 10.f) : 0.f;
     else if (!strcmp(k, "ragdoll_mass")) mass_scale = v ? clampf((float)atof(v), 0.1f, 10.f) : 1.f;
+    else if (!strcmp(k, "ragdoll_armored")) armored_scale = v ? clampf((float)atof(v), 0.25f, 4.f) : ARMORED_DEFAULT;
     else if (!strcmp(k, "ragdoll_gravity")) grav_scale = v ? clampf((float)atof(v), 0.f, 5.f) : GRAV_DEFAULT;
     else if (!strcmp(k, "ragdoll_deadline")) deadline_s = v ? clampf((float)atof(v), 12.f, 120.f) : DEADLINE_DEFAULT;
     else if (!strcmp(k, "ragdoll_push")) push_scale = v ? clampf((float)atof(v), 0.f, 10.f) : PUSH_DEFAULT;
@@ -4936,6 +4994,7 @@ static void turn_on(float delay) {   // game thread: /ragdoll on, or ragdoll=1 a
     cap_logs = ctl_logs = game_mut_logs = pick_logs = 0;   // build 41, 42
     sti_probes = sti_miss_logs = 0;   // build 45
     vel_logs_ga = vel_logs_gc = 0;    // build 46
+    mass_again_logs = 0;              // build 47
     if (!nm_mutsnd.idx) nm_mutsnd = fname_of(L"HandleMutilationSounds");
     if (!game_mut_stacks) InterlockedExchange(&stack_budget[ST_MUTIL], 3);
     if (shot_state < 0) shot_state = 0;   // look OnCorpseHit up again
@@ -5037,14 +5096,14 @@ void ragdoll_slash(char *rest, Out *o) {
         out_printf(o, "/ragdoll: %s%s, %d Ridden tracked, %d deaths seen, %d ragdolled, %d left to the game (pop/explode), %d failed, %d came back; "
                       "settle hold %s: %d held, %d at rest + %d at the %.0f s cap (avg %.1f s, max %.1f s after death), "
                       "%d deleted while held; corpse budget %s: %d spared (%d again); deadline %.0f s: %d removed "
-                      "(%d never got the game's settle check); mass x%.2f, gravity x%.2f%s; push x%.2f: %d pushed (%d explosions), "
+                      "(%d never got the game's settle check); mass x%.2f, armored x%.2f (%d lost scales set again), gravity x%.2f%s; push x%.2f: %d pushed (%d explosions), "
                       "%d without a hit, %d failed; blood bags %s: %d spared, blood %s: %d painted; %ld stacks logged%s%s\n",
                    mode_on ? "on" : "off", mode_on && delay_s > 0 ? " (after the game's animation)" : "", ntr, n_deaths,
                    n_applied, n_left, n_failed, n_revived,
                    settle_state == 1 ? "on" : settle_state ? "OFF (see log)" : "not armed yet", n_held, n_at_rest, n_capped,
                    SETTLE_CAP, released ? settle_sum / released : 0.0, settle_max, n_held_gone,
                    corpse_state == 1 ? "hook on" : corpse_state ? "hook OFF (see log)" : "not armed yet", n_spared,
-                   n_spared_again, deadline_s, n_ended, n_ended_unchecked, mass_scale, grav_scale, n_grav_fail ? " (NO EFFECT: see log)" : "",
+                   n_spared_again, deadline_s, n_ended, n_ended_unchecked, mass_scale, armored_scale, n_mass_lost, grav_scale, n_grav_fail ? " (NO EFFECT: see log)" : "",
                    push_scale, n_pushed, n_push_radial, n_push_nohit, n_push_fail,
                    bloodbag_on ? "on" : bag_state < 0 ? "off but NOT AVAILABLE (see log)" : bag_state ? "off" : "off (not armed yet)",
                    n_bags_spared, blood_on ? (paint_state < 0 ? "NOT AVAILABLE" : "on") : "off", n_painted, stack_id,
@@ -5095,6 +5154,17 @@ void ragdoll_slash(char *rest, Out *o) {
         }
         out_printf(o, "/ragdoll mass: x%.2f (0.1-10, default 1) for bodies that die from now on; under gravity alone "
                       "weight changes nothing, it sets how far a push moves the body\n", mass_scale);
+    } else if (!strcmp(verb, "armored")) {   // build 47
+        if (arg) {
+            float m = (float)atof(arg);
+            armored_scale = m < 0.25f ? 0.25f : m > 4.f ? 4.f : m;
+            mass_logs = 0;
+            save_f("ragdoll_armored", armored_scale, ARMORED_DEFAULT);
+            LOG("ragdoll tune: armored x%.2f", armored_scale);
+        }
+        out_printf(o, "/ragdoll armored: x%.2f (0.25-4, default %.2f): armored Ridden weigh %.0f kg (a Common %.0f kg), "
+                      "so every push moves them x%.2f as far, for bodies that die from now on\n", armored_scale,
+                   ARMORED_DEFAULT, COMMON_KG * armored_scale, COMMON_KG, 1.f / armored_scale);
     } else if (!strcmp(verb, "gravity")) {
         if (arg) {
             float g = (float)atof(arg);
@@ -5333,11 +5403,11 @@ int ragdoll_init(void) {
     for (int i = 0; i < n_push_tab && m + 40 < sizeof kinds; i++)
         m += (size_t)snprintf(kinds + m, sizeof kinds - m, "%s%s %.0f", i ? ", " : "", push_tab[i].key, push_tab[i].n);
     LOG("ragdoll: experimental module loaded (fork build), %s; from b4bcoop.ini and the defaults: delay %.2f, mass x%.2f, "
-        "gravity x%.2f, deadline %.0f s, push x%.2f, shots on bodies x%.2f, blood bags %s, blood %s, dismember %s (%d-%d "
+        "armored x%.2f, gravity x%.2f, deadline %.0f s, push x%.2f, shots on bodies x%.2f, blood bags %s, blood %s, dismember %s (%d-%d "
         "limbs, big %d%%, head %d%%, pieces %s), carry x%.2f keep %.2f s, wounds %s (%s; small %s; heads only %s; none %s; living %s; "
         "blasts %s; the game's own %s); kinds: %s",
         start_on ? "on at the first world (ragdoll=1)" : "off until /ragdoll on",
-        delay_s, mass_scale, grav_scale, deadline_s, push_scale, shot_scale, bloodbag_on ? "on" : "off", blood_on ? "on" : "off",
+        delay_s, mass_scale, armored_scale, grav_scale, deadline_s, push_scale, shot_scale, bloodbag_on ? "on" : "off", blood_on ? "on" : "off",
         dism_on ? "on" : "off", dism_min, dism_max, dism_big, dism_head, dism_pieces ? "on" : "off", carry_scale, carry_keep,
         wounds_on ? "on" : "off", wound_kinds, wound_small, wound_heads, wound_none, LIVING_NAME[wound_living], wound_blast ? "on" : "off",
         wound_game ? "on" : "off", kinds);

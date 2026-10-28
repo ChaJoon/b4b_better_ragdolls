@@ -13,7 +13,8 @@ bodies thrown by shots and blasts, and dismemberment. Everything else is b4b-coo
   and its "settled" check freezes bodies still moving at up to ~5 m/s, so most freeze mid-fall. Here the animation is
   cut and the freeze waits until the body has really come to rest.
 - **The killing hit throws the body**, with a strength per weapon type (pistol, SMG, rifle, LMG, shotgun, sniper).
-  Every Common weighs the same 133 kg when it ragdolls (the armored ones are built at 63 kg and flew twice as far).
+  Every Common weighs 133 kg when it ragdolls, and armored ones 25% more (166 kg), so they fly a little less (the game
+  builds them at 63 kg, and they flew twice as far).
 - **Blasts** (frags, pipe bombs, barrels, propane, and the Volatile Ridden and Broadside card explosions) throw bodies
   from the explosion instead of turning nearby ones into blood bags, and take 2-3 limbs (and sometimes the head) off
   through the game's own dismemberment.
@@ -66,6 +67,7 @@ into online play.
 | `/ragdoll push [x]`, `/ragdoll push <kind> <n>` | how hard the killing hit throws, overall or per weapon kind; no value shows the table |
 | `/ragdoll shot [x]` | how hard shots push bodies that are already down |
 | `/ragdoll gravity [x]` | extra gravity on falling bodies (default 1.3) |
+| `/ragdoll armored [x]` | armored Ridden's weight compared with a Common's (default 1.25: every push moves them 0.8x as far) |
 | `/ragdoll dismember on\|off\|limbs <min> [max]\|head <0-100>` | dismemberment of blast victims |
 | `/ragdoll blood on\|off` | paint spared blast victims with blood like the others |
 | `/ragdoll carry [x]` | how much of its running speed a dying Ridden keeps (default 1, off = 0) |
