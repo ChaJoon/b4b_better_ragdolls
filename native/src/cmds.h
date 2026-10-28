@@ -125,6 +125,7 @@ int ragdoll_init(void);
 void ragdoll_tick(float dt);
 void ragdoll_slash(char *rest, Out *o);
 void ragdoll_perf_agent(double secs);                   // fork, build 45: cmds_tick's own time (performance line)
+void ragdoll_perf_part(int i, const char *name, double secs);   // fork, build 48: one module's share of it
 // barks.c (fork, build 41): survivor barks muted on this machine (/dialogue barks, anyone; ini barks_mute*)
 int barks_init(void);
 void barks_tick(float dt);
