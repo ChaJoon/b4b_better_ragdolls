@@ -1,4 +1,4 @@
-// Fork (ChaJoon/b4b_better_ragdolls, builds 41-42): survivor barks muted on this machine.
+// Fork (ChaJoon/b4b_better_ragdolls, builds 41-42, 45): survivor barks muted on this machine.
 //
 // Joon (24 Oct) hates the survivors' combat barks ("She shoots, she scores!"): the lines after headshots, melee kills,
 // shoves and shooting explosive items; 25 Oct also picking up copper. The game's bark events are Wwise events named
@@ -6,7 +6,9 @@
 // names: Headshot (175 events), Kill_Bat (melee kills, 49), Shoot_Explosive (25), Bash (184: the line after every
 // shove and melee hit; build 41 log, Fist_ and BaseballBat_DamageType hits, 5 ms before it), PickUp_Copper (47) and
 // Trigger_Bleed (Tala's alone, 3 lines in TU15's AKB_Dx_Tala_TU15 bank: "Keep bleeding!" after her bow kills, Joon;
-// the bow's bleed; no bark in either list is named for bow kills).
+// the bow's bleed; no bark in either list is named for bow kills). Build 45 (Joon, 28 Oct): the lines after a horde,
+// Horde_Finish (90) and Horde_Finish_Injured (24; the entry matches both, its words in a row). Horde_Start (74),
+// Horde_Start_Injured and Horde_Wave (59), the survivors' warnings, stay.
 // Not muted by default: Exert_Big (the grunt often just before a Bash; also climbing and the like), Got_Item (other
 // pickups), FriendlyFire_Melee / FriendlyFire_Arrow (a survivor hit by a teammate's melee or arrow), Kill_Count_L1..L4
 // (kill streaks), Good_Shot (a teammate's praise), Ping_* (pings). Any of them: /dialogue barks mute <list>.
@@ -38,7 +40,7 @@
 #include "log.h"
 #include "cmds.h"
 
-#define BARKS_DEF        "Headshot,Kill_Bat,Shoot_Explosive,Bash,PickUp_Copper,Trigger_Bleed"
+#define BARKS_DEF        "Headshot,Kill_Bat,Shoot_Explosive,Bash,PickUp_Copper,Trigger_Bleed,Horde_Finish"
 #define ADDR_PLAY_LINE   VA(0x141620240ull)   // UGobiDialogueComponent play line (vtable +0x410), as dialogue.c
 #define PLAY_SLOT        (0x410 / 8)
 #define LINE_LOGS        40

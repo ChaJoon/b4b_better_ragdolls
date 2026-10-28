@@ -11,6 +11,7 @@
 //                            first (default 0 = physics at once)
 //   /ragdoll off
 //   /ragdoll mass [x]        every body's mass x the scale (0.1-10, default 1), for bodies that die from now on
+//                            (build 45: on top of a Common's 133 kg for every Common-family body: see common_weight)
 //   /ragdoll gravity [x]     gravity on our ragdolls x the scale (0-5, default 1.3), at once, bodies in flight included
 //   /ragdoll deadline [s]    every ragdoll still there s seconds after death is removed (12-120, default 15)
 //   /ragdoll push [x]        the killing hit throws the body (step 2): overall strength x (0-10, default 4, off = 0);
@@ -29,6 +30,8 @@
 //                      impulse <n>]  on by default (build 36): blast victims lose min-max limbs (default 2-3, a different limb
 //                            each, big cuts big% of the time) through the game's MutilationState, each thrown as a piece;
 //                            head: the share of victims that lose their head (default 50; see "dismemberment")
+//   /ragdoll perf [always|auto]  build 45: the last 10 s performance line (see "performance"); always = every 10 s
+//                            even with nothing dying or the ragdoll off (for comparing), auto = only while bodies die
 //   /ragdoll probe           the nearest living Ridden: its mesh, physics asset, collision, and the death-related
 //                            functions/properties of its classes, into the log (discovery). Also (step 2 discovery):
 //                            every setting that could push a body (mesh, movement, actor), all its components (hit,
@@ -189,6 +192,7 @@ typedef struct {
     float mass;                            // build 35: the whole body's kg for the shot shoves (0 = not read yet)
     uint16_t shots;                        // build 35: shoves from shots after death
     uint8_t relcount;                      // build 35: settle-hold releases (a shot can hold a body again)
+    uint8_t swapped;                       // build 45: the game swapped it for its frozen copy (seen in the settle hook)
     // build 38: momentum carry (the muscle-tone experiment of build 38 was removed in build 40)
     UObject *mov;                          // its CharacterMovement (at scan time): the running speed while alive
     int32_t movi;                          // its object index (still the same object?), as ai / lsi
@@ -210,12 +214,15 @@ static int ntr, scan_at, n_overflow, n_revived;
 static int mode_on;
 static float delay_s;
 static int n_applied, n_failed, n_deaths, detail_left;
+static unsigned long long perf_pe_n;   // build 45: ProcessEvent calls through our hook (performance line)
 
 // The bone names of a physics asset's bodies (USkeletalBodySetup.BoneName), for the settle test: one list per asset
 #define MAX_BODIES 32
 typedef struct BodyList { UObject *pa; int n; FName bone[MAX_BODIES]; } BodyList;
-static BodyList body_lists[8];
+static BodyList body_lists[16];   // build 45: 16 (Joon's logs: 12 physics assets in one map)
 static int n_body_lists;
+static struct { UObject *pa; float kg; } pa_kg[16];   // build 45: Common-family weights by physics asset (common_weight)
+static int n_pa_kg;
 
 // ---- tuning: mass and gravity of our ragdolls (this machine only, not saved, like the rest of /ragdoll) ----
 // Mass: USkeletalMeshComponent::SetAllMassScale at ragdoll time, every body's mass x the scale (ratios between bodies
@@ -232,10 +239,11 @@ static int n_grav_fail;
 
 static void pieces_reset(void);
 static void shot_reset(void);
+static void standin_reset(void);   // build 45
 static int world_check(void) {   // new map: every old pointer is gone
     static UObject *last_w;
     UObject *w = ue_world();
-    if (w != last_w) { last_w = w; ntr = 0; scan_at = 0; n_body_lists = 0; world_gz = 0; pieces_reset(); shot_reset(); }
+    if (w != last_w) { last_w = w; ntr = 0; scan_at = 0; n_body_lists = 0; n_pa_kg = 0; world_gz = 0; pieces_reset(); shot_reset(); standin_reset(); }
     return w != NULL;
 }
 
@@ -1080,6 +1088,7 @@ static void log_props(const char *who, const char *what, UObject *o) {
 static FName nm_mutsnd;   // build 41: HandleMutilationSounds (the game's own mutilations, discovery)
 static void game_mut_note(UObject *o, UFunction *fn, const uint8_t *params);
 static void pe_detour(UObject *o, UFunction *fn, void *params) {
+    perf_pe_n++;   // build 45 (game thread mostly; a count, not exact)
     if (fov_pe_match(o, fn)) { orig_pe(o, fn, params); fov_pe_apply(params); return; }   // build 44: fov.c's camera modifier
     if (fn == explode_fn && explode_fn && params && mode_on && blast_loc_f) {   // game thread
         Blast *b = &blasts[blast_at++ % 8];
@@ -1511,6 +1520,9 @@ static void note_corpse_class(UObject *ridden) {
 }
 
 // ---- tuning (see "tuning" above) ----
+static const BodyList *bodies_of(UObject *mesh);
+static float body_mass(UObject *mesh, const BodyList *bl);
+static int is_common_class(UObject *a);
 // kg, UPrimitiveComponent::GetMass, -1 unknown. On a skeletal mesh it may be every body or the root body only (not
 // checked for this engine); either way before/after shows whether the scale took.
 static float mesh_mass(UObject *mesh) {
@@ -1522,6 +1534,29 @@ static float mesh_mass(UObject *mesh) {
 }
 
 static int mass_logs;   // bodies logged with their mass before/after, per /ragdoll mass
+
+// Build 45: every Common-family Ridden weighs a Common's 133 kg. Joon (28 Oct): armored Ridden flew much further than
+// normal ones. His logs: CommonArmored_AICharacterBP_C (physics asset 3P_ArmoredCommon_PA, 31 bodies) weighs 63.1 kg by
+// GetBoneMass (18 pushes) against 133.0 kg for Common_AICharacterBP_C (3P_Common_PA, 1516 pushes): the same impulse moved
+// it 2.1 times as fast. Its mass scale is set so the whole body weighs 133 kg (x 2.11), which corrects everything that
+// moves it by impulse at once: the killing push, the shoves from shots on bodies, other bodies running into it.
+// Explosions (a velocity change) and the momentum carry (a speed) never depended on weight. By physics asset, measured
+// once per map at scale 1; within 5% of 133 kg nothing changes. /ragdoll mass still multiplies on top.
+#define COMMON_KG 133.f
+static float common_weight(Tracked *t, UObject *mesh) {   // the mass scale that gives a Common's weight, 1 = none
+    char a[160], b[160];
+    if (!is_common_class(t->a)) return 1.f;
+    const BodyList *bl = bodies_of(mesh);
+    if (!bl) return 1.f;
+    for (int i = 0; i < n_pa_kg; i++) if (pa_kg[i].pa == bl->pa) return pa_kg[i].kg > 0 ? COMMON_KG / pa_kg[i].kg : 1.f;
+    float kg = body_mass(mesh, bl);
+    float r = kg > 0 ? COMMON_KG / kg : 1.f;
+    if (r > 0.95f && r < 1.05f) r = 1.f;
+    if (n_pa_kg < 16) { pa_kg[n_pa_kg].pa = bl->pa; pa_kg[n_pa_kg].kg = r == 1.f ? 0.f : kg; n_pa_kg++; }
+    LOG("ragdoll tune: %s (physics asset %s, %d bodies) weighs %.1f kg%s, x%.2f", cname(t->a, a, sizeof a),
+        oname(bl->pa, b, sizeof b), bl->n, kg, r == 1.f ? ": a Common's weight already" : ": weighed as a Common (133 kg)", r);
+    return r;
+}
 
 static void set_mass_scale(Tracked *t, UObject *mesh, float s) {
     char a[160];
@@ -4009,7 +4044,8 @@ static int apply(Tracked *t) {
     if (!ragdoll_profile.idx) ragdoll_profile = fname_of(L"Ragdoll");
     if (call_prep(&k, mesh, "SetCollisionProfileName")) { SET(&k, "InCollisionProfileName", FName, ragdoll_profile); call_go(&k); }
     sim_on(mesh);
-    if (mass_scale != 1.f) set_mass_scale(t, mesh, mass_scale);
+    float ms = mass_scale * common_weight(t, mesh);   // build 45: armored Ridden weigh a Common's 133 kg
+    if (ms != 1.f) set_mass_scale(t, mesh, ms);
     call_void(mesh, "WakeAllRigidBodies");
 
     int sim = call_bool(mesh, "IsSimulatingPhysics");
@@ -4062,8 +4098,169 @@ static void undo(Tracked *t) {
     LOG("ragdoll: WARNING %s came back alive after its ragdoll (the game reuses Ridden actors): physics undone", oname(t->a, a, sizeof a));
     t->ragdolled = 0; t->done = 0; t->died_at = 0; t->rest = 0; t->released = 0; t->checks = 0; t->spared = 0; t->ended = 0;
     t->dism = 0; t->hid = 0; t->blast_ok = 0; t->painted = 0;
-    t->mass = 0; t->shots = 0; t->relcount = 0;
+    t->mass = 0; t->shots = 0; t->relcount = 0; t->swapped = 0;
     t->carry = 0; t->kind[0] = 0; t->run_t = 0; t->mem_t = 0; t->velp = 0; t->push_dv = 0;
+}
+
+// ---- performance (build 45) ----
+// Joon (28 Oct): 240 frames per second in Fort Hope (MangoHud's cap), 200 in a mission, down to 100 in hordes. Before
+// choosing how bodies should go (a shorter frozen copy, a ragdoll that dissolves, fewer bodies simulating) this
+// measures. Every 10 s with a death or a body in flight, one line: the game's frames (wall clock between our ticks;
+// gaps over 1 s, loading screens, left out), the whole agent tick (every module, cmds_tick), our ragdoll tick (its
+// object scan apart), our part of the settle hook, the ProcessEvent calls through our hook (each costs a few pointer
+// compares), the bodies simulating (ragdolled, not yet swapped for the frozen copy or removed: average and most at
+// once), deaths, and the game's frozen copies in the world at that moment. /ragdoll perf shows the last line.
+#define PERF_WINDOW 10.0
+static struct {
+    double t0, last, frame_sum, frame_max, agent_sum, agent_max, rd_sum, rd_max, scan_sum, hook_sum;
+    unsigned frames, hook_n, held_sum, held_max;
+    unsigned long long pe0;
+    int deaths0;
+} pf;
+static char perf_line[600];
+static int perf_always;   // /ragdoll perf always: a line every 10 s even with nothing dying (and with the ragdoll off)
+static double perf_now(void) { return now_s(); }
+static void perf_hook_end(double q0) { pf.hook_sum += now_s() - q0; pf.hook_n++; }
+void ragdoll_perf_agent(double secs) {   // cmds.c: the whole agent tick just ran (game thread)
+    pf.agent_sum += secs;
+    if (secs > pf.agent_max) pf.agent_max = secs;
+}
+static int copies_now(void) {   // the game's frozen copies in the world (GetAllActorsOfClass per stand-in class)
+    int n = 0;
+    for (int k = 0; k < n_corpse_cls; k++) { int c = actors_of(corpse_cls[k], NULL, 0); if (c > 0) n += c; }
+    return n;
+}
+static void perf_frame(double t, double rd_secs, unsigned held) {   // the end of our tick, every frame
+    if (pf.last > 0) {
+        double f = t - pf.last;
+        if (f < 1.0) { pf.frame_sum += f; pf.frames++; if (f > pf.frame_max) pf.frame_max = f; }
+    }
+    pf.last = t;
+    pf.rd_sum += rd_secs;
+    if (rd_secs > pf.rd_max) pf.rd_max = rd_secs;
+    pf.held_sum += held;
+    if (held > pf.held_max) pf.held_max = held;
+    if (pf.t0 <= 0) { pf.t0 = t; pf.pe0 = perf_pe_n; pf.deaths0 = n_deaths; return; }
+    if (t - pf.t0 < PERF_WINDOW) return;
+    int deaths = n_deaths - pf.deaths0;
+    if (pf.frames && (perf_always || (mode_on && (deaths > 0 || pf.held_max > 0)))) {
+        double fr = pf.frames, avg = pf.frame_sum / fr;
+        snprintf(perf_line, sizeof perf_line,
+                 "%.1f s: %u frames, avg %.2f ms (%.0f fps), slowest %.1f ms; agent tick avg %.3f ms (%.1f%% of a frame), "
+                 "slowest %.2f ms; ragdoll tick avg %.3f ms (object scan %.3f), slowest %.2f ms; settle hook %.4f ms a frame "
+                 "(%u calls); %.0f ProcessEvent calls a frame through our hook; bodies simulating avg %.1f, most %u; %d deaths; "
+                 "frozen copies now %d%s", t - pf.t0, pf.frames, avg * 1e3, avg > 0 ? 1.0 / avg : 0.0, pf.frame_max * 1e3,
+                 pf.agent_sum / fr * 1e3, avg > 0 ? pf.agent_sum / fr / avg * 100.0 : 0.0, pf.agent_max * 1e3,
+                 pf.rd_sum / fr * 1e3, pf.scan_sum / fr * 1e3, pf.rd_max * 1e3, pf.hook_sum / fr * 1e3, pf.hook_n,
+                 (double)(perf_pe_n - pf.pe0) / fr, (double)pf.held_sum / fr, pf.held_max, deaths, copies_now(),
+                 mode_on ? "" : "; the ragdoll is OFF");
+        LOG("ragdoll perf: %s", perf_line);
+    }
+    memset(&pf, 0, sizeof pf);
+    pf.last = t; pf.t0 = t; pf.pe0 = perf_pe_n; pf.deaths0 = n_deaths;
+}
+
+// ---- the game's frozen copy (build 45 discovery) ----
+// At the swap the game puts a stand-in (RagdollComponent.VFXCorpseActorType, VFXCorpse_BP_C: a PoseableMesh copy of
+// the pose, no physics) where the body lies; 15 Oct it was seen to stay ~60 s, then dissolve (FadeDuration 2 s).
+// Joon (28 Oct) wants fewer bodies around: what sets those times is needed first. The first 2 copies per /ragdoll on
+// log their class's functions and variables with values, their life span, components and materials (scalar
+// parameters: the dissolve's); the first STI_MAX are watched: when they hide or go, seconds after the swap.
+#define STI_MAX 8
+static struct { UObject *a; int32_t ai; double t; uint8_t hid; char name[96]; } sti[STI_MAX];
+static int n_sti, sti_probes, n_swaps, sti_miss_logs;
+static void standin_reset(void) { n_sti = 0; }   // new map
+static int comp_loc(UObject *c, float v[3]) {
+    Call k;
+    if (!c || !call_prep(&k, c, "K2_GetComponentLocation")) return -1;
+    call_go(&k);
+    float *r = carg(&k, "ReturnValue");
+    if (!r) return -1;
+    memcpy(v, r, 3 * sizeof(float));
+    return 0;
+}
+static int actor_hidden(UObject *a) {
+    FField *f = a ? ue_find_prop(U_CLASS(a), "bHidden") : NULL;
+    return f ? bool_at(f, (const uint8_t *)a) : -1;
+}
+static void log_mats(const char *who, UObject *comp) {
+    char a[160], c[160], v[2400];
+    Call k;
+    int n = -1;
+    if (comp && call_prep(&k, comp, "GetNumMaterials")) { call_go(&k); int32_t *r = carg(&k, "ReturnValue"); if (r) n = *r; }
+    LOG("ragdoll copy: %s: %s (%s), %d materials", who, oname(comp, a, sizeof a), cname(comp, c, sizeof c), n);
+    for (int i = 0; i < n && i < 10; i++) {
+        if (!call_prep(&k, comp, "GetMaterial")) return;
+        SET(&k, "ElementIndex", int32_t, i);
+        call_go(&k);
+        UObject **r = carg(&k, "ReturnValue"), *m = r ? *r : NULL;
+        FField *sp = m ? ue_find_prop(U_CLASS(m), "ScalarParameterValues") : NULL;
+        v[0] = 0;
+        if (sp) fmt_prop(sp, (const uint8_t *)m, v, sizeof v, 3);
+        LOG("ragdoll copy: %s:   material %d %s (%s)%s%s", who, i, oname(m, a, sizeof a), cname(m, c, sizeof c),
+            sp ? ", scalars " : "", v);
+    }
+}
+static void standin_note(Tracked *x) {   // game thread, right after the game's swap of a body we ragdolled
+    char a[160], b[160], c[160];
+    n_swaps++;
+    if (n_sti >= STI_MAX) return;
+    float at[3];
+    if (comp_loc(x->mesh, at)) return;
+    UObject *best = NULL;
+    float bd = 200.f * 200.f;   // spawned just now where the body lies
+    for (int k = 0; k < n_corpse_cls; k++) {
+        UObject *list[256];
+        int n = actors_of(corpse_cls[k], list, 256);
+        for (int i = 0; i < n && i < 256; i++) {
+            int dup = 0;
+            for (int j = 0; j < n_sti; j++) if (sti[j].a == list[i]) dup = 1;
+            float pt[3];   // build 32 matched copies by their PoseableMesh's place (12 of 12 within 1.5 m): that first
+            if (dup) continue;
+            if (comp_loc(comp_of(list[i], "PoseableMeshComponent"), pt) && actor_loc(list[i], pt)) continue;
+            float d2 = (pt[0] - at[0]) * (pt[0] - at[0]) + (pt[1] - at[1]) * (pt[1] - at[1]) + (pt[2] - at[2]) * (pt[2] - at[2]);
+            if (d2 < bd) { bd = d2; best = list[i]; }
+        }
+    }
+    if (!best) {
+        if (sti_miss_logs++ < 5) LOG("ragdoll copy: %s swapped %.1f s after death: no frozen copy within 2 m (%d stand-in classes known)",
+                                     oname(x->a, a, sizeof a), now_s() - x->died_at, n_corpse_cls);
+        return;
+    }
+    float life = -1;
+    Call k;
+    if (call_prep(&k, best, "GetLifeSpan")) { call_go(&k); float *r = carg(&k, "ReturnValue"); if (r) life = *r; }
+    sti[n_sti].a = best; sti[n_sti].ai = U_INDEX(best); sti[n_sti].t = now_s(); sti[n_sti].hid = 0;
+    oname(best, sti[n_sti].name, sizeof sti[n_sti].name);
+    n_sti++;
+    LOG("ragdoll copy: %s swapped %.1f s after death for %s (%s, %.0f cm away): its life span %.1f s (0 = none), hidden %d",
+        oname(x->a, a, sizeof a), now_s() - x->died_at, oname(best, b, sizeof b), cname(best, c, sizeof c), sqrtf(bd), life,
+        actor_hidden(best));
+    if (sti_probes < 2) {
+        sti_probes++;
+        snprintf(a, sizeof a, "frozen copy %s (everything)", oname(best, b, sizeof b));
+        list_class(U_CLASS(best), 1, 1, a, best);
+        log_components(best, NULL, 0);
+        UObject *pm = comp_of(best, "PoseableMeshComponent");
+        if (pm) log_mats(b, pm);
+    }
+}
+static void standin_tick(double t) {   // the watched copies: hidden or gone, seconds after the swap
+    static double next;
+    if (t < next) return;
+    next = t + 0.25;
+    for (int i = 0; i < n_sti; i++) {
+        if (!sti[i].a) continue;
+        if (!ue_object_usable(sti[i].a, sti[i].ai)) {
+            LOG("ragdoll copy: %s gone %.1f s after the swap%s", sti[i].name, t - sti[i].t, sti[i].hid ? " (hidden before)" : "");
+            sti[i].a = NULL;
+            continue;
+        }
+        if (!sti[i].hid && actor_hidden(sti[i].a) == 1) {
+            sti[i].hid = 1;
+            LOG("ragdoll copy: %s hidden %.1f s after the swap (still there)", sti[i].name, t - sti[i].t);
+        }
+    }
 }
 
 // ---- settle hold: the game swaps a ragdoll for its stand-in only once the body is at rest ----
@@ -4082,6 +4279,7 @@ static void undo(Tracked *t) {
 // the game's check, swap, stand-in and deletion run unchanged, in the body's final pose. The deletion needs no hook:
 // only the swap starts its timer.
 #define ADDR_SETTLE_CHECK VA(0x141B6FD00ull)
+#define RC_SETTLED        0x1D2    // URagdollComponent: set by the swap (code dump; build 32 saw it on 12 of 12 swaps)
 static const uint8_t SIG_SETTLE[] = {0x40,0x55,0x53,0x57,0x48,0x8d,0x6c,0x24,0xb9,0x48,0x81,0xec,0x90,0x00,0x00,0x00,
                                      0x48,0x8b,0xb9,0xd8,0x00,0x00,0x00,0x48};
 #define SETTLE_SPEED   15.f   // cm/s: every body slower than this (the fastest one under it), or all asleep, is at rest
@@ -4101,7 +4299,7 @@ static const BodyList *bodies_of(UObject *mesh) {
     if (!pa) { UObject *sk = ue_get_ptr(mesh, "SkeletalMesh"); pa = sk ? ue_get_ptr(sk, "PhysicsAsset") : NULL; }
     if (!pa) return NULL;
     for (int i = 0; i < n_body_lists; i++) if (body_lists[i].pa == pa) return body_lists[i].n ? &body_lists[i] : NULL;
-    if (n_body_lists == (int)(sizeof body_lists / sizeof body_lists[0])) return NULL;   // 8 kinds of body in one map
+    if (n_body_lists == (int)(sizeof body_lists / sizeof body_lists[0])) return NULL;   // 16 kinds of body in one map
     BodyList *bl = &body_lists[n_body_lists++];
     memset(bl, 0, sizeof *bl);
     bl->pa = pa;
@@ -4165,6 +4363,7 @@ static int settle_hold(Tracked *x) {
 }
 
 static void settle_detour(UObject *rc) {   // game thread: timers run inside the world tick, like ragdoll_tick
+    double q0 = perf_now();
     static int first = 1;
     if (first && rc) {
         char a[160], c[160];
@@ -4173,8 +4372,10 @@ static void settle_detour(UObject *rc) {   // game thread: timers run inside the
     }
     Tracked *x = NULL;
     for (int i = 0; rc && i < ntr; i++) if (tr[i].rc == rc) { x = &tr[i]; break; }
-    if (x && x->ragdolled && !x->released && x->mesh && settle_hold(x)) return;   // the timer fires again in 0.5 s
+    if (x && x->ragdolled && !x->released && x->mesh && settle_hold(x)) { perf_hook_end(q0); return; }   // fires again in 0.5 s
+    perf_hook_end(q0);
     orig_settle(rc);
+    if (x && x->ragdolled && !x->swapped && *((const uint8_t *)rc + RC_SETTLED)) { x->swapped = 1; standin_note(x); }   // build 45
 }
 
 // ---- corpse budget: the game's UCorpseManager may not delete a body the settle hold still holds ----
@@ -4274,7 +4475,6 @@ static void settle_arm(void) {   // game thread, at /ragdoll on; the hook stays 
 #define SHOT_LOGS         40       // shoves logged per /ragdoll on
 #define SHOT_MISS_LOGS    20       // hits with no shooter found, logged per /ragdoll on
 #define SHOT_DUMPS        3        // OnCorpseHit calls logged with their parameters per /ragdoll on
-#define RC_SETTLED        0x1D2    // URagdollComponent: set by the swap (code dump; build 32 saw it on 12 of 12 swaps)
 #define SHOTQ             64
 #define DEG               57.29578f
 static float shot_scale = SHOT_DEFAULT;
@@ -4682,6 +4882,7 @@ static void turn_on(float delay) {   // game thread: /ragdoll on, or ragdoll=1 a
     carry_logs = vel_logs_r = 0;   // build 38
     wound_logs = wound_nomap_logs = 0;   // build 40
     cap_logs = ctl_logs = game_mut_logs = pick_logs = 0;   // build 41, 42
+    sti_probes = sti_miss_logs = 0;   // build 45
     if (!nm_mutsnd.idx) nm_mutsnd = fname_of(L"HandleMutilationSounds");
     if (!game_mut_stacks) InterlockedExchange(&stack_budget[ST_MUTIL], 3);
     if (shot_state < 0) shot_state = 0;   // look OnCorpseHit up again
@@ -4707,7 +4908,7 @@ int ragdoll_live(const char *key, const char *val) {
     return 1;
 }
 
-void ragdoll_tick(float dt) {
+static void tick_inner(float dt) {
     (void)dt;
     tick_n++;
     game_tid = GetCurrentThreadId();   // the tick runs on the game thread (shot_note checks it)
@@ -4719,8 +4920,11 @@ void ragdoll_tick(float dt) {
     if (tracing && now_s() > trace_end) trace_stop("time up");
     if (!world_check()) { for (int i = 0; i < 6; i++) if (watches[i].actor) watch_end(&watches[i]); return; }
     watch_tick();
+    double qs = now_s();
     scan_step();
     double t = now_s();
+    pf.scan_sum += t - qs;   // build 45
+    standin_tick(t);         // build 45
     blast_tally_tick(t);
     paint_tick(t);
     for (int i = 0; i < ntr; i++) {
@@ -4761,6 +4965,15 @@ void ragdoll_tick(float dt) {
     }
     shot_tick(t);   // build 35: after the deaths of this tick are ragdolled
     wound_tick();   // build 40: hits on living Ridden (host)
+}
+
+void ragdoll_tick(float dt) {   // build 45: timed (see "performance")
+    double q0 = now_s();
+    tick_inner(dt);
+    double t = now_s();
+    unsigned held = 0;
+    for (int i = 0; i < ntr; i++) held += tr[i].ragdolled && !tr[i].swapped && !tr[i].ended;
+    perf_frame(t, t - q0, held);
 }
 
 void ragdoll_slash(char *rest, Out *o) {
@@ -5030,6 +5243,14 @@ void ragdoll_slash(char *rest, Out *o) {
                       "none <K,K> (none = empty); so far %d parts off, %d wounds opened\n", wounds_on ? "on" : "off", wound_kinds,
                    wound_small, wound_heads, wound_none, LIVING_NAME[wound_living], wound_blast ? "on" : "off",
                    wound_game ? "on" : cap_state < 0 ? "off but NOT AVAILABLE (see log)" : "off", n_wound_off, n_wound_rupt + n_blast_rupt);
+    } else if (!strcmp(verb, "perf")) {   // build 45
+        if (arg && !strcmp(arg, "always")) perf_always = 1;
+        else if (arg && !strcmp(arg, "auto")) perf_always = 0;
+        else if (arg) { out_printf(o, "usage: /ragdoll perf [always|auto]\n"); return; }
+        out_printf(o, "/ragdoll perf (%s; \"ragdoll perf\" lines in the log): %s\n",
+                   perf_always ? "a line every 10 s, also with the ragdoll off: /ragdoll perf auto stops it" :
+                                 "a line every 10 s while bodies die; /ragdoll perf always: every 10 s, ragdoll on or off",
+                   perf_line[0] ? perf_line : "no 10 s window with deaths yet");
     } else if (!strcmp(verb, "probe")) {
         world_check();
         if (!mode_on && !tracing) for (int k = 0; k < 64; k++) scan_step();   // not scanning in the background: a full pass now
@@ -5041,7 +5262,7 @@ void ragdoll_slash(char *rest, Out *o) {
         if (tracing) trace_stop("restarted");
         if (trace_start(s, o) == 0) out_printf(o, "/ragdoll trace: %.0f s, kill a few Ridden now (log: \"ragdoll trace\" lines)\n", s);
     } else {
-        out_printf(o, "usage: /ragdoll [on [delay]|off|status|mass [x]|gravity [x]|deadline [s]|push [x|on|off|<kind> <n> [blast]]|shot [x|on|off]|carry [x|on|off|keep <s>]|wounds [on|off|kinds <K,K>|small <K,K>|heads <K,K>|none <K,K>|living off|arms|all|blast on|off|game on|off]|bloodbag [on|off]|blood [on|off]|dismember [on|off|limbs <min> [max]|big <0-100>|head <0-100|on|off>|pieces on|off|type <n|auto>|impulse <n>]|probe|trace [secs]]\n");
+        out_printf(o, "usage: /ragdoll [on [delay]|off|status|mass [x]|gravity [x]|deadline [s]|push [x|on|off|<kind> <n> [blast]]|shot [x|on|off]|carry [x|on|off|keep <s>]|wounds [on|off|kinds <K,K>|small <K,K>|heads <K,K>|none <K,K>|living off|arms|all|blast on|off|game on|off]|bloodbag [on|off]|blood [on|off]|dismember [on|off|limbs <min> [max]|big <0-100>|head <0-100|on|off>|pieces on|off|type <n|auto>|impulse <n>]|perf [always|auto]|probe|trace [secs]]\n");
     }
     if (save_fail) out_printf(o, "/ragdoll: could not write b4bcoop.ini (see log): this change lasts until the game closes\n");
 }
