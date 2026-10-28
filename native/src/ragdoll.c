@@ -32,6 +32,8 @@
 //                      impulse <n>]  on by default (build 36): blast victims lose min-max limbs (default 2-3, a different limb
 //                            each, big cuts big% of the time) through the game's MutilationState, each thrown as a piece;
 //                            head: the share of victims that lose their head (default 50; see "dismemberment")
+//   /ragdoll animpause [on|off]  build 48: a ragdolled body's animation is paused (on, default): its animation
+//                            Blueprint stops running every frame; the physics decides the pose anyway (see "animation pause")
 //   /ragdoll perf [always|auto]  build 45: the last 10 s performance line (see "performance"); always = every 10 s
 //                            even with nothing dying or the ragdoll off (for comparing), auto = only while bodies die
 //   /ragdoll probe           the nearest living Ridden: its mesh, physics asset, collision, and the death-related
@@ -57,6 +59,7 @@
 #include <stdlib.h>
 #include <math.h>
 #include <ctype.h>
+#include <intrin.h>   // build 48: __rdtsc for the ProcessEvent hook's own time
 #include "MinHook.h"
 #include "ue.h"
 #include "log.h"
@@ -182,6 +185,7 @@ typedef struct {
     uint8_t spared;                        // times the corpse budget's delete was skipped for it
     uint8_t mass_set;                      // apply() changed its mass scale (undone if the actor comes back)
     float mass_want, mass_kg;              // build 47: that scale (0 = none) and the whole body's kg it gave (mass_again)
+    uint8_t anim_paused;                   // build 48: its mesh's bPauseAnims was set by us (cleared if it comes back)
     uint8_t bag;                           // an explosion's destroy (the blood bag) was refused for it
     uint8_t ended;                         // removed by the deadline (hidden, physics off, destroy asked)
     uint8_t blast_ok;                      // build 27: pushed by a recorded explosion, from blast_at
@@ -219,6 +223,7 @@ static int mode_on;
 static float delay_s;
 static int n_applied, n_failed, n_deaths, detail_left;
 static unsigned long long perf_pe_n;   // build 45: ProcessEvent calls through our hook (performance line)
+static unsigned long long perf_pe_cyc; // build 48: CPU cycles (rdtsc) spent in our part of the hook, the game's call left out
 
 // The bone names of a physics asset's bodies (USkeletalBodySetup.BoneName), for the settle test: one list per asset
 #define MAX_BODIES 32
@@ -1123,8 +1128,17 @@ static void log_props(const char *who, const char *what, UObject *o) {
 static FName nm_mutsnd;   // build 41: HandleMutilationSounds (the game's own mutilations, discovery)
 static void game_mut_note(UObject *o, UFunction *fn, const uint8_t *params);
 static void pe_detour(UObject *o, UFunction *fn, void *params) {
+    // build 48: our own time in here (rdtsc, the game's call left out; calls we make from in here count twice)
+    unsigned long long c0 = __rdtsc();
     perf_pe_n++;   // build 45 (game thread mostly; a count, not exact)
-    if (fov_pe_match(o, fn)) { orig_pe(o, fn, params); fov_pe_apply(params); return; }   // build 44: fov.c's camera modifier
+    if (fov_pe_match(o, fn)) {   // build 44: fov.c's camera modifier
+        perf_pe_cyc += __rdtsc() - c0;
+        orig_pe(o, fn, params);
+        c0 = __rdtsc();
+        fov_pe_apply(params);
+        perf_pe_cyc += __rdtsc() - c0;
+        return;
+    }
     if (fn == explode_fn && explode_fn && params && mode_on && blast_loc_f) {   // game thread
         Blast *b = &blasts[blast_at++ % 8];
         memset(b, 0, sizeof *b);
@@ -1136,6 +1150,7 @@ static void pe_detour(UObject *o, UFunction *fn, void *params) {
     if (params && mode_on) wound_hook(o, fn, params);                                          // build 40
     if (params && mode_on && nm_mutsnd.idx && fn && same_name(fn, nm_mutsnd) && !own_call()) game_mut_note(o, fn, params);   // build 41
     if (tracing && o && fn && !own_call()) trace_call(o, fn, params);
+    perf_pe_cyc += __rdtsc() - c0;
     orig_pe(o, fn, params);
 }
 
@@ -2051,6 +2066,51 @@ static const uint8_t *killing_entry(Tracked *t, const TArray *arr, int dump) {
     return best;
 }
 
+// ---- where the time goes (build 48) ----
+// Build 46's log (Joon, 28 Oct): the ragdoll tick's slowest frame took 60.8 ms in the window of a frag that killed 10
+// (one 67 ms frame), 11.2 ms when a blast took 4 bodies apart, 5.7 ms in another; and 0.3-0.5 ms a frame of the agent
+// tick was in modules other than the ragdoll, unexplained. So, in the `ragdoll perf parts` line every 10 s:
+//   - each module of the agent tick (cmds.c times them): average and slowest, the 6 most costly by average, and any
+//     other whose slowest frame took 5 ms or more;
+//   - the ragdoll tick in sections (scan, frozen copies, blast tally and blood paint, bodies already down, deaths,
+//     shots on bodies, living wounds);
+//   - our own time in the ProcessEvent hook (rdtsc, against the window's wall clock);
+//   - the window's slowest death, step by step (setup up to the physics, weight, wound, carry, push with the
+//     dismember inside it, caps); a death of 3 ms or more is logged at once (`ragdoll slow:`, 20 per /ragdoll on).
+#define SLOW_DEATH_MS 3.0
+#define SLOW_LOGS     20
+static double last_dism_s;   // the dismember inside the last push (s)
+static int slow_logs;
+static const char *const STEP_NAME[6] = {"setup", "weight", "wound", "carry", "push", "caps"};
+static struct { double secs; char line[400]; } slow;   // this window's slowest death
+static void death_timed(Tracked *t, const double st[7], int detail) {
+    char a[160], line[400];
+    double total = st[6] - st[0];
+    size_t q = (size_t)snprintf(line, sizeof line, "%s (%s) %.2f ms:", oname(t->a, a, sizeof a),
+                                t->blast_ok ? "blast" : t->gun_dv > 0.f ? "gun kill" : "other", total * 1e3);
+    for (int i = 0; i < 6 && q + 48 < sizeof line; i++) {
+        q += (size_t)snprintf(line + q, sizeof line - q, " %s %.2f", STEP_NAME[i], (st[i + 1] - st[i]) * 1e3);
+        if (i == 4 && last_dism_s > 0) q += (size_t)snprintf(line + q, sizeof line - q, " (dismember %.2f)", last_dism_s * 1e3);
+    }
+    if (detail && q + 40 < sizeof line) snprintf(line + q, sizeof line - q, "; with the first deaths' detail logs");
+    if (total > slow.secs) { slow.secs = total; snprintf(slow.line, sizeof slow.line, "%s", line); }
+    if (total * 1e3 >= SLOW_DEATH_MS && slow_logs < SLOW_LOGS) { slow_logs++; LOG("ragdoll slow: %s", line); }
+}
+
+#define N_PARTS 32   // the agent tick's modules (cmds.c numbers them)
+static struct { const char *name; double sum, max; } part[N_PARTS];
+void ragdoll_perf_part(int i, const char *name, double secs) {   // cmds.c, game thread
+    if (i < 0 || i >= N_PARTS) return;
+    part[i].name = name;
+    part[i].sum += secs;
+    if (secs > part[i].max) part[i].max = secs;
+}
+enum { SEC_SCAN, SEC_COPIES, SEC_BLASTS, SEC_BODIES, SEC_DEATHS, SEC_SHOTS, SEC_WOUNDS, N_SEC };
+static const char *const SEC_NAME[N_SEC] = {"scan", "copies", "blast tally+paint", "bodies down", "deaths", "shots on bodies",
+                                            "living wounds"};
+static struct { double sum, max; } sec[N_SEC];
+static void sec_add(int i, double secs) { sec[i].sum += secs; if (secs > sec[i].max) sec[i].max = secs; }
+
 static void push_body(Tracked *t, UObject *mesh) {
     char a[160], tn[96], bn[64], hb[64], sn[96], sc[96];
     if (push_scale <= 0.f) return;
@@ -2120,7 +2180,9 @@ static void push_body(Tracked *t, UObject *mesh) {
         // build 29: limbs off first (/ragdoll dismember on), then the push. Build 28 pushed first, and bodies that
         // lost limbs barely moved (Joon, 16 Oct 23:40): whatever the game's limb code does to the body, it is done
         // before the impulse now, and our physics settings are put back after it.
+        double d0 = now_s();
         dismember(t, mesh, dv, t->blast_ok ? &blasts[t->blast_i % 8] : NULL);
+        last_dism_s = now_s() - d0;   // build 48
         if (!call_prep(&k, mesh, "AddRadialImpulse")) { n_push_fail++; return; }
         float *o = carg(&k, "Origin");
         if (o) memcpy(o, org, sizeof org);
@@ -2169,6 +2231,40 @@ static void sim_on(UObject *mesh) {
     if (call_prep(&k, mesh, "SetAllBodiesSimulatePhysics")) { SET(&k, "bNewSimulate", uint8_t, 1); call_go(&k); }
     if (call_prep(&k, mesh, "SetSimulatePhysics")) { SET(&k, "bSimulate", uint8_t, 1); call_go(&k); }
     if (call_prep(&k, mesh, "SetPhysicsBlendWeight")) { SET(&k, "PhysicsBlendWeight", float, 1.f); call_go(&k); }
+}
+
+// ---- animation pause (build 48) ----
+// A ragdolled body's animation Blueprint kept running every frame until the body was deleted: build 22's trace had
+// BlueprintUpdateAnimation, EvaluateGraphExposedInputs and GetCurves on every dead body for ~8 s (60% of that log; see
+// per_frame), on the game thread, and through our ProcessEvent hook. The physics sets the pose (blend weight 1), so
+// that work is thrown away. USkeletalMeshComponent.bPauseAnims (engine doc: "Pauses this component's animations
+// (doesn't tick them, but still refreshes bones)") is set on the mesh at the ragdoll, written as the reflected bool
+// bit it is (the BoolProperty's byte and mask; a layout we don't know leaves it alone, logged once). Cleared if the
+// game brings the body back. /ragdoll animpause off: bodies that die from now on keep their animation (to compare).
+// Not known yet: how much frame time it saves (the engine's, not ours: compare `ragdoll perf` lines on and off), and
+// whether a paused face or the game's wounds look different.
+static int animpause_on = 1, animpause_state, n_anim_paused;   // state: 0 not looked up, 1 ok, -1 not available
+static FField *pause_f;
+static UClass *pause_cls;
+static int anims_pause(Tracked *t, UObject *mesh, int pause) {   // 0 = done
+    char c[96], ty[64];
+    if (!mesh) return -1;
+    if (U_CLASS(mesh) != pause_cls) {   // looked up per mesh class (Ridden share one)
+        pause_cls = U_CLASS(mesh);
+        pause_f = ue_find_prop(pause_cls, "bPauseAnims");
+        int ok = pause_f && !strcmp(ue_name(*(FName *)FF_CLASS(pause_f), ty, sizeof ty), "BoolProperty") &&
+                 FBP_SIZE(pause_f) == 1 && FBP_MASK(pause_f);
+        if (!ok) pause_f = NULL;
+        if (animpause_state != (ok ? 1 : -1))
+            LOG("ragdoll animpause: %s.bPauseAnims %s", ue_obj_name(pause_cls, c, sizeof c),
+                ok ? "found: dead bodies' animation is paused" : "not found or not a bool bit: animation keeps running");
+        animpause_state = ok ? 1 : -1;
+    }
+    if (!pause_f) return -1;
+    uint8_t *b = (uint8_t *)mesh + FP_OFFSET(pause_f) + FBP_BYTEOFF(pause_f), m = FBP_MASK(pause_f);
+    if (pause) { if (!(*b & m)) { *b |= m; n_anim_paused++; } t->anim_paused = 1; }
+    else { *b &= (uint8_t)~m; t->anim_paused = 0; }
+    return 0;
 }
 
 // ---- dismemberment (build 27 discovery; build 32: several limbs, varied, a piece thrown for each) ----
@@ -4101,6 +4197,8 @@ static void carry_body(Tracked *t, UObject *mesh) {
 // ---- the ragdoll ----
 static int apply(Tracked *t) {
     char a[160], c[160];
+    double st[7] = {now_s()};   // build 48: when each step began (see death_timed)
+    last_dism_s = 0;
     UObject *mesh = ue_get_ptr(t->a, "Mesh"), *cap = ue_get_ptr(t->a, "CapsuleComponent");
     if (!mesh) { LOG("ragdoll: %s has no mesh", oname(t->a, a, sizeof a)); return -1; }
     int detail = detail_left > 0;
@@ -4133,6 +4231,7 @@ static int apply(Tracked *t) {
     // "forward lunge") until PlayDeathReactionComponent's ragdoll point. Stop every montage at once (no blend out)
     // and give physics the full say.
     anim_off(ai, pac);
+    if (animpause_on) anims_pause(t, mesh, 1);   // build 48
     t->prof = collision_profile(mesh);
     t->cap_coll = 3;
     if (cap && call_prep(&k, cap, "GetCollisionEnabled")) { call_go(&k); uint8_t *r = carg(&k, "ReturnValue"); if (r) t->cap_coll = *r; }
@@ -4147,6 +4246,7 @@ static int apply(Tracked *t) {
     if (!ragdoll_profile.idx) ragdoll_profile = fname_of(L"Ragdoll");
     if (call_prep(&k, mesh, "SetCollisionProfileName")) { SET(&k, "InCollisionProfileName", FName, ragdoll_profile); call_go(&k); }
     sim_on(mesh);
+    st[1] = now_s();
     float ms = mass_scale * common_weight(t, mesh);   // build 45: armored Ridden weigh a Common's 133 kg
     if (is_common_class(t->a) && is_armored(t->a)) ms *= armored_scale;   // build 47: and x1.25 of it by default
     t->mass_want = 0.f; t->mass_kg = 0.f;
@@ -4165,10 +4265,16 @@ static int apply(Tracked *t) {
     if (sim != 1) { LOG("ragdoll: %s is not simulating after the calls", oname(t->a, a, sizeof a)); caps_restore_one(t); return -1; }
     mstate_note(t);       // build 27: what the game wrote on the body (limbs it took off)
     t->hid = hidden_bodies(mesh);   // build 40: parts lost while alive stay out of the rest test
+    st[2] = now_s();
     wound_kill(t, mesh);  // build 40: the killing shot opens a wound or takes a part off where it hit, before the push
+    st[3] = now_s();
     carry_body(t, mesh);  // build 38: it keeps its running speed, before the push
+    st[4] = now_s();
     push_body(t, mesh);   // step 2: the killing hit throws the body (blast victims: /ragdoll dismember first)
+    st[5] = now_s();
     caps_restore_one(t);  // build 41: dead now, the game adds no more wounds of its own: its caps back (see cap_hit)
+    st[6] = now_s();
+    death_timed(t, st, detail);   // build 48
     return 0;
 }
 
@@ -4185,6 +4291,7 @@ static void undo(Tracked *t) {
         if (call_prep(&k, mesh, "SetAllBodiesSimulatePhysics")) { SET(&k, "bNewSimulate", uint8_t, 0); call_go(&k); }
         if (call_prep(&k, mesh, "SetCollisionProfileName")) { SET(&k, "InCollisionProfileName", FName, t->prof); call_go(&k); }
         if (t->mass_set) set_mass_scale(t, mesh, 1.f);
+        if (t->anim_paused) anims_pause(t, mesh, 0);   // build 48
         if (cap && call_prep(&k, mesh, "K2_AttachToComponent")) {
             SET(&k, "Parent", UObject *, cap);
             SET(&k, "LocationRule", uint8_t, 0); SET(&k, "RotationRule", uint8_t, 0); SET(&k, "ScaleRule", uint8_t, 0);   // KeepRelative
@@ -4222,10 +4329,10 @@ static void undo(Tracked *t) {
 static struct {
     double t0, last, frame_sum, frame_max, agent_sum, agent_max, rd_sum, rd_max, scan_sum, hook_sum;
     unsigned frames, hook_n, held_sum, held_max;
-    unsigned long long pe0;
+    unsigned long long pe0, cyc0, tsc0;   // build 48: our hook cycles and the CPU's counter at the window's start
     int deaths0;
 } pf;
-static char perf_line[600];
+static char perf_line[600], perf_parts[1400];   // build 48: the second line
 static int perf_always;   // /ragdoll perf always: a line every 10 s even with nothing dying (and with the ragdoll off)
 static double perf_now(void) { return now_s(); }
 static void perf_hook_end(double q0) { pf.hook_sum += now_s() - q0; pf.hook_n++; }
@@ -4238,6 +4345,36 @@ static int copies_now(void) {   // the game's frozen copies in the world (GetAll
     for (int k = 0; k < n_corpse_cls; k++) { int c = actors_of(corpse_cls[k], NULL, 0); if (c > 0) n += c; }
     return n;
 }
+// build 48: the second line (see "where the time goes"); fr = frames in the window
+static void perf_parts_line(double t, double fr) {
+    char *o = perf_parts;
+    size_t n = sizeof perf_parts, q = 0;
+    int used[N_PARTS] = {0};
+    q += (size_t)snprintf(o + q, n - q, "modules (avg / slowest ms):");
+    for (int r = 0; r < 6; r++) {   // the 6 most costly by average
+        int b = -1;
+        for (int i = 0; i < N_PARTS; i++) if (part[i].name && !used[i] && (b < 0 || part[i].sum > part[b].sum)) b = i;
+        if (b < 0) break;
+        used[b] = 1;
+        q += (size_t)snprintf(o + q, n - q, " %s %.3f / %.2f,", part[b].name, part[b].sum / fr * 1e3, part[b].max * 1e3);
+    }
+    for (int i = 0; i < N_PARTS && q + 64 < n; i++)   // and any other with a slow frame
+        if (part[i].name && !used[i] && part[i].max * 1e3 >= 5.0)
+            q += (size_t)snprintf(o + q, n - q, " %s %.3f / %.2f,", part[i].name, part[i].sum / fr * 1e3, part[i].max * 1e3);
+    if (q > 0 && o[q - 1] == ',') q--;
+    q += (size_t)snprintf(o + q, n - q, "; ragdoll tick:");
+    for (int i = 0; i < N_SEC && q + 64 < n; i++)
+        q += (size_t)snprintf(o + q, n - q, "%s %s %.3f / %.2f", i ? "," : "", SEC_NAME[i], sec[i].sum / fr * 1e3, sec[i].max * 1e3);
+    double secs = t - pf.t0, hz = secs > 0 ? (double)(__rdtsc() - pf.tsc0) / secs : 0;
+    if (q + 120 < n)
+        q += (size_t)snprintf(o + q, n - q, "; ProcessEvent hook, our own part: %.3f ms a frame (%.0f calls a frame)",
+                              hz > 0 ? (double)(perf_pe_cyc - pf.cyc0) / hz / fr * 1e3 : -1.0, (double)(perf_pe_n - pf.pe0) / fr);
+    if (q + 80 < n)
+        q += (size_t)snprintf(o + q, n - q, "; animation pause %s (%d bodies paused so far)",
+                              !animpause_on ? "OFF" : animpause_state < 0 ? "NOT AVAILABLE" : "on", n_anim_paused);
+    if (q + 40 < n) snprintf(o + q, n - q, "; slowest death: %s", slow.line[0] ? slow.line : "none");
+}
+
 static void perf_frame(double t, double rd_secs, unsigned held) {   // the end of our tick, every frame
     if (pf.last > 0) {
         double f = t - pf.last;
@@ -4248,7 +4385,7 @@ static void perf_frame(double t, double rd_secs, unsigned held) {   // the end o
     if (rd_secs > pf.rd_max) pf.rd_max = rd_secs;
     pf.held_sum += held;
     if (held > pf.held_max) pf.held_max = held;
-    if (pf.t0 <= 0) { pf.t0 = t; pf.pe0 = perf_pe_n; pf.deaths0 = n_deaths; return; }
+    if (pf.t0 <= 0) { pf.t0 = t; pf.pe0 = perf_pe_n; pf.deaths0 = n_deaths; pf.cyc0 = perf_pe_cyc; pf.tsc0 = __rdtsc(); return; }
     if (t - pf.t0 < PERF_WINDOW) return;
     int deaths = n_deaths - pf.deaths0;
     if (pf.frames && (perf_always || (mode_on && (deaths > 0 || pf.held_max > 0)))) {
@@ -4263,9 +4400,14 @@ static void perf_frame(double t, double rd_secs, unsigned held) {   // the end o
                  (double)(perf_pe_n - pf.pe0) / fr, (double)pf.held_sum / fr, pf.held_max, deaths, copies_now(),
                  mode_on ? "" : "; the ragdoll is OFF");
         LOG("ragdoll perf: %s", perf_line);
+        perf_parts_line(t, fr);   // build 48
+        LOG("ragdoll perf parts: %s", perf_parts);
     }
     memset(&pf, 0, sizeof pf);
-    pf.last = t; pf.t0 = t; pf.pe0 = perf_pe_n; pf.deaths0 = n_deaths;
+    memset(sec, 0, sizeof sec);
+    for (int i = 0; i < N_PARTS; i++) part[i].sum = part[i].max = 0;
+    slow.secs = 0; slow.line[0] = 0;
+    pf.last = t; pf.t0 = t; pf.pe0 = perf_pe_n; pf.deaths0 = n_deaths; pf.cyc0 = perf_pe_cyc; pf.tsc0 = __rdtsc();
 }
 
 // ---- the game's frozen copy (build 45 discovery) ----
@@ -4846,6 +4988,7 @@ static void end_body(Tracked *x, double age) {
 //   ragdoll=1                          /ragdoll on: on at every start (the tick turns it on once a world exists)
 //   ragdoll_delay, ragdoll_mass, ragdoll_gravity, ragdoll_deadline, ragdoll_push, ragdoll_shot   numbers
 //   ragdoll_armored                    build 47: armored Ridden's weight x a Common's (0.25-4)
+//   ragdoll_animpause                  build 48: 1 / 0
 //   ragdoll_kinds=SG:30000,Axe:6000    the push table's kinds that differ from the defaults, or were added
 //   ragdoll_bloodbag, ragdoll_blood, ragdoll_dismember, ragdoll_pieces   1 / 0 (on / off read too)
 //   ragdoll_limbs=2-3, ragdoll_big=75, ragdoll_head=50   as /ragdoll dismember limbs|big|head
@@ -4950,6 +5093,7 @@ static int setting(const char *k, const char *v) {
     if (!strcmp(k, "ragdoll")) start_on = onoff(v, 0);
     else if (!strcmp(k, "ragdoll_delay")) delay_s = v ? clampf((float)atof(v), 0.f, 10.f) : 0.f;
     else if (!strcmp(k, "ragdoll_mass")) mass_scale = v ? clampf((float)atof(v), 0.1f, 10.f) : 1.f;
+    else if (!strcmp(k, "ragdoll_animpause")) animpause_on = onoff(v, 1);   // build 48
     else if (!strcmp(k, "ragdoll_armored")) armored_scale = v ? clampf((float)atof(v), 0.25f, 4.f) : ARMORED_DEFAULT;
     else if (!strcmp(k, "ragdoll_gravity")) grav_scale = v ? clampf((float)atof(v), 0.f, 5.f) : GRAV_DEFAULT;
     else if (!strcmp(k, "ragdoll_deadline")) deadline_s = v ? clampf((float)atof(v), 12.f, 120.f) : DEADLINE_DEFAULT;
@@ -4995,6 +5139,7 @@ static void turn_on(float delay) {   // game thread: /ragdoll on, or ragdoll=1 a
     sti_probes = sti_miss_logs = 0;   // build 45
     vel_logs_ga = vel_logs_gc = 0;    // build 46
     mass_again_logs = 0;              // build 47
+    slow_logs = 0;                    // build 48
     if (!nm_mutsnd.idx) nm_mutsnd = fname_of(L"HandleMutilationSounds");
     if (!game_mut_stacks) InterlockedExchange(&stack_budget[ST_MUTIL], 3);
     if (shot_state < 0) shot_state = 0;   // look OnCorpseHit up again
@@ -5036,9 +5181,14 @@ static void tick_inner(float dt) {
     scan_step(0);
     double t = now_s();
     pf.scan_sum += t - qs;   // build 45
+    sec_add(SEC_SCAN, t - qs);   // build 48: the sections below too
     standin_tick(t);         // build 45
+    double q1 = now_s();
+    sec_add(SEC_COPIES, q1 - t);
     blast_tally_tick(t);
     paint_tick(t);
+    double q2 = now_s(), deaths_s = 0;
+    sec_add(SEC_BLASTS, q2 - q1);
     for (int i = 0; i < ntr; i++) {
         Tracked *x = &tr[i];
         if (!ue_object_usable(x->a, x->ai) || !ue_object_usable(x->ls, x->lsi)) {
@@ -5073,10 +5223,18 @@ static void tick_inner(float dt) {
         if (t - x->died_at < delay_s) continue;
         x->done = 1;
         if (is_boss(x->a) || special_death(x)) continue;
+        double d0 = now_s();
         if (apply(x) == 0) n_applied++; else n_failed++;
+        deaths_s += now_s() - d0;
     }
+    double q3 = now_s();
+    sec_add(SEC_DEATHS, deaths_s);
+    sec_add(SEC_BODIES, q3 - q2 - deaths_s);
     shot_tick(t);   // build 35: after the deaths of this tick are ragdolled
+    double q4 = now_s();
+    sec_add(SEC_SHOTS, q4 - q3);
     wound_tick();   // build 40: hits on living Ridden (host)
+    sec_add(SEC_WOUNDS, now_s() - q4);
 }
 
 void ragdoll_tick(float dt) {   // build 45: timed (see "performance")
@@ -5096,14 +5254,14 @@ void ragdoll_slash(char *rest, Out *o) {
         out_printf(o, "/ragdoll: %s%s, %d Ridden tracked, %d deaths seen, %d ragdolled, %d left to the game (pop/explode), %d failed, %d came back; "
                       "settle hold %s: %d held, %d at rest + %d at the %.0f s cap (avg %.1f s, max %.1f s after death), "
                       "%d deleted while held; corpse budget %s: %d spared (%d again); deadline %.0f s: %d removed "
-                      "(%d never got the game's settle check); mass x%.2f, armored x%.2f (%d lost scales set again), gravity x%.2f%s; push x%.2f: %d pushed (%d explosions), "
+                      "(%d never got the game's settle check); animation pause %s (%d paused); mass x%.2f, armored x%.2f (%d lost scales set again), gravity x%.2f%s; push x%.2f: %d pushed (%d explosions), "
                       "%d without a hit, %d failed; blood bags %s: %d spared, blood %s: %d painted; %ld stacks logged%s%s\n",
                    mode_on ? "on" : "off", mode_on && delay_s > 0 ? " (after the game's animation)" : "", ntr, n_deaths,
                    n_applied, n_left, n_failed, n_revived,
                    settle_state == 1 ? "on" : settle_state ? "OFF (see log)" : "not armed yet", n_held, n_at_rest, n_capped,
                    SETTLE_CAP, released ? settle_sum / released : 0.0, settle_max, n_held_gone,
                    corpse_state == 1 ? "hook on" : corpse_state ? "hook OFF (see log)" : "not armed yet", n_spared,
-                   n_spared_again, deadline_s, n_ended, n_ended_unchecked, mass_scale, armored_scale, n_mass_lost, grav_scale, n_grav_fail ? " (NO EFFECT: see log)" : "",
+                   n_spared_again, deadline_s, n_ended, n_ended_unchecked, animpause_on ? (animpause_state < 0 ? "NOT AVAILABLE" : "on") : "off", n_anim_paused, mass_scale, armored_scale, n_mass_lost, grav_scale, n_grav_fail ? " (NO EFFECT: see log)" : "",
                    push_scale, n_pushed, n_push_radial, n_push_nohit, n_push_fail,
                    bloodbag_on ? "on" : bag_state < 0 ? "off but NOT AVAILABLE (see log)" : bag_state ? "off" : "off (not armed yet)",
                    n_bags_spared, blood_on ? (paint_state < 0 ? "NOT AVAILABLE" : "on") : "off", n_painted, stack_id,
@@ -5366,11 +5524,22 @@ void ragdoll_slash(char *rest, Out *o) {
                       "none <K,K> (none = empty); so far %d parts off, %d wounds opened\n", wounds_on ? "on" : "off", wound_kinds,
                    wound_small, wound_heads, wound_none, LIVING_NAME[wound_living], wound_blast ? "on" : "off",
                    wound_game ? "on" : cap_state < 0 ? "off but NOT AVAILABLE (see log)" : "off", n_wound_off, n_wound_rupt + n_blast_rupt);
+    } else if (!strcmp(verb, "animpause")) {   // build 48
+        if (arg && (!strcmp(arg, "on") || !strcmp(arg, "off"))) {
+            animpause_on = !strcmp(arg, "on");
+            save_i("ragdoll_animpause", animpause_on, 1);
+            LOG("ragdoll animpause: %s", animpause_on ? "on" : "off");
+        } else if (arg) { out_printf(o, "usage: /ragdoll animpause [on|off]\n"); return; }
+        out_printf(o, "/ragdoll animpause: %s (default on): the animation of bodies that die from now on is %s; %d bodies "
+                      "paused so far%s\n", animpause_on ? "on" : "off", animpause_on ? "paused (the physics sets the pose)" :
+                   "left running (as before build 48)", n_anim_paused,
+                   animpause_state < 0 ? "; NOT AVAILABLE in this game (see log)" : "");
     } else if (!strcmp(verb, "perf")) {   // build 45
         if (arg && !strcmp(arg, "always")) perf_always = 1;
         else if (arg && !strcmp(arg, "auto")) perf_always = 0;
         else if (arg) { out_printf(o, "usage: /ragdoll perf [always|auto]\n"); return; }
-        out_printf(o, "/ragdoll perf (%s; \"ragdoll perf\" lines in the log): %s\n",
+        out_printf(o, "/ragdoll perf (%s; \"ragdoll perf\" lines in the log, and \"ragdoll perf parts\" with each module, "
+                      "the ragdoll's steps and the slowest death): %s\n",
                    perf_always ? "a line every 10 s, also with the ragdoll off: /ragdoll perf auto stops it" :
                                  "a line every 10 s while bodies die; /ragdoll perf always: every 10 s, ragdoll on or off",
                    perf_line[0] ? perf_line : "no 10 s window with deaths yet");
@@ -5402,12 +5571,12 @@ int ragdoll_init(void) {
     kinds[0] = 0;
     for (int i = 0; i < n_push_tab && m + 40 < sizeof kinds; i++)
         m += (size_t)snprintf(kinds + m, sizeof kinds - m, "%s%s %.0f", i ? ", " : "", push_tab[i].key, push_tab[i].n);
-    LOG("ragdoll: experimental module loaded (fork build), %s; from b4bcoop.ini and the defaults: delay %.2f, mass x%.2f, "
+    LOG("ragdoll: experimental module loaded (fork build), %s; from b4bcoop.ini and the defaults: delay %.2f, animation pause %s, mass x%.2f, "
         "armored x%.2f, gravity x%.2f, deadline %.0f s, push x%.2f, shots on bodies x%.2f, blood bags %s, blood %s, dismember %s (%d-%d "
         "limbs, big %d%%, head %d%%, pieces %s), carry x%.2f keep %.2f s, wounds %s (%s; small %s; heads only %s; none %s; living %s; "
         "blasts %s; the game's own %s); kinds: %s",
         start_on ? "on at the first world (ragdoll=1)" : "off until /ragdoll on",
-        delay_s, mass_scale, armored_scale, grav_scale, deadline_s, push_scale, shot_scale, bloodbag_on ? "on" : "off", blood_on ? "on" : "off",
+        delay_s, animpause_on ? "on" : "off", mass_scale, armored_scale, grav_scale, deadline_s, push_scale, shot_scale, bloodbag_on ? "on" : "off", blood_on ? "on" : "off",
         dism_on ? "on" : "off", dism_min, dism_max, dism_big, dism_head, dism_pieces ? "on" : "off", carry_scale, carry_keep,
         wounds_on ? "on" : "off", wound_kinds, wound_small, wound_heads, wound_none, LIVING_NAME[wound_living], wound_blast ? "on" : "off",
         wound_game ? "on" : "off", kinds);

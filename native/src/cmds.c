@@ -807,44 +807,50 @@ static void tune_net_defaults(void) {
     }
 }
 
+// fork, build 48: each module's own time too (ragdoll.c's "ragdoll perf parts" line), to find where the agent tick's
+// time goes besides the ragdoll. Two QueryPerformanceCounter calls per module, ~30 a frame.
+#define PART(i, name, call) do { LARGE_INTEGER pa_; QueryPerformanceCounter(&pa_); call; \
+                                 LARGE_INTEGER pb_; QueryPerformanceCounter(&pb_); \
+                                 ragdoll_perf_part(i, name, (double)(pb_.QuadPart - pa_.QuadPart) / (double)qf.QuadPart); } while (0)
 void cmds_tick(float dt) {
     static int tuned;
     LARGE_INTEGER q0, q1, qf;   // fork, build 45: the whole agent tick, for ragdoll.c's performance line
+    QueryPerformanceFrequency(&qf);
     QueryPerformanceCounter(&q0);
     game_tid = GetCurrentThreadId();
     if (!tuned) { tuned = 1; tune_net_defaults(); }
-    pending_tick();
-    travel_tick(dt);
-    auto_tick(dt);
-    flashlight_tick(dt);
-    signin_tick(dt);
-    teamsize_tick(dt);
-    hud_tick(dt);
-    slotguard_tick(dt);
-    chat_tick(dt);
-    admin_tick(dt);
-    handoff_tick(dt);
-    presence_tick(dt);
-    steamnet_tick(dt);
-    joinpolicy_tick(dt);
-    rewardguard_tick(dt);
-    cheats_tick(dt);
-    thirdperson_tick(dt);
-    bots_tick(dt);
-    models_tick(dt);
-    poststats_tick(dt);
-    updater_tick(dt);
-    shop_tick(dt);
-    supplylines_tick(dt);
-    ragdoll_tick(dt);
-    barks_tick(dt);
-    fov_tick(dt);   // fork, build 44
-    overlay_tick(dt);
-    cmds_ini_poll(dt);
+    PART(0, "pending", pending_tick());
+    PART(1, "travel", travel_tick(dt));
+    PART(2, "auto", auto_tick(dt));
+    PART(3, "flashlight", flashlight_tick(dt));
+    PART(4, "signin", signin_tick(dt));
+    PART(5, "teamsize", teamsize_tick(dt));
+    PART(6, "hud", hud_tick(dt));
+    PART(7, "slotguard", slotguard_tick(dt));
+    PART(8, "chat", chat_tick(dt));
+    PART(9, "admin", admin_tick(dt));
+    PART(10, "handoff", handoff_tick(dt));
+    PART(11, "presence", presence_tick(dt));
+    PART(12, "steamnet", steamnet_tick(dt));
+    PART(13, "joinpolicy", joinpolicy_tick(dt));
+    PART(14, "rewardguard", rewardguard_tick(dt));
+    PART(15, "cheats", cheats_tick(dt));
+    PART(16, "thirdperson", thirdperson_tick(dt));
+    PART(17, "bots", bots_tick(dt));
+    PART(18, "models", models_tick(dt));
+    PART(19, "poststats", poststats_tick(dt));
+    PART(20, "updater", updater_tick(dt));
+    PART(21, "shop", shop_tick(dt));
+    PART(22, "supplylines", supplylines_tick(dt));
+    PART(23, "ragdoll", ragdoll_tick(dt));
+    PART(24, "barks", barks_tick(dt));
+    PART(25, "fov", fov_tick(dt));
+    PART(26, "overlay", overlay_tick(dt));
+    PART(27, "ini poll", cmds_ini_poll(dt));
     QueryPerformanceCounter(&q1);
-    QueryPerformanceFrequency(&qf);
     ragdoll_perf_agent((double)(q1.QuadPart - q0.QuadPart) / (double)qf.QuadPart);
 }
+#undef PART
 
 #ifndef B4B_RELEASE
 void cmds_run(char *line, Out *o) {

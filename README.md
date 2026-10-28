@@ -74,7 +74,8 @@ into online play.
 | `/ragdoll carry keep <s>` | how long a run's speed survives a stagger before the kill (default 1 s) |
 | `/ragdoll wounds on\|off\|living off\|arms\|all\|blast on\|off\|kinds\|small\|heads\|none <K,K>` | wounds by weapon and hit location (`none`: kinds that take nothing, default the bow) |
 | `/ragdoll wounds game on\|off` | the game's own wounds on Commons: `off` (default; host) stops its open wounds from those weapons and every wound from the bow |
-| `/ragdoll perf [always\|auto]` | the last 10 s performance line (frame time, the mod's own time, bodies simulating); `always` logs it every 10 s, ragdoll on or off |
+| `/ragdoll animpause on\|off` | pause a ragdolled body's animation, which the physics overrides anyway (default on; `off` to compare) |
+| `/ragdoll perf [always\|auto]` | the last 10 s performance line (frame time, the mod's own time, bodies simulating); `always` logs it every 10 s, ragdoll on or off. A second line, `ragdoll perf parts`, splits the time by module, by ragdoll step and for the slowest death |
 | `/dialogue barks on\|off\|mute <Name,Name>\|log` | survivors' barks muted (default on: `Headshot,Kill_Bat,Shoot_Explosive,Bash,PickUp_Copper,Trigger_Bleed,Horde_Finish`); `log` names the next 40 lines heard |
 | `/fov <60-160>\|off` | first-person field of view, wider than the game's slider (your own view; saved) |
 | `/give <name\|code\|#n> [tier] [player]`, `/give list [all] [filter]` | a weapon (or any item) into a hero's inventory, its best tier unless one is named (host, cheats on) |
