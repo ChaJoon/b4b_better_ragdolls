@@ -671,13 +671,14 @@ static const struct { const char *name; int perm; const char *usage; } CMDS[] = 
     {"restart", CMD_HOST, "/restart"}, {"ready", CMD_HOST, "/ready [vote]"}, {"bots", CMD_HOST, "/bots on|off|default"},
     {"say", CMD_HOST, "/say <message>"}, {"map", CMD_HOST, "/map [<path> [easy|normal|hard|veryhard|plain] [?option=value]|back|rows [<path>]|row <from> <to>|row undo]"}, {"ragdoll", CMD_ANYONE, "/ragdoll [on [delay]|off|mass [x]|gravity [x]|deadline [s]|push [x|on|off|<kind> <n> [blast]]|shot [x|on|off]|carry [x|on|off|keep <s>]|wounds [on|off|kinds <K,K>|small <K,K>|heads <K,K>|none <K,K>|living off|arms|all|blast on|off|game on|off]|bloodbag [on|off]|blood [on|off]|dismember [on|off|limbs <min> [max]|big <0-100>|head <0-100|on|off>|pieces on|off]|probe|trace [secs]]"}, {"handoff", CMD_ANYONE, "/handoff [<name|#>]"},   // host part checked in handoff.c
     {"dialogue", CMD_ANYONE, "/dialogue barks [on|off|mute <Name,Name>|log]"},   // fork: barks.c
+    {"fov", CMD_ANYONE, "/fov [<60-160>|off]"},                                  // fork: fov.c (build 44)
     {"model", CMD_ANYONE, "/model list|<name>|reset"}, {"models", CMD_ANYONE, "/models [on|off]"},   // host parts checked in models.c
     {"addons", CMD_ANYONE, "/addons [on|off|info <#>|policy]"}, {"addon", CMD_ANYONE, "/addons [on|off|info <#>|policy]"},
 };
 #define N_CMDS ((int)(sizeof CMDS / sizeof CMDS[0]))
 
 static void help(Out *o) {
-    out_printf(o, "b4bcoop %s (protocol %d)\n/join steam:<id64>  /host  /leave\n/players  /ping  /flashlight [on|off|auto]\n/ragdoll on|off|probe|trace  (experimental)\n/dialogue barks on|off  (survivor barks)\n"
+    out_printf(o, "b4bcoop %s (protocol %d)\n/join steam:<id64>  /host  /leave\n/players  /ping  /flashlight [on|off|auto]\n/ragdoll on|off|probe|trace  (experimental)\n/dialogue barks on|off  (survivor barks)\n/fov <60-160>|off  (first-person field of view)\n"
                   "/thirdperson  (your own camera)\n/model list|<name>|reset\n/addons [on|off|info <#>|players]\n",
                coop_version(), coop_protocol());
     if (is_client()) { out_printf(o, "(/kick /ban /lock ... are for the host)\n/cheats  (when the host has cheats on: your own save)\n"); return; }
@@ -731,6 +732,7 @@ void admin_slash(char *line, Out *o) {
     else if (!strcmp(verb, "ragdoll")) ragdoll_slash(rest, o);
     else if (!strcmp(verb, "map")) maptest_slash(rest, o);
     else if (!strcmp(verb, "dialogue")) barks_slash(rest, o);
+    else if (!strcmp(verb, "fov")) fov_slash(rest, o);   // fork, build 44
     else if (!strcmp(verb, "join")) {
         if (!rest || !*rest) { out_printf(o, "usage: %s\n", CMDS[i].usage); return; }
         out_printf(o, "joining %s ...\n", rest);

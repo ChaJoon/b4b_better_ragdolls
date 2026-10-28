@@ -145,6 +145,7 @@ static DWORD WINAPI init_thread(LPVOID _) {
     online_init();
     ragdoll_init();
     barks_init();
+    fov_init();
 #ifndef B4B_RELEASE
     CreateThread(NULL, 0, server_thread, NULL, 0, NULL);
 #endif

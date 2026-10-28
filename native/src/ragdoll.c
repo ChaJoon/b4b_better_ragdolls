@@ -1080,6 +1080,7 @@ static void log_props(const char *who, const char *what, UObject *o) {
 static FName nm_mutsnd;   // build 41: HandleMutilationSounds (the game's own mutilations, discovery)
 static void game_mut_note(UObject *o, UFunction *fn, const uint8_t *params);
 static void pe_detour(UObject *o, UFunction *fn, void *params) {
+    if (fov_pe_match(o, fn)) { orig_pe(o, fn, params); fov_pe_apply(params); return; }   // build 44: fov.c's camera modifier
     if (fn == explode_fn && explode_fn && params && mode_on && blast_loc_f) {   // game thread
         Blast *b = &blasts[blast_at++ % 8];
         memset(b, 0, sizeof *b);
@@ -1094,12 +1095,13 @@ static void pe_detour(UObject *o, UFunction *fn, void *params) {
     orig_pe(o, fn, params);
 }
 
-// The ProcessEvent hook is on while a trace runs or while the ragdoll is on (one pointer compare per call).
+// The ProcessEvent hook is on while a trace runs, while the ragdoll is on (one pointer compare per call), or (build 44)
+// while fov.c's first-person FOV has its camera modifier in.
 static int pe_enabled;
 static int pe_update(void) {
-    juice_resolve();
-    shot_resolve();
-    int want = tracing || (mode_on && (explode_fn || corpse_hit_fn || wound_hook_wanted()));   // blast centres, shots, living hits
+    if (mode_on || tracing) { juice_resolve(); shot_resolve(); }   // build 44: not for fov.c alone
+    int want = tracing || (mode_on && (explode_fn || corpse_hit_fn || wound_hook_wanted())) ||   // blast centres, shots, living hits
+               fov_pe_wanted();                                                                  // build 44: the FOV
     if (want && !hook_made) {
         InitializeCriticalSection(&tcs);
         if (MH_CreateHook((void *)ADDR_PROCESSEVENT, (void *)pe_detour, (void **)&orig_pe) != MH_OK) {
@@ -1117,6 +1119,8 @@ static int pe_update(void) {
     }
     return 0;
 }
+
+void ragdoll_pe_refresh(void) { pe_update(); }   // build 44: fov.c (game thread)
 
 static void trace_on_death(UObject *actor) {   // game thread, from the tick that saw it die
     char ab[128], cb[128], fb[128];

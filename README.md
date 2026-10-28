@@ -26,6 +26,8 @@ bodies thrown by shots and blasts, and dismemberment. Everything else is b4b-coo
 - **Survivor barks muted** (on by default, each player's own setting): no "She shoots, she scores!" after headshots,
   melee kills, shoves, shooting explosive items, picking up copper and Tala's bleed quips ("Keep bleeding!").
   `/dialogue barks off` brings them back.
+- **`/fov <60-160>`**: a wider first-person field of view than the game's slider allows (it stops at 120); aiming still
+  zooms in by the game's own share. Your own view only, saved; also a slider in the `~` Camera tab.
 - **`/give <weapon> [tier]`** (host, after `/cheats on`): a weapon into a hero's inventory, for testing; `/give list`
   numbers every weapon with its tiers.
 - Reeker and Exploder pops, and the gameplay of explosions, are left as the game does them.
@@ -69,6 +71,7 @@ into online play.
 | `/ragdoll wounds on\|off\|living off\|arms\|all\|blast on\|off\|kinds\|small\|heads\|none <K,K>` | wounds by weapon and hit location (`none`: kinds that take nothing, default the bow) |
 | `/ragdoll wounds game on\|off` | the game's own wounds on Commons: `off` (default; host) stops its open wounds from those weapons and every wound from the bow |
 | `/dialogue barks on\|off\|mute <Name,Name>\|log` | survivors' barks muted (default on: `Headshot,Kill_Bat,Shoot_Explosive,Bash,PickUp_Copper,Trigger_Bleed`); `log` names the next 40 lines heard |
+| `/fov <60-160>\|off` | first-person field of view, wider than the game's slider (your own view; saved) |
 | `/give <name\|code\|#n> [tier] [player]`, `/give list [all] [filter]` | a weapon (or any item) into a hero's inventory, its best tier unless one is named (host, cheats on) |
 
 ## Building

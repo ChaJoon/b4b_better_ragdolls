@@ -333,7 +333,7 @@ static int ini_apply_live(const char *key, const char *val) {
     return thirdperson_live(key, val) || flashlight_live(key, val) || joinpolicy_live(key, val) ||
            presence_live(key, val) || teamsize_live(key, val) || overlay_live(key, val) || addons_live(key, val) ||
            updater_live(key, val) || shop_live(key, val) || online_live(key, val) || bots_live(key, val) ||
-           handoff_live(key, val) || ragdoll_live(key, val) || barks_live(key, val);
+           handoff_live(key, val) || ragdoll_live(key, val) || barks_live(key, val) || fov_live(key, val);
 }
 const char *cmds_ini_value(const char *key) {
     const IniKV *e = ini_last.n >= 0 ? ini_find(&ini_last, key) : NULL;
@@ -836,6 +836,7 @@ void cmds_tick(float dt) {
     supplylines_tick(dt);
     ragdoll_tick(dt);
     barks_tick(dt);
+    fov_tick(dt);   // fork, build 44
     overlay_tick(dt);
     cmds_ini_poll(dt);
 }
