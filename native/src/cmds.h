@@ -124,6 +124,7 @@ void chat_tick(float dt);
 int ragdoll_init(void);
 void ragdoll_tick(float dt);
 void ragdoll_slash(char *rest, Out *o);
+void ragdoll_perf_agent(double secs);                   // fork, build 45: cmds_tick's own time (performance line)
 // maptest.c (fork, custom-map tests): /map, host only: the current map, or a server travel to a map path
 void maptest_slash(char *rest, Out *o);
 // barks.c (fork, build 41): survivor barks muted on this machine (/dialogue barks, anyone; ini barks_mute*)

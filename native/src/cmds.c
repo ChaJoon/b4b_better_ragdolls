@@ -809,6 +809,8 @@ static void tune_net_defaults(void) {
 
 void cmds_tick(float dt) {
     static int tuned;
+    LARGE_INTEGER q0, q1, qf;   // fork, build 45: the whole agent tick, for ragdoll.c's performance line
+    QueryPerformanceCounter(&q0);
     game_tid = GetCurrentThreadId();
     if (!tuned) { tuned = 1; tune_net_defaults(); }
     pending_tick();
@@ -839,6 +841,9 @@ void cmds_tick(float dt) {
     fov_tick(dt);   // fork, build 44
     overlay_tick(dt);
     cmds_ini_poll(dt);
+    QueryPerformanceCounter(&q1);
+    QueryPerformanceFrequency(&qf);
+    ragdoll_perf_agent((double)(q1.QuadPart - q0.QuadPart) / (double)qf.QuadPart);
 }
 
 #ifndef B4B_RELEASE
