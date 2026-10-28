@@ -129,6 +129,16 @@ int barks_init(void);
 void barks_tick(float dt);
 void barks_slash(char *rest, Out *o);
 int barks_filter(UObject *comp, const void *params);   // dialogue.c's play hook: 1 = don't play this line
+void ragdoll_pe_refresh(void);                          // the ProcessEvent hook on/off as wanted (fov.c)
+// fov.c (fork, build 44): a wider first-person field of view (/fov, anyone; ini fov; ~ Camera tab)
+int fov_init(void);
+void fov_tick(float dt);
+void fov_slash(char *rest, Out *o);
+int fov_live(const char *key, const char *val);
+void fov_panel(void);                                   // rows in thirdperson.c's Camera tab
+int fov_pe_match(UObject *o, UFunction *fn);           // ragdoll.c's ProcessEvent hook: our modifier's call
+void fov_pe_apply(void *params);                        // ... after it ran
+int fov_pe_wanted(void);
 int chat_cmd(const char *verb, char *rest, Out *o);
 void chat_local(const char *fmt, ...);  // local-only chat line(s)
 #define CHAT_NOTICE_TYPE L"b4bcoop"      // ClientTeamMessage Type of host notices (shown by chat.c on the receiver)

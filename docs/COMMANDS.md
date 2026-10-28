@@ -92,6 +92,7 @@ and changing someone else's look stay chat commands (`/model`, below).
 | `/flashlight` | Turns your flashlight on or off | `/flashlight`, `/flashlight on` |
 | `/thirdperson` | Over-the-shoulder camera for your own hero | `/thirdperson`, `/thirdperson off`, `/thirdperson distance 150` |
 | `/dialogue barks [on\|off]` | (Fork build.) Survivors' barks muted on your machine, on by default: the lines after headshots, melee kills, shoves and melee hits (`Bash`), shooting explosive items, picking up copper and Tala's bleed quips (`Trigger_Bleed`: "Keep bleeding!") (sound and subtitle). Only survivors' lines (yours, teammates', bots'); enemies and NPCs are never muted. `mute <Name,Name>` sets which barks (default `Headshot,Kill_Bat,Shoot_Explosive,Bash,PickUp_Copper,Trigger_Bleed`; also e.g. `Exert_Big`, the grunt before many shoves, or `Got_Item`, other pickups); `log` writes the next 40 lines heard into the log with their names | `/dialogue barks off`, `/dialogue barks mute Headshot,Kill_Bat` |
+| `/fov [<n>\|off]` | (Fork build.) First-person field of view wider than the game's slider (which stops at 120): `60`-`160`, horizontal like the slider; `off` = the game's slider again. Your own view only, saved (`fov` in `b4bcoop.ini`); also in the `~` Camera tab. Aiming zooms in by the game's own share (aiming at 70 with the slider at 120 shows 82 at `/fov 140`). Third person keeps `/thirdperson fov`; cutscenes and spectating are left alone. No value: status | `/fov 140`, `/fov off` |
 | `/join steam:<id>` | Joins a friend by their Steam ID | `/join steam:7656119XXXXXXXXXX` |
 | `/leave` | Leaves the host's game, back to your own Fort Hope | `/leave` |
 | `/host` | Starts hosting your Fort Hope (only needed with `host=0`) | `/host` |
@@ -643,6 +644,7 @@ Rules:
 | `thirdperson` | `0` | `0`, `1` | `1`: start in third person (`/thirdperson`) |
 | `barks_mute` | `1` (fork build) | `0`, `1` | `0`: survivor barks are played again (`/dialogue barks`) |
 | `barks_mute_list` | `Headshot,Kill_Bat,Shoot_Explosive,Bash,PickUp_Copper,Trigger_Bleed` (fork build) | bark names, comma-separated | Which survivors' barks are muted (`/dialogue barks mute`) |
+| `fov` | none (the game's) | `60`-`160`, `0` = the game's | First-person field of view, fork build (`/fov`) |
 | `thirdperson_key` | `N` | a letter, a digit, a key code, or `off` | The third-person toggle key |
 | `bot_heal_key` | `H` | a letter, a digit, a key code, or `off` | Ask the bots to heal you (see **Ask the bots to heal you** under Commands for everyone) |
 | `thirdperson_distance` | `180` | `50`-`600` | Third-person camera distance (`/thirdperson distance`) |

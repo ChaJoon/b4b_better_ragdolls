@@ -58,6 +58,7 @@ command has a control (checklist below); the chat commands stay.
 | `/players`, `/ping` (anyone) | Players: live table (ping, Steam ID on the host), Ping, List in the log |
 | `/flashlight [on\|off\|toggle\|auto\|status]` (anyone; auto host) | Flashlight: status line, Toggle/On/Off, Automatic (greyed on a client) |
 | `/thirdperson [on\|off\|status\|distance\|side\|height\|fov\|reset]` (anyone) | Camera: checkbox, sliders (Ctrl+click = number), Swap shoulder, Reset camera, aim correction |
+| `/fov [<n>\|off]` (anyone; fork build) | Camera: "First-person field of view" slider (0 = the game's) |
 | `/kick`, `/ban` (host) | Players: Kick / Ban (confirm) per row |
 | `/unban`, `/bans` (host) | Players: ban list with Unban per row, Unban all (confirm) |
 | `/lock`, `/unlock` (host) | Players: Locked checkbox |

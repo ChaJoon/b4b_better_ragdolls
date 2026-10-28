@@ -878,6 +878,7 @@ static void tp_panel(void) {
     int fix = aim_fix;
     if (ov_checkbox("Aim correction##aimfix", &fix)) ov_setting("thirdperson_aimfix", fix ? "1" : "0", 1);
     ov_tooltip("Turns your hero's aim onto the crosshair point, so shots land under it with a side/height offset.");
+    fov_panel();   // fork (build 44): first-person field of view
     ov_heading("Free look");
     int fl = fl_on;
     if (ov_checkbox("Look around your hero while standing still##freelook", &fl)) ov_setting("thirdperson_freelook", fl ? "1" : "0", 1);
