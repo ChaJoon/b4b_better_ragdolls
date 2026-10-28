@@ -189,6 +189,7 @@ typedef struct {
     uint8_t limbp;                         // build 31: limb probe: 1 at the dismember, 2 also at +0.5 s
     uint8_t painted;                       // build 33: the blood paint was looked at for it (spared blood bags)
     float push_dv;                         // build 29: cm/s the blast push gave every body (0 = no blast push)
+    float gun_dv;                          // build 46: cm/s a bullet/melee push gave the whole body (impulse / its kg)
     float mass;                            // build 35: the whole body's kg for the shot shoves (0 = not read yet)
     uint16_t shots;                        // build 35: shoves from shots after death
     uint8_t relcount;                      // build 35: settle-hold releases (a shot can hold a body again)
@@ -261,26 +262,54 @@ static void cap_living(Tracked *x);                                   // build 4
 static void wound_hook(UObject *o, UFunction *fn, void *params);
 static int wound_hook_wanted(void);
 
-static void scan_step(void) {
+static int actors_of(UClass *c, UObject **out, int max);
+static void track_new(UObject *o, int32_t i) {   // a living Ridden not tracked yet (either scan)
+    if (!o || (U_FLAGS(o) & LIVE_FLAGS) || !is_ridden_fast(o) || !ue_object_usable(o, i) || tracked_has(o)) return;
+    if (!is_ridden(o)) return;
+    UObject *ls = call_obj(o, "GetLifeStateComponent");
+    if (!ls || call_bool(ls, "IsAlive") != 1) return;   // only bodies we see die
+    if (ntr == MAX_TRACKED) { n_overflow++; return; }
+    memset(&tr[ntr], 0, sizeof tr[ntr]);
+    tr[ntr].a = o; tr[ntr].ai = i; tr[ntr].ls = ls; tr[ntr].lsi = U_INDEX(ls);
+    tr[ntr].mov = ue_get_ptr(o, "CharacterMovement");   // build 38: its running speed is read every tick
+    tr[ntr].movi = tr[ntr].mov ? U_INDEX(tr[ntr].mov) : -1;
+    ntr++;
+    dmg_learn(o);   // build 40: its class's OnDamage event (living hits)
+    cap_living(&tr[ntr - 1]);   // build 42: before its first hit
+}
+// Build 45's performance line: this scan took 1.03-1.09 ms of every frame in Joon's horde (28 Oct, 95% of our tick,
+// 20-25% of a 4.4-5.7 ms frame while the GPU sat at 72-77%: the game thread was the limit). It walked SCAN_STEP
+// (32768) objects of the whole object array each tick, two class-chain checks each. Build 46: every SCAN_EVERY s
+// the world's GobiCharacters alone (GetAllActorsOfClass, which the engine answers from its per-class object lists),
+// the same checks on those; the object-array walk only if that call isn't available (logged once). A Ridden that
+// spawns and dies within SCAN_EVERY can be missed (it dies the game's way), as one killed before the old full pass
+// reached it could.
+#define SCAN_EVERY 0.1
+static int scan_way;   // 0 not decided, 1 actors of class, -1 the object array (fallback)
+static void scan_objects(void) {
     int32_t n = ue_num_objects();
     if (scan_at >= n) scan_at = 0;
     int32_t end = scan_at + SCAN_STEP < n ? scan_at + SCAN_STEP : n;
-    for (int32_t i = scan_at; i < end; i++) {
-        UObject *o = ue_object_at(i);
-        if (!o || (U_FLAGS(o) & LIVE_FLAGS) || !is_ridden_fast(o) || !ue_object_usable(o, i) || tracked_has(o)) continue;
-        if (!is_ridden(o)) continue;
-        UObject *ls = call_obj(o, "GetLifeStateComponent");
-        if (!ls || call_bool(ls, "IsAlive") != 1) continue;   // only bodies we see die
-        if (ntr == MAX_TRACKED) { n_overflow++; continue; }
-        memset(&tr[ntr], 0, sizeof tr[ntr]);
-        tr[ntr].a = o; tr[ntr].ai = i; tr[ntr].ls = ls; tr[ntr].lsi = U_INDEX(ls);
-        tr[ntr].mov = ue_get_ptr(o, "CharacterMovement");   // build 38: its running speed is read every tick
-        tr[ntr].movi = tr[ntr].mov ? U_INDEX(tr[ntr].mov) : -1;
-        ntr++;
-        dmg_learn(o);   // build 40: its class's OnDamage event (living hits)
-        cap_living(&tr[ntr - 1]);   // build 42: before its first hit
-    }
+    for (int32_t i = scan_at; i < end; i++) track_new(ue_object_at(i), i);
     scan_at = end;
+}
+static void scan_step(int force) {
+    static double next;
+    double t = now_s();
+    if (!force && t < next) return;
+    next = t + SCAN_EVERY;
+    UClass *gc = scan_way >= 0 ? cls("GobiCharacter") : NULL;
+    static UObject *list[1024];
+    int n = gc ? actors_of(gc, list, 1024) : -1;
+    if (n < 0) {
+        if (!scan_way || scan_way == 1) LOG("ragdoll: no GetAllActorsOfClass for GobiCharacter: back to walking the object array");
+        scan_way = -1;
+        if (force) { for (int k = 0; k < 64; k++) scan_objects(); return; }
+        for (double u = 0; u < SCAN_EVERY; u += 1.0 / 60) scan_objects();   // about 60 ticks' worth, every SCAN_EVERY
+        return;
+    }
+    if (!scan_way) { scan_way = 1; LOG("ragdoll: living Ridden found every %.1f s among the world's GobiCharacters (%d now)", SCAN_EVERY, n); }
+    for (int k = 0; k < n && k < 1024; k++) if (list[k]) track_new(list[k], U_INDEX(list[k]));
 }
 
 // ---- trace (ProcessEvent hook, only while /ragdoll trace runs) ----
@@ -1555,6 +1584,22 @@ static float common_weight(Tracked *t, UObject *mesh) {   // the mass scale that
     if (n_pa_kg < 16) { pa_kg[n_pa_kg].pa = bl->pa; pa_kg[n_pa_kg].kg = r == 1.f ? 0.f : kg; n_pa_kg++; }
     LOG("ragdoll tune: %s (physics asset %s, %d bodies) weighs %.1f kg%s, x%.2f", cname(t->a, a, sizeof a),
         oname(bl->pa, b, sizeof b), bl->n, kg, r == 1.f ? ": a Common's weight already" : ": weighed as a Common (133 kg)", r);
+    // build 46: each body's kg (armored Ridden still flew at 133 kg, Joon 28 Oct: a light hit body, e.g. the head that
+    // most gun kills hit, whips the rest; this shows whether the armored asset spreads its weight differently)
+    Call k;
+    if (call_prep(&k, mesh, "GetBoneMass")) {
+        FName *bn = carg(&k, "BoneName");
+        float *rv = carg(&k, "ReturnValue");
+        SET(&k, "bScaleMass", uint8_t, 1);
+        char line[1400], nb[48];
+        size_t q = 0;
+        line[0] = 0;
+        for (int i = 0; bn && rv && i < bl->n && q + 64 < sizeof line; i++) {
+            *bn = bl->bone[i]; *rv = 0; call_go(&k);
+            q += (size_t)snprintf(line + q, sizeof line - q, "%s%s %.1f", i ? ", " : "", ue_name(bl->bone[i], nb, sizeof nb), *rv);
+        }
+        LOG("ragdoll tune: %s bodies (kg, before the scale): %s", oname(bl->pa, b, sizeof b), line);
+    }
     return r;
 }
 
@@ -2055,6 +2100,7 @@ static void push_body(Tracked *t, UObject *mesh) {
     SET(&k, "BoneName", FName, bone);
     call_go(&k);
     n_pushed++;
+    t->gun_dv = mass > 0 ? strength / mass : 0.f;   // build 46: the speed probe compares what the body does with this
     if (log_it) {
         push_logs++;
         LOG("ragdoll push: %s killed by %s (%s %.0f x%.2f) from %s (%s, %s, %.0f cm away): hit %s, pushed on %s, direction "
@@ -3775,13 +3821,16 @@ static void paint_tick(double now) {
 // Build 38: also bodies that died running (momentum carry), 16 of them per /ragdoll carry change, against the speed
 // they were given: whether the engine keeps it, or adds the body's own (animated) speed on top (double speed).
 #define VEL_LOGS 16
-static int vel_logs_d, vel_logs_c, vel_logs_r;
-static const double VEL_T[] = {0.1, 0.4};
+static int vel_logs_d, vel_logs_c, vel_logs_r, vel_logs_ga, vel_logs_gc;   // build 46: gun kills, armored / other Commons
+static const double VEL_T[] = {0.1, 0.4, 1.0};   // build 46: + 1.0 s (how far a body keeps going)
 static void vel_probe_tick(Tracked *x, double now) {
     for (int i = 0; i < (int)(sizeof VEL_T / sizeof VEL_T[0]); i++) {
         if ((x->velp & (1u << i)) || now - x->died_at < VEL_T[i]) continue;
         x->velp |= 1u << i;
-        int *n = x->push_dv > 0.f ? (x->dism ? &vel_logs_d : &vel_logs_c) : &vel_logs_r;
+        char cn[96];
+        int armored = strstr(cname(x->a, cn, sizeof cn), "Armored") != NULL;
+        int *n = x->push_dv > 0.f ? (x->dism ? &vel_logs_d : &vel_logs_c) :
+                 x->gun_dv > 0.f ? (armored ? &vel_logs_ga : &vel_logs_gc) : &vel_logs_r;
         if (!i) { if (*n >= VEL_LOGS) { x->velp = 0x80; return; } (*n)++; }
         if (i == (int)(sizeof VEL_T / sizeof VEL_T[0]) - 1) x->velp |= 0x80;   // the last one: done with this body
         Call k;
@@ -3806,11 +3855,14 @@ static void vel_probe_tick(Tracked *x, double now) {
         int32_t so = pac ? ue_prop_offset(pac, "StrengthMultiplyer") : -1;
         char a[160], pm[24];
         if (so >= 0) snprintf(pm, sizeof pm, "%.2f", *(float *)((char *)pac + so)); else snprintf(pm, sizeof pm, "?");
+        char gk[64] = "";
+        if (x->gun_dv > 0.f) snprintf(gk, sizeof gk, ", %s push %.0f cm/s for the whole body", x->kind, x->gun_dv);
         LOG("ragdoll velocity: %s (%s) +%.1fs: bodies move %.0f cm/s on average (%.0f up, %.0f along the ground), fastest "
             "%.0f; push %.0f cm/s, running speed carried %.0f cm/s%s; simulating %d, montage %d, physical animation x%s",
-            oname(x->a, a, sizeof a), x->push_dv > 0.f ? (x->dism ? "dismembered" : "not dismembered") : "died running",
+            oname(x->a, a, sizeof a), x->push_dv > 0.f ? (x->dism ? "dismembered" : "not dismembered") :
+            x->gun_dv > 0.f ? (armored ? "gun kill, armored" : "gun kill") : "died running",
             VEL_T[i], sqrtf(sum[0] * sum[0] + sum[1] * sum[1] + sum[2] * sum[2]), sum[2], sqrtf(sum[0] * sum[0] + sum[1] * sum[1]),
-            top, x->push_dv, x->carry, "",
+            top, x->push_dv, x->carry, gk,
             call_bool(x->mesh, "IsSimulatingPhysics"), ai ? call_bool(ai, "IsAnyMontagePlaying") : -1, pm);
     }
 }
@@ -4099,7 +4151,7 @@ static void undo(Tracked *t) {
     t->ragdolled = 0; t->done = 0; t->died_at = 0; t->rest = 0; t->released = 0; t->checks = 0; t->spared = 0; t->ended = 0;
     t->dism = 0; t->hid = 0; t->blast_ok = 0; t->painted = 0;
     t->mass = 0; t->shots = 0; t->relcount = 0; t->swapped = 0;
-    t->carry = 0; t->kind[0] = 0; t->run_t = 0; t->mem_t = 0; t->velp = 0; t->push_dv = 0;
+    t->carry = 0; t->kind[0] = 0; t->run_t = 0; t->mem_t = 0; t->velp = 0; t->push_dv = 0; t->gun_dv = 0;
 }
 
 // ---- performance (build 45) ----
@@ -4883,6 +4935,7 @@ static void turn_on(float delay) {   // game thread: /ragdoll on, or ragdoll=1 a
     wound_logs = wound_nomap_logs = 0;   // build 40
     cap_logs = ctl_logs = game_mut_logs = pick_logs = 0;   // build 41, 42
     sti_probes = sti_miss_logs = 0;   // build 45
+    vel_logs_ga = vel_logs_gc = 0;    // build 46
     if (!nm_mutsnd.idx) nm_mutsnd = fname_of(L"HandleMutilationSounds");
     if (!game_mut_stacks) InterlockedExchange(&stack_budget[ST_MUTIL], 3);
     if (shot_state < 0) shot_state = 0;   // look OnCorpseHit up again
@@ -4921,7 +4974,7 @@ static void tick_inner(float dt) {
     if (!world_check()) { for (int i = 0; i < 6; i++) if (watches[i].actor) watch_end(&watches[i]); return; }
     watch_tick();
     double qs = now_s();
-    scan_step();
+    scan_step(0);
     double t = now_s();
     pf.scan_sum += t - qs;   // build 45
     standin_tick(t);         // build 45
@@ -4944,7 +4997,7 @@ static void tick_inner(float dt) {
             continue;
         }
         if (x->done) {
-            if (x->ragdolled && (x->push_dv > 0.f || x->carry > 0.f) && !(x->velp & 0x80) && !x->ended) vel_probe_tick(x, t);
+            if (x->ragdolled && (x->push_dv > 0.f || x->carry > 0.f || x->gun_dv > 0.f) && !(x->velp & 0x80) && !x->ended) vel_probe_tick(x, t);
             if (x->ragdolled && x->limbp == 1 && !x->ended) limb_probe_tick(x, t);
             if (x->ragdolled && !x->ended && t - x->died_at >= deadline_s) { end_body(x, t - x->died_at); continue; }
             if (x->ragdolled && !x->released && x->mesh && grav_scale != 1.f && !n_grav_fail) extra_gravity(x);
@@ -5253,7 +5306,7 @@ void ragdoll_slash(char *rest, Out *o) {
                    perf_line[0] ? perf_line : "no 10 s window with deaths yet");
     } else if (!strcmp(verb, "probe")) {
         world_check();
-        if (!mode_on && !tracing) for (int k = 0; k < 64; k++) scan_step();   // not scanning in the background: a full pass now
+        if (!mode_on && !tracing) scan_step(1);   // not scanning in the background: a full pass now
         cmd_probe(o);
     } else if (!strcmp(verb, "trace")) {
         double s = arg ? atof(arg) : 30;
